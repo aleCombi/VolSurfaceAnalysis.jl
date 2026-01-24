@@ -1,6 +1,8 @@
 using VolSurfaceAnalysis
+using VolSurfaceAnalysis: Call, Put
 using Test
+using Dates
 
 @testset "VolSurfaceAnalysis.jl" begin
-    # Write your tests here.
+    include("test_black76.jl")
 end
