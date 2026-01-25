@@ -1,0 +1,53 @@
+==================================================================================
+DAILY OTM STRANGLE BACKTEST (multi-day)
+Sell OTM put + OTM call, hold to next-day 08:00 settlement
+Underlying: BTC | Entry time: 12:00:00 UTC
+Target strikes: Put @ 97.0% | Call @ 103.0% of spot
+Data source: C:\repos\DeribitVols\data\local_db\history
+==================================================================================
+Dates: 2026-01-18 -> 2026-01-24 (requested 7)
+
+----------------------------------------------------------------------------------
+PER-DAY RESULTS
+----------------------------------------------------------------------------------
+2026-01-19 | entry 12:00 spot=93551 | settle 2026-01-20 08:00 spot=91470
+  STRIKES: Put K=91000 (2.7% OTM) | Call K=96000 (2.6% OTM)
+  PUT : entry=0.001300 (121.62 USD) | exit=0.000000 (0.00 USD)
+  CALL: entry=0.000200 (18.71 USD) | exit=0.000000 (0.00 USD)
+  TOTAL: prem=140.33 USD | payoff=0.00 USD | pnl=+140.33 USD
+
+2026-01-20 | entry 12:00 spot=91501 | settle 2026-01-21 08:00 spot=89504
+  STRIKES: Put K=89000 (2.7% OTM) | Call K=94000 (2.7% OTM)
+  PUT : entry=0.001800 (164.70 USD) | exit=0.000000 (0.00 USD)
+  CALL: entry=0.000200 (18.30 USD) | exit=0.000000 (0.00 USD)
+  TOTAL: prem=183.00 USD | payoff=0.00 USD | pnl=+183.00 USD
+
+2026-01-21 | entry 12:00 spot=89096 | settle 2026-01-22 08:00 spot=90097
+  STRIKES: Put K=86000 (3.5% OTM) | Call K=92000 (3.3% OTM)
+  PUT : entry=0.001700 (151.46 USD) | exit=0.000000 (0.00 USD)
+  CALL: entry=0.000200 (17.82 USD) | exit=0.000000 (0.00 USD)
+  TOTAL: prem=169.28 USD | payoff=0.00 USD | pnl=+169.28 USD
+
+2026-01-22 | entry 12:37 spot=91723 | settle 2026-01-23 08:00 spot=91192
+  STRIKES: Put K=89000 (3.0% OTM) | Call K=94000 (2.5% OTM)
+  PUT : entry=0.003000 (275.17 USD) | exit=0.000000 (0.00 USD)
+  CALL: entry=0.000100 (9.17 USD) | exit=0.000000 (0.00 USD)
+  TOTAL: prem=284.34 USD | payoff=0.00 USD | pnl=+284.34 USD
+
+2026-01-23 | entry 12:00 spot=89207 | settle 2026-01-24 08:00 spot=89604
+  STRIKES: Put K=87000 (2.5% OTM) | Call K=92000 (3.1% OTM)
+  PUT : entry=0.001100 (98.13 USD) | exit=0.000000 (0.00 USD)
+  CALL: entry=0.000200 (17.84 USD) | exit=0.000000 (0.00 USD)
+  TOTAL: prem=115.97 USD | payoff=0.00 USD | pnl=+115.97 USD
+
+
+==================================================================================
+SUMMARY
+==================================================================================
+Days: 5 | Total P&L: +892.92 USD | Avg/day: +178.58 USD
+Win rate: 100.0% | Best: +284.34 USD | Worst: +115.97 USD
+
+Strategy: Short strangle profits when spot stays between put and call strikes.
+          Loss occurs only if spot breaches a strike by more than premium collected.
+
+Generated: 2026-01-25T23:01:00.638

@@ -1,0 +1,57 @@
+==========================================================================================
+DAILY IRON CONDOR BACKTEST (multi-day)
+Sell inner strangle + buy outer wings for capped risk
+Underlying: BTC | Entry time: 12:00:00 UTC
+Short strikes: Put @ 97.0% | Call @ 103.0% of spot
+Long strikes:  Put @ 90.0% | Call @ 110.0% of spot (wings)
+Data source: C:\repos\DeribitVols\data\local_db\history
+==========================================================================================
+Dates: 2026-01-18 -> 2026-01-24 (requested 7)
+
+------------------------------------------------------------------------------------------
+PER-DAY RESULTS
+------------------------------------------------------------------------------------------
+2026-01-19 | entry 12:00 spot=93551 | settle 2026-01-20 08:00 spot=91470
+  STRIKES: Long P=88000 (5.9%) | Short P=91000 (2.7%) | [SPOT] | Short C=96000 (2.6%) | Long C=102000 (9.0%)
+  ENTRY: Sold=140.33 USD | Bought=37.42 USD | Net credit=102.91 USD | Max loss=5897.09 USD
+  SETTLE: All legs expired worthless (max profit)
+  P&L: +102.91 USD | ROC: +1.75% (P&L / max loss)
+
+2026-01-20 | entry 12:00 spot=91501 | settle 2026-01-21 08:00 spot=89504
+  STRIKES: Long P=88000 (3.8%) | Short P=89000 (2.7%) | [SPOT] | Short C=94000 (2.7%) | Long C=100000 (9.3%)
+  ENTRY: Sold=183.00 USD | Bought=100.65 USD | Net credit=82.35 USD | Max loss=5917.65 USD
+  SETTLE: All legs expired worthless (max profit)
+  P&L: +82.35 USD | ROC: +1.39% (P&L / max loss)
+
+2026-01-21 | entry 12:00 spot=89096 | settle 2026-01-22 08:00 spot=90097
+  STRIKES: Long P=84000 (5.7%) | Short P=86000 (3.5%) | [SPOT] | Short C=92000 (3.3%) | Long C=98000 (10.0%)
+  ENTRY: Sold=169.28 USD | Bought=71.28 USD | Net credit=98.01 USD | Max loss=5901.99 USD
+  SETTLE: All legs expired worthless (max profit)
+  P&L: +98.01 USD | ROC: +1.66% (P&L / max loss)
+
+2026-01-22 | entry 12:37 spot=91723 | settle 2026-01-23 08:00 spot=91192
+  STRIKES: Long P=82000 (10.6%) | Short P=89000 (3.0%) | [SPOT] | Short C=94000 (2.5%) | Long C=101000 (10.1%)
+  ENTRY: Sold=284.34 USD | Bought=18.34 USD | Net credit=266.00 USD | Max loss=6734.00 USD
+  SETTLE: All legs expired worthless (max profit)
+  P&L: +266.00 USD | ROC: +3.95% (P&L / max loss)
+
+2026-01-23 | entry 12:00 spot=89207 | settle 2026-01-24 08:00 spot=89604
+  STRIKES: Long P=80000 (10.3%) | Short P=87000 (2.5%) | [SPOT] | Short C=92000 (3.1%) | Long C=98000 (9.9%)
+  ENTRY: Sold=115.97 USD | Bought=17.84 USD | Net credit=98.13 USD | Max loss=6901.87 USD
+  SETTLE: All legs expired worthless (max profit)
+  P&L: +98.13 USD | ROC: +1.42% (P&L / max loss)
+
+
+==========================================================================================
+SUMMARY
+==========================================================================================
+Days: 5 | Total P&L: +647.39 USD | Avg/day: +129.48 USD
+Win rate: 100.0% | Best: +266.00 USD | Worst: +82.35 USD
+Avg max loss (capital at risk): 6270.52 USD | Total ROC: +2.06%
+
+Iron Condor structure:
+  Long Put (wing) < Short Put < [SPOT] < Short Call < Long Call (wing)
+  Max profit = net premium (if spot stays between short strikes)
+  Max loss = spread width - premium (if spot breaches beyond long strikes)
+
+Generated: 2026-01-25T23:11:07.349
