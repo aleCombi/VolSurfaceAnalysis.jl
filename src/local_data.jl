@@ -136,7 +136,12 @@ function load_all(store::LocalDataStore;
     all_records = VolRecord[]
     
     for file in files
-        records = load_file(file)
+        records = try
+            load_file(file)
+        catch e
+            @warn "Skipping unreadable parquet file" file exception=e
+            continue
+        end
         
         # Filter by underlying if specified
         if underlying !== nothing
@@ -175,7 +180,13 @@ function load_date(store::LocalDataStore, date::Date;
     if !isempty(matching_files)
         # Load from date-specific files
         for file in matching_files
-            append!(records, load_file(file))
+            file_records = try
+                load_file(file)
+            catch e
+                @warn "Skipping unreadable parquet file" file exception=e
+                continue
+            end
+            append!(records, file_records)
         end
     else
         # Fall back to loading all and filtering

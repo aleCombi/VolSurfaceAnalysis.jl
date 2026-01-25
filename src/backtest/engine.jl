@@ -260,21 +260,12 @@ function run_backtest(strategy::Strategy,
     
     verbose && println("Backtest: $(length(iter)) snapshots from $start_date to $end_date")
     
-    # Track expiries we've processed
-    processed_expiries = Set{Date}()
-    
     # Main loop
     for (i, surface) in enumerate(iter)
-        current_date = Date(surface.timestamp)
-        
-        # Check for expired positions
-        expiring_positions = positions_expiring(portfolio, current_date)
-        if !isempty(expiring_positions) && !(current_date in processed_expiries)
-            # Auto-settle expired positions at spot (simplified)
-            for pos in expiring_positions
-                close_position!(portfolio, pos, surface)
-            end
-            push!(processed_expiries, current_date)
+        # Auto-settle any positions that have reached expiry (at or before this snapshot)
+        expired_positions = filter(p -> p.trade.expiry <= surface.timestamp, portfolio.positions)
+        for pos in expired_positions
+            close_position!(portfolio, pos, surface)
         end
         
         # Get strategy signals

@@ -11,6 +11,7 @@ Represents an open option position.
 # Fields
 - `trade::Trade`: The underlying trade details
 - `entry_price::Float64`: Price paid (fraction of underlying)
+- `entry_spot::Float64`: Spot price at entry (USD)
 - `entry_timestamp::DateTime`: When position was opened
 - `entry_vol::Float64`: Implied volatility at entry (decimal)
 - `id::Int`: Unique position identifier
@@ -18,6 +19,7 @@ Represents an open option position.
 struct Position
     trade::Trade
     entry_price::Float64
+    entry_spot::Float64
     entry_timestamp::DateTime
     entry_vol::Float64
     id::Int
@@ -138,7 +140,7 @@ function add_position!(portfolio::Portfolio, trade::Trade,
     entry_price = vol_to_price(σ, surface.spot, trade.strike, T, trade.option_type)
     
     # Create position
-    pos = Position(trade, entry_price, surface.timestamp, σ, portfolio.next_id)
+    pos = Position(trade, entry_price, surface.spot, surface.timestamp, σ, portfolio.next_id)
     portfolio.next_id += 1
     
     # Update cash (buy = pay, sell = receive)
@@ -180,18 +182,17 @@ function close_position!(portfolio::Portfolio, position::Position,
 
     exit_price = if T <= 0.0 || ismissing(σ)
         # Option expired or no IV - use intrinsic
-        intrinsic_value(trade, surface.spot) / surface.spot
+        intrinsic_payoff(trade, surface.spot) / surface.spot
     else
         vol_to_price(σ, surface.spot, trade.strike, T, trade.option_type)
     end
     
-    # Calculate P&L (long: gained if price went up, short: gained if price went down)
-    price_diff = exit_price - position.entry_price
-    pnl = price_diff * trade.direction * trade.quantity * surface.spot
-    
+    exit_value = exit_price * trade.direction * trade.quantity * surface.spot
+    entry_value = position.entry_price * trade.direction * trade.quantity * position.entry_spot
+    pnl = exit_value - entry_value
+
     # Update cash (closing reverses direction)
-    proceeds = exit_price * trade.direction * trade.quantity * surface.spot
-    portfolio.cash += proceeds
+    portfolio.cash += exit_value
     
     # Update realized P&L
     portfolio.realized_pnl += pnl
@@ -228,10 +229,20 @@ end
 Calculate intrinsic value of an option at given spot.
 """
 function intrinsic_value(trade::Trade, spot::Float64)::Float64
+    # Backwards-compatible helper: signed payoff (USD) for the whole position.
+    return intrinsic_payoff(trade, spot) * trade.direction * trade.quantity
+end
+
+"""
+    intrinsic_payoff(trade, spot) -> Float64
+
+Intrinsic payoff (USD) per contract, independent of direction and quantity.
+"""
+function intrinsic_payoff(trade::Trade, spot::Float64)::Float64
     if trade.option_type == Call
-        return max(spot - trade.strike, 0.0) * trade.direction * trade.quantity
+        return max(spot - trade.strike, 0.0)
     else
-        return max(trade.strike - spot, 0.0) * trade.direction * trade.quantity
+        return max(trade.strike - spot, 0.0)
     end
 end
 
@@ -250,7 +261,7 @@ function position_value(position::Position, surface::VolatilitySurface)::Float64
     T = time_to_expiry(trade.expiry, surface.timestamp)
     
     if T <= 0.0 || ismissing(σ)
-        return intrinsic_value(trade, surface.spot)
+        return intrinsic_payoff(trade, surface.spot) * trade.direction * trade.quantity
     end
     
     price = vol_to_price(σ, surface.spot, trade.strike, T, trade.option_type)
@@ -264,8 +275,8 @@ Calculate unrealized P&L for a position.
 """
 function position_pnl(position::Position, surface::VolatilitySurface)::Float64
     current_value = position_value(position, surface)
-    entry_value = position.entry_price * position.trade.direction * 
-                  position.trade.quantity * surface.spot
+    entry_value = position.entry_price * position.trade.direction *
+                  position.trade.quantity * position.entry_spot
     return current_value - entry_value
 end
 
