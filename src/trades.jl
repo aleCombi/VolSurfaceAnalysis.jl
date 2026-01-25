@@ -42,7 +42,7 @@ end
 
 """
     find_vol(surface::VolatilitySurface, strike::Float64, expiry::DateTime;
-             tol::Float64=1e-9) -> Union{Float64, Missing}
+             side::Symbol=:mark, tol::Float64=1e-9) -> Union{Float64, Missing}
 
 Find the implied volatility for a given strike and expiry on the surface.
 
@@ -53,10 +53,15 @@ The match is performed in (log_moneyness, τ) coordinates.
 - `surface`: The volatility surface to search
 - `strike`: Strike price
 - `expiry`: Expiration datetime
+- `side`: Which vol to return - `:mark` (default), `:bid`, or `:ask`
 - `tol`: Tolerance for floating-point comparison (default: 1e-9)
+
+# Notes
+For realistic backtesting, use `:ask` when buying and `:bid` when selling.
+If bid/ask is missing, falls back to mark vol.
 """
 function find_vol(surface::VolatilitySurface, strike::Float64, expiry::DateTime;
-                  tol::Float64=1e-9)::Union{Float64,Missing}
+                  side::Symbol=:mark, tol::Float64=1e-9)::Union{Float64,Missing}
     # Convert to surface coordinates
     log_m = log(strike / surface.spot)
     τ = time_to_expiry(expiry, surface.timestamp)
@@ -64,7 +69,13 @@ function find_vol(surface::VolatilitySurface, strike::Float64, expiry::DateTime;
     # Search for matching point
     for p in surface.points
         if abs(p.log_moneyness - log_m) < tol && abs(p.τ - τ) < tol
-            return p.vol
+            if side == :bid
+                return coalesce(p.bid_vol, p.vol)
+            elseif side == :ask
+                return coalesce(p.ask_vol, p.vol)
+            else
+                return p.vol
+            end
         end
     end
 

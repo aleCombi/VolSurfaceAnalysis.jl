@@ -100,6 +100,100 @@ function vol_to_price(σ::Float64, F::Float64, K::Float64, T::Float64,
 end
 
 """
+    black76_delta(F, K, T, σ, option_type; r=0.0) -> Float64
+
+Calculate the Black-76 delta (derivative of price w.r.t. forward/spot).
+
+# Returns
+- Delta: ∂Price/∂F (ranges from 0 to 1 for calls, -1 to 0 for puts)
+"""
+function black76_delta(F::Float64, K::Float64, T::Float64, σ::Float64,
+                       option_type::OptionType; r::Float64=0.0)::Float64
+    if T <= 0.0
+        # At expiry: delta is 1 (ITM) or 0 (OTM)
+        cp = call_put_sign(option_type)
+        return cp * (F - K) > 0 ? Float64(cp) : 0.0
+    end
+    
+    if σ <= 0.0
+        cp = call_put_sign(option_type)
+        return cp * (F - K) > 0 ? Float64(cp) : 0.0
+    end
+    
+    sqrtT = sqrt(T)
+    d1 = (log(F / K) + 0.5 * σ^2 * T) / (σ * sqrtT)
+    
+    D = exp(-r * T)
+    N = Normal()
+    
+    if option_type == Call
+        return D * cdf(N, d1)
+    else
+        return D * (cdf(N, d1) - 1.0)
+    end
+end
+
+"""
+    black76_gamma(F, K, T, σ, option_type; r=0.0) -> Float64
+
+Calculate the Black-76 gamma (second derivative of price w.r.t. forward/spot).
+Gamma is the same for calls and puts.
+
+# Returns
+- Gamma: ∂²Price/∂F²
+"""
+function black76_gamma(F::Float64, K::Float64, T::Float64, σ::Float64,
+                       option_type::OptionType; r::Float64=0.0)::Float64
+    if T <= 0.0 || σ <= 0.0
+        return 0.0
+    end
+    
+    sqrtT = sqrt(T)
+    d1 = (log(F / K) + 0.5 * σ^2 * T) / (σ * sqrtT)
+    
+    D = exp(-r * T)
+    N = Normal()
+    
+    # Gamma = D * φ(d1) / (F * σ * √T)
+    return D * pdf(N, d1) / (F * σ * sqrtT)
+end
+
+"""
+    black76_theta(F, K, T, σ, option_type; r=0.0) -> Float64
+
+Calculate the Black-76 theta (derivative of price w.r.t. time).
+Returns the daily theta (price change per day).
+
+# Returns
+- Theta: ∂Price/∂t per day (typically negative for long options)
+"""
+function black76_theta(F::Float64, K::Float64, T::Float64, σ::Float64,
+                       option_type::OptionType; r::Float64=0.0)::Float64
+    if T <= 0.0 || σ <= 0.0
+        return 0.0
+    end
+    
+    cp = call_put_sign(option_type)
+    sqrtT = sqrt(T)
+    d1 = (log(F / K) + 0.5 * σ^2 * T) / (σ * sqrtT)
+    d2 = d1 - σ * sqrtT
+    
+    D = exp(-r * T)
+    N = Normal()
+    
+    # Theta components:
+    # 1. Time decay from vega: -F * φ(d1) * σ / (2 * √T)
+    # 2. Discounting effect: r * D * [F * N(cp*d1) - K * N(cp*d2)] (for r > 0)
+    
+    time_decay = -D * F * pdf(N, d1) * σ / (2 * sqrtT)
+    discount_effect = r * D * cp * (F * cdf(N, cp * d1) - K * cdf(N, cp * d2))
+    
+    # Annual theta - convert to daily
+    annual_theta = time_decay + discount_effect
+    return annual_theta / DAYS_PER_YEAR
+end
+
+"""
     black76_vega(F, K, T, σ, option_type; r=0.0) -> Float64
 
 Calculate the Black-76 vega (derivative of price w.r.t. volatility).
