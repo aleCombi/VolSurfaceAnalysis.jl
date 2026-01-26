@@ -45,6 +45,14 @@ function build_schedule(dates::Vector{Date};
     return collect(start_dt:entry_interval:end_dt)
 end
 
+function write_results(lines::Vector{String}, path::String)
+    open(path, "w") do io
+        for line in lines
+            println(io, line)
+        end
+    end
+end
+
 function main()
     arg_path = length(ARGS) >= 1 ? ARGS[1] : nothing
     n_days = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 7
@@ -124,23 +132,25 @@ function main()
         end
     end
 
-    println("DAILY IRON CONDOR (minimal)")
-    println("Underlying: $underlying | Entry time: $(DEFAULT_ENTRY_TIME)")
-    println("Short: Put $(short_put_pct*100)% | Call $(short_call_pct*100)%")
-    println("Long : Put $(long_put_pct*100)% | Call $(long_call_pct*100)%")
-    println("Expiry interval: $(DEFAULT_EXPIRY_INTERVAL)")
-    println("Entries: $(length(schedule)) | Positions: $(length(positions)) | Condors: $(length(condor_keys))")
-    println("PnL: total=$(round(total_pnl, digits=2)) | avg/condor=$(round(avg_pnl, digits=2))")
-    missing_n > 0 && println("Missing settlements: $missing_n")
+    lines = String[]
+
+    push!(lines, "DAILY IRON CONDOR (minimal)")
+    push!(lines, "Underlying: $underlying | Entry time: $(DEFAULT_ENTRY_TIME)")
+    push!(lines, "Short: Put $(short_put_pct*100)% | Call $(short_call_pct*100)%")
+    push!(lines, "Long : Put $(long_put_pct*100)% | Call $(long_call_pct*100)%")
+    push!(lines, "Expiry interval: $(DEFAULT_EXPIRY_INTERVAL)")
+    push!(lines, "Entries: $(length(schedule)) | Positions: $(length(positions)) | Condors: $(length(condor_keys))")
+    push!(lines, "PnL: total=$(round(total_pnl, digits=2)) | avg/condor=$(round(avg_pnl, digits=2))")
+    missing_n > 0 && push!(lines, "Missing settlements: $missing_n")
     if worst_idx !== nothing
         wp = positions[worst_idx]
         side = wp.trade.direction > 0 ? "Long" : "Short"
         opt = wp.trade.option_type == Call ? "C" : "P"
-        println("Worst position pnl=$(round(worst_pnl, digits=2)) | $(side) $(opt) K=$(round(wp.trade.strike, digits=2)) expiry=$(wp.trade.expiry) entry_ts=$(wp.entry_timestamp)")
+        push!(lines, "Worst position pnl=$(round(worst_pnl, digits=2)) | $(side) $(opt) K=$(round(wp.trade.strike, digits=2)) expiry=$(wp.trade.expiry) entry_ts=$(wp.entry_timestamp)")
     end
 
-    println("")
-    println("PER-CONDOR P&L")
+    push!(lines, "")
+    push!(lines, "PER-CONDOR P&L")
     for (i, key) in enumerate(condor_keys)
         entry_ts, expiry = key
         idxs = grouped[key]
@@ -150,8 +160,8 @@ function main()
         pnl_i = condor_pnls[i]
         strikes = sort(positions[idxs], by=p -> p.trade.strike)
         strikes_str = join((string(round(p.trade.strike, digits=2)) for p in strikes), " | ")
-        println("entry=$(entry_ts) expiry=$(expiry) entry_spot=$(round(entry_spot, digits=2)) settle_spot=$(settle_spot) pnl=$(pnl_i)")
-        println("  strikes: $(strikes_str)")
+        push!(lines, "entry=$(entry_ts) expiry=$(expiry) entry_spot=$(round(entry_spot, digits=2)) settle_spot=$(settle_spot) pnl=$(pnl_i)")
+        push!(lines, "  strikes: $(strikes_str)")
 
         if settle_spot === missing
             continue
@@ -166,7 +176,7 @@ function main()
         put_width = strikes[2].trade.strike - strikes[1].trade.strike
         call_width = strikes[4].trade.strike - strikes[3].trade.strike
         max_loss = max(put_width, call_width) * qty + net_entry
-        println("  net_entry=$(round(net_entry, digits=2)) net_payoff=$(round(net_payoff, digits=2)) pnl=$(round(net_pnl, digits=2)) max_loss=$(round(max_loss, digits=2))")
+        push!(lines, "  net_entry=$(round(net_entry, digits=2)) net_payoff=$(round(net_payoff, digits=2)) pnl=$(round(net_pnl, digits=2)) max_loss=$(round(max_loss, digits=2))")
 
         for (p, ec, pf) in zip(strikes, entry_costs, payoffs)
             side = p.trade.direction > 0 ? "Long" : "Short"
@@ -175,14 +185,20 @@ function main()
             entry_frac = p.entry_price
             rec = find_record(surface_at(iter, entry_ts), p.trade.strike, p.trade.expiry, p.trade.option_type)
             if rec === missing
-                println("    $(side) $(opt) K=$(round(p.trade.strike, digits=2)) entry_px=$(round(entry_px, digits=6)) entry_frac=$(round(entry_frac, digits=8)) entry_cost=$(round(ec, digits=6)) payoff=$(round(pf, digits=6)) rec=missing")
+                push!(lines, "    $(side) $(opt) K=$(round(p.trade.strike, digits=2)) entry_px=$(round(entry_px, digits=6)) entry_frac=$(round(entry_frac, digits=8)) entry_cost=$(round(ec, digits=6)) payoff=$(round(pf, digits=6)) rec=missing")
             else
                 bid = rec.bid_price
                 ask = rec.ask_price
                 mark = rec.mark_price
-                println("    $(side) $(opt) K=$(round(p.trade.strike, digits=2)) entry_px=$(round(entry_px, digits=6)) entry_frac=$(round(entry_frac, digits=8)) entry_cost=$(round(ec, digits=6)) payoff=$(round(pf, digits=6)) bid=$(bid) ask=$(ask) mark=$(mark)")
+                push!(lines, "    $(side) $(opt) K=$(round(p.trade.strike, digits=2)) entry_px=$(round(entry_px, digits=6)) entry_frac=$(round(entry_frac, digits=8)) entry_cost=$(round(ec, digits=6)) payoff=$(round(pf, digits=6)) bid=$(bid) ask=$(ask) mark=$(mark)")
             end
         end
+    end
+
+    output_file = joinpath(@__DIR__, "iron_condor_backtest_results.txt")
+    write_results(lines, output_file)
+    for line in lines
+        println(line)
     end
 end
 
