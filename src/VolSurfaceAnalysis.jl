@@ -18,6 +18,7 @@ include("local_data.jl")           # Local data store
 include("backtest/iterator.jl")    # Surface iterator for backtesting
 include("backtest/portfolio.jl")   # Position management (pure)
 include("backtest/engine.jl")      # Minimal backtest engine
+include("strategies.jl")           # Strategy implementations
 
 # Data types
 export VolRecord, OptionType, Underlying
@@ -56,5 +57,8 @@ export Position, open_position, entry_cost, settle
 export Strategy, ScheduledStrategy
 export next_portfolio, entry_schedule, entry_positions
 export BacktestResult, backtest_strategy
+
+# Strategies
+export IronCondorStrategy
 
 end # module

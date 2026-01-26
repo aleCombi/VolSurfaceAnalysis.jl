@@ -55,6 +55,24 @@ function open_position(trade::Trade, surface::VolatilitySurface)::Position
     return Position(trade, entry_price, surface.spot, surface.timestamp)
 end
 
+"""
+    _open_positions(trades, surface) -> Vector{Position}
+
+Create positions for a vector of trades. Returns an empty vector if any trade
+cannot be opened (missing IV or expired).
+"""
+function _open_positions(trades::Vector{Trade}, surface::VolatilitySurface)::Vector{Position}
+    positions = Position[]
+    for t in trades
+        try
+            push!(positions, open_position(t, surface))
+        catch
+            return Position[]
+        end
+    end
+    return positions
+end
+
 # ============================================================================
 # Settlement
 # ============================================================================
