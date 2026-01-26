@@ -31,12 +31,14 @@ A volatility surface at a single point in time.
 - `timestamp::DateTime`: observation timestamp
 - `underlying::Underlying`: the underlying asset
 - `points::Vector{VolPoint}`: the vol surface points
+- `records::Vector{VolRecord}`: raw records for this timestamp
 """
 struct VolatilitySurface
     spot::Float64
     timestamp::DateTime
     underlying::Underlying
     points::Vector{VolPoint}
+    records::Vector{VolRecord}
 end
 
 """
@@ -192,6 +194,7 @@ end
     build_surface(records::Vector{VolRecord}) -> VolatilitySurface
 
 Build a VolatilitySurface from a vector of VolRecords (assumed to be from a single timestamp).
+Stores the raw records on the surface for exact bid/ask lookup.
 
 For each (strike, expiry) pair, chooses the ITM option. At ATM, uses highest volume as tiebreaker.
 Records with missing mark_iv are skipped.
@@ -255,7 +258,32 @@ function build_surface(records::Vector{VolRecord})::VolatilitySurface
     # Sort by τ, then by log_moneyness
     sort!(points, by=p -> (p.τ, p.log_moneyness))
 
-    return VolatilitySurface(spot, timestamp, underlying, points)
+    return VolatilitySurface(spot, timestamp, underlying, points, records)
+end
+
+# ============================================================================
+# Raw Record Lookup
+# ============================================================================
+
+"""
+    find_record(surface::VolatilitySurface, strike::Float64, expiry::DateTime, option_type::OptionType)
+        -> Union{VolRecord, Missing}
+
+Find the raw VolRecord for an exact strike/expiry/option_type at this surface.
+Returns `missing` if no matching record exists.
+"""
+function find_record(
+    surface::VolatilitySurface,
+    strike::Float64,
+    expiry::DateTime,
+    option_type::OptionType
+)::Union{VolRecord, Missing}
+    for rec in surface.records
+        if rec.strike == strike && rec.expiry == expiry && rec.option_type == option_type
+            return rec
+        end
+    end
+    return missing
 end
 
 # ============================================================================

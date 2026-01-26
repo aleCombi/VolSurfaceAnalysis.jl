@@ -30,6 +30,7 @@ end
     open_position(trade, surface) -> Position
 
 Create a position by pricing a trade against a surface. Pure function, no side effects.
+Uses raw bid/ask prices from the surface records (no volatility-based fallback).
 
 # Arguments
 - `trade::Trade`: Trade to open
@@ -39,34 +40,41 @@ Create a position by pricing a trade against a surface. Pure function, no side e
 - A new Position
 
 # Throws
-- Error if IV not found on surface or option expired
+- Error if record or bid/ask price is missing
 """
 function open_position(trade::Trade, surface::VolatilitySurface)::Position
-    # Buy (direction=+1) uses ask, Sell (direction=-1) uses bid
-    side = trade.direction > 0 ? :ask : :bid
-    σ = find_vol(surface, trade.strike, trade.expiry; side=side)
-    ismissing(σ) && error("IV not found for $(trade.strike)/$(trade.expiry)")
+    trade.underlying != surface.underlying && error("Underlying mismatch for trade")
 
-    T = time_to_expiry(trade.expiry, surface.timestamp)
-    T <= 0.0 && error("Cannot open position on expired option")
+    rec = find_record(surface, trade.strike, trade.expiry, trade.option_type)
+    ismissing(rec) && error("Record not found for $(trade.strike)/$(trade.expiry)/$(trade.option_type)")
 
-    entry_price = vol_to_price(σ, surface.spot, trade.strike, T, trade.option_type)
+    price = trade.direction > 0 ? rec.ask_price : rec.bid_price
+    ismissing(price) && error("Missing bid/ask price for $(trade.strike)/$(trade.expiry)/$(trade.option_type)")
+
+    entry_price = price
 
     return Position(trade, entry_price, surface.spot, surface.timestamp)
 end
 
 """
-    _open_positions(trades, surface) -> Vector{Position}
+    _open_positions(trades, surface; debug=false) -> Vector{Position}
 
 Create positions for a vector of trades. Returns an empty vector if any trade
-cannot be opened (missing IV or expired).
+cannot be opened (missing record or bid/ask). When `debug=true`, prints the failure.
 """
-function _open_positions(trades::Vector{Trade}, surface::VolatilitySurface)::Vector{Position}
+function _open_positions(
+    trades::Vector{Trade},
+    surface::VolatilitySurface;
+    debug::Bool=false
+)::Vector{Position}
     positions = Position[]
     for t in trades
         try
             push!(positions, open_position(t, surface))
-        catch
+        catch e
+            if debug
+                println("No entry: open_position failed for $(t.option_type) strike=$(t.strike) expiry=$(t.expiry) error=$(e)")
+            end
             return Position[]
         end
     end

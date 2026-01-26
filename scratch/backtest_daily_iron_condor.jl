@@ -55,7 +55,9 @@ function main()
     isempty(dates) && error("No dates found in data store")
 
     last_n = dates[max(1, length(dates) - (n_days - 1)):end]
-    schedule = build_schedule(last_n; entry_time=DEFAULT_ENTRY_TIME)
+    date_set = Set(dates)
+    sched_dates = filter(d -> (d + Day(1)) in date_set, last_n)
+    schedule = build_schedule(sched_dates; entry_time=DEFAULT_ENTRY_TIME)
 
     strategy = IronCondorStrategy(
         schedule,
@@ -63,9 +65,10 @@ function main()
         short_put_pct,
         short_call_pct,
         long_put_pct,
-        long_call_pct,
-        DEFAULT_QUANTITY,
-        DEFAULT_TAU_TOL
+        long_call_pct;
+        quantity=DEFAULT_QUANTITY,
+        tau_tol=DEFAULT_TAU_TOL,
+        debug=true
     )
 
     start_date = Date(first(last_n))
@@ -74,18 +77,94 @@ function main()
 
     positions, pnl = backtest_strategy(strategy, iter)
 
-    realized = filter(!ismissing, pnl)
+    # Per-condor aggregation (group by entry timestamp + expiry)
+    grouped = Dict{Tuple{DateTime, DateTime}, Vector{Int}}()
+    for (i, pos) in enumerate(positions)
+        key = (pos.entry_timestamp, pos.trade.expiry)
+        if !haskey(grouped, key)
+            grouped[key] = Int[]
+        end
+        push!(grouped[key], i)
+    end
+
+    condor_keys = sort(collect(keys(grouped)); by=k -> k[1])
+    condor_pnls = Union{Missing, Float64}[]
+
+    for key in condor_keys
+        idxs = grouped[key]
+        leg_pnls = pnl[idxs]
+        if any(ismissing, leg_pnls)
+            push!(condor_pnls, missing)
+        else
+            push!(condor_pnls, sum(skipmissing(leg_pnls)))
+        end
+    end
+
+    realized = filter(!ismissing, condor_pnls)
     total_pnl = isempty(realized) ? 0.0 : sum(realized)
     avg_pnl = isempty(realized) ? 0.0 : total_pnl / length(realized)
-    missing_n = count(ismissing, pnl)
+    missing_n = count(ismissing, condor_pnls)
+
+    # Worst single-position loss
+    worst_idx = nothing
+    worst_pnl = Inf
+    for (i, p) in enumerate(pnl)
+        if ismissing(p)
+            continue
+        end
+        if p < worst_pnl
+            worst_pnl = p
+            worst_idx = i
+        end
+    end
 
     println("DAILY IRON CONDOR (minimal)")
     println("Underlying: $underlying | Entry time: $(DEFAULT_ENTRY_TIME)")
     println("Short: Put $(short_put_pct*100)% | Call $(short_call_pct*100)%")
     println("Long : Put $(long_put_pct*100)% | Call $(long_call_pct*100)%")
-    println("Entries: $(length(schedule)) | Positions: $(length(positions))")
-    println("PnL: total=$(round(total_pnl, digits=2)) | avg/position=$(round(avg_pnl, digits=2))")
+    println("Entries: $(length(schedule)) | Positions: $(length(positions)) | Condors: $(length(condor_keys))")
+    println("PnL: total=$(round(total_pnl, digits=2)) | avg/condor=$(round(avg_pnl, digits=2))")
     missing_n > 0 && println("Missing settlements: $missing_n")
+    if worst_idx !== nothing
+        wp = positions[worst_idx]
+        side = wp.trade.direction > 0 ? "Long" : "Short"
+        opt = wp.trade.option_type == Call ? "C" : "P"
+        println("Worst position pnl=$(round(worst_pnl, digits=2)) | $(side) $(opt) K=$(round(wp.trade.strike, digits=2)) expiry=$(wp.trade.expiry) entry_ts=$(wp.entry_timestamp)")
+    end
+
+    println("")
+    println("PER-CONDOR P&L")
+    for (i, key) in enumerate(condor_keys)
+        entry_ts, expiry = key
+        idxs = grouped[key]
+        entry_spot = positions[idxs[1]].entry_spot
+        expiry_surface = surface_at(iter, expiry)
+        settle_spot = expiry_surface === nothing ? missing : expiry_surface.spot
+        pnl_i = condor_pnls[i]
+        strikes = sort(positions[idxs], by=p -> p.trade.strike)
+        strikes_str = join((string(round(p.trade.strike, digits=2)) for p in strikes), " | ")
+        println("entry=$(entry_ts) expiry=$(expiry) entry_spot=$(round(entry_spot, digits=2)) settle_spot=$(settle_spot) pnl=$(pnl_i)")
+        println("  strikes: $(strikes_str)")
+
+        if settle_spot === missing
+            continue
+        end
+
+        entry_costs = [entry_cost(p) for p in strikes]
+        payoffs = [payoff(p.trade, settle_spot) for p in strikes]
+        net_entry = sum(entry_costs)
+        net_payoff = sum(payoffs)
+        net_pnl = net_payoff - net_entry
+        println("  net_entry=$(round(net_entry, digits=2)) net_payoff=$(round(net_payoff, digits=2)) pnl=$(round(net_pnl, digits=2))")
+
+        for (p, ec, pf) in zip(strikes, entry_costs, payoffs)
+            side = p.trade.direction > 0 ? "Long" : "Short"
+            opt = p.trade.option_type == Call ? "C" : "P"
+            entry_px = p.entry_price * p.entry_spot
+            entry_frac = p.entry_price
+            println("    $(side) $(opt) K=$(round(p.trade.strike, digits=2)) entry_px=$(round(entry_px, digits=6)) entry_frac=$(round(entry_frac, digits=8)) entry_cost=$(round(ec, digits=6)) payoff=$(round(pf, digits=6))")
+        end
+    end
 end
 
 main()
