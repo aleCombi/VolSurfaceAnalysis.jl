@@ -1,378 +1,142 @@
-# Backtest Engine
-# Event-driven simulation over historical vol surfaces
+# Backtest engine (minimal, functional)
+# Strategy transforms a portfolio at time t into a portfolio at time t+epsilon.
 
 using Dates
-
-# ============================================================================
-# Strategy Interface
-# ============================================================================
 
 """
     Strategy
 
-Abstract base type for trading strategies.
-
-Implement `on_snapshot` to define your strategy's logic.
+Abstract strategy type. Implement `next_portfolio` to define how the portfolio
+should evolve given the current portfolio, surface, and previous timestamp.
 """
 abstract type Strategy end
 
 """
-    on_snapshot(strategy, surface, portfolio) -> Vector{Order}
+    next_portfolio(strategy, positions, surface, prev_timestamp) -> Vector{Position}
 
-Called at each snapshot during backtesting.
-Returns a vector of orders to execute.
+Return the portfolio at time t+epsilon given the portfolio at time t, the
+market surface observed at time t, and the previous timestamp.
 
-# Arguments
-- `strategy::Strategy`: Your strategy implementation
-- `surface::VolatilitySurface`: Current market snapshot
-- `portfolio::Portfolio`: Current portfolio state
-
-# Returns
-- Vector of `Order` objects to execute
+This function must be implemented by user strategies.
 """
-function on_snapshot(strategy::Strategy, surface::VolatilitySurface, 
-                     portfolio::Portfolio)::Vector{Order}
-    error("on_snapshot not implemented for $(typeof(strategy))")
+function next_portfolio(
+    ::Strategy,
+    ::Vector{Position},
+    ::VolatilitySurface,
+    ::DateTime
+)::Vector{Position}
+    error("next_portfolio not implemented for this strategy")
 end
 
 """
-    on_expiry(strategy, portfolio, expiry_date, delivery_price) -> Nothing
+    ScheduledStrategy
 
-Called when options expire. Override for custom expiry handling.
-Default behavior: positions are auto-settled.
+Abstract strategy with a fixed entry schedule. Implement `entry_schedule` and
+`entry_positions`. A default `next_portfolio` is provided.
 """
-function on_expiry(strategy::Strategy, portfolio::Portfolio, 
-                   expiry_date::Date, delivery_price::Float64)
-    # Default: do nothing (auto-settlement handled by engine)
-    return nothing
-end
-
-# ============================================================================
-# Orders
-# ============================================================================
+abstract type ScheduledStrategy <: Strategy end
 
 """
-    Order
+    entry_schedule(strategy) -> Vector{DateTime}
 
-An order to open or close a position.
-
-# Fields
-- `underlying::Underlying`: BTC or ETH
-- `strike::Float64`: Strike price
-- `expiry::DateTime`: Expiration (normalized to 08:00 UTC)
-- `option_type::OptionType`: Call or Put
-- `direction::Int`: +1 buy, -1 sell
-- `quantity::Float64`: Number of contracts
+Return the list of timestamps at which this strategy should enter trades.
 """
-struct Order
-    underlying::Underlying
-    strike::Float64
-    expiry::DateTime
-    option_type::OptionType
-    direction::Int
-    quantity::Float64
+function entry_schedule(::ScheduledStrategy)::Vector{DateTime}
+    error("entry_schedule not implemented for this strategy")
 end
 
 """
-    Order(underlying, strike, expiry, option_type; direction=1, quantity=1.0)
+    entry_positions(strategy, surface) -> Vector{Position}
 
-Convenience constructor with defaults.
+Return the positions to enter at the given surface. Positions can depend on both
+the strategy and the surface.
 """
-function Order(underlying::Underlying, strike::Float64, expiry::DateTime,
-               option_type::OptionType; direction::Int=1, quantity::Float64=1.0)
-    Order(underlying, strike, expiry, option_type, direction, quantity)
-end
-
-# ============================================================================
-# Performance Metrics
-# ============================================================================
-
-"""
-    PerformanceMetrics
-
-Summary statistics from a backtest.
-
-# Fields
-- `total_pnl::Float64`: Final P&L
-- `sharpe_ratio::Float64`: Annualized Sharpe (assumes 0 risk-free rate)
-- `max_drawdown::Float64`: Maximum peak-to-trough decline
-- `max_drawdown_pct::Float64`: Max drawdown as percentage
-- `win_rate::Float64`: Fraction of profitable trades
-- `total_trades::Int`: Number of round-trip trades
-- `avg_trade_pnl::Float64`: Average P&L per trade
-- `profit_factor::Float64`: Gross profit / gross loss
-"""
-struct PerformanceMetrics
-    total_pnl::Float64
-    sharpe_ratio::Float64
-    max_drawdown::Float64
-    max_drawdown_pct::Float64
-    win_rate::Float64
-    total_trades::Int
-    avg_trade_pnl::Float64
-    profit_factor::Float64
+function entry_positions(::ScheduledStrategy, ::VolatilitySurface)::Vector{Position}
+    error("entry_positions not implemented for this strategy")
 end
 
 """
-    compute_metrics(snapshots, trade_log) -> PerformanceMetrics
+    next_portfolio(strategy, positions, surface, prev_timestamp) -> Vector{Position}
 
-Compute performance metrics from backtest history.
+Default implementation for scheduled strategies. `prev_timestamp` must always be
+provided; for the first step, pass the current timestamp (or an earlier time if
+you want entries at the first snapshot).
 """
-function compute_metrics(snapshots::Vector{PortfolioSnapshot}, 
-                         trade_log::Vector{TradeRecord})::PerformanceMetrics
-    isempty(snapshots) && return PerformanceMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 1.0)
-    
-    # P&L series
-    pnl_series = [s.realized_pnl + s.unrealized_pnl for s in snapshots]
-    total_pnl = last(pnl_series)
-    
-    # Returns for Sharpe calculation
-    returns = Float64[]
-    for i in 2:length(pnl_series)
-        push!(returns, pnl_series[i] - pnl_series[i-1])
-    end
-    
-    # Sharpe ratio (annualized, assuming hourly snapshots)
-    sharpe = if !isempty(returns) && std(returns) > 0
-        mean(returns) / std(returns) * sqrt(365.25 * 24)
-    else
-        0.0
-    end
-    
-    # Max drawdown
-    peak = -Inf
-    max_dd = 0.0
-    max_dd_pct = 0.0
-    for pnl in pnl_series
-        peak = max(peak, pnl)
-        dd = peak - pnl
-        if dd > max_dd
-            max_dd = dd
-            max_dd_pct = peak > 0 ? dd / peak : 0.0
-        end
-    end
-    
-    # Trade statistics
-    closes = filter(t -> t.action == :close, trade_log)
-    n_trades = length(closes)
-    
-    if n_trades > 0
-        trade_pnls = [t.pnl for t in closes]
-        wins = count(p -> p > 0, trade_pnls)
-        win_rate = wins / n_trades
-        avg_pnl = mean(trade_pnls)
-        
-        gross_profit = sum(filter(p -> p > 0, trade_pnls), init=0.0)
-        gross_loss = abs(sum(filter(p -> p < 0, trade_pnls), init=0.0))
-        profit_factor = gross_loss > 0 ? gross_profit / gross_loss : Inf
-    else
-        win_rate = 0.0
-        avg_pnl = 0.0
-        profit_factor = 1.0
-    end
-    
-    return PerformanceMetrics(
-        total_pnl, sharpe, max_dd, max_dd_pct,
-        win_rate, n_trades, avg_pnl, profit_factor
+function next_portfolio(
+    strategy::ScheduledStrategy,
+    positions::Vector{Position},
+    surface::VolatilitySurface,
+    prev_timestamp::DateTime
+)::Vector{Position}
+    should_enter = any(
+        t -> (t > prev_timestamp && t <= surface.timestamp),
+        entry_schedule(strategy)
     )
-end
 
-# ============================================================================
-# Backtest Result
-# ============================================================================
+    if should_enter
+        new_positions = entry_positions(strategy, surface)
+        return vcat(positions, new_positions)
+    end
+    return positions
+end
 
 """
     BacktestResult
 
-Complete results from a backtest run.
+Minimal backtest result container.
 
 # Fields
-- `snapshots::Vector{PortfolioSnapshot}`: Portfolio state at each snapshot
-- `trade_log::Vector{TradeRecord}`: All executed trades
-- `metrics::PerformanceMetrics`: Summary statistics
-- `start_date::Date`: Backtest start
-- `end_date::Date`: Backtest end
-- `underlying::Underlying`: Asset tested
+- `timestamps`: snapshot times
+- `realized_pnl`: realized P&L at each step (from expired positions)
+- `cumulative_pnl`: cumulative realized P&L
+- `positions`: optional portfolio snapshots (when recording is enabled)
 """
 struct BacktestResult
-    snapshots::Vector{PortfolioSnapshot}
-    trade_log::Vector{TradeRecord}
-    metrics::PerformanceMetrics
-    start_date::Date
-    end_date::Date
-    underlying::Underlying
-end
-
-# ============================================================================
-# Main Backtest Engine
-# ============================================================================
-
-"""
-    run_backtest(strategy, store, underlying, start_date, end_date; kwargs...) -> BacktestResult
-
-Run a backtest simulation over historical data.
-
-# Arguments
-- `strategy::Strategy`: Your strategy implementation
-- `store::LocalDataStore`: Data source
-- `underlying::Underlying`: BTC or ETH
-- `start_date::Date`: Start of backtest period
-- `end_date::Date`: End of backtest period
-
-# Keyword Arguments
-- `resolution::Period`: Snapshot frequency (default: `Hour(1)`)
-- `initial_cash::Float64`: Starting cash (default: `0.0`)
-- `verbose::Bool`: Print progress (default: `false`)
-
-# Returns
-- `BacktestResult` with full history and metrics
-
-# Example
-```julia
-struct MyStrategy <: Strategy end
-
-function on_snapshot(::MyStrategy, surface, portfolio)
-    # Your logic here
-    return Order[]
-end
-
-store = LocalDataStore("data/")
-result = run_backtest(MyStrategy(), store, BTC, Date(2024,1,1), Date(2024,1,31))
-println("Total P&L: \$(result.metrics.total_pnl)")
-```
-"""
-function run_backtest(strategy::Strategy,
-                      store::LocalDataStore,
-                      underlying::Underlying,
-                      start_date::Date,
-                      end_date::Date;
-                      resolution::Period=Hour(1),
-                      initial_cash::Float64=0.0,
-                      verbose::Bool=false)::BacktestResult
-    
-    # Create iterator and portfolio
-    iter = SurfaceIterator(store, underlying; 
-                           start_date=start_date, 
-                           end_date=end_date,
-                           resolution=resolution)
-    
-    portfolio = Portfolio(initial_cash=initial_cash)
-    
-    verbose && println("Backtest: $(length(iter)) snapshots from $start_date to $end_date")
-    
-    # Main loop
-    for (i, surface) in enumerate(iter)
-        # Auto-settle any positions that have reached expiry (at or before this snapshot)
-        expired_positions = filter(p -> p.trade.expiry <= surface.timestamp, portfolio.positions)
-        for pos in expired_positions
-            close_position!(portfolio, pos, surface)
-        end
-        
-        # Get strategy signals
-        orders = on_snapshot(strategy, surface, portfolio)
-        
-        # Execute orders
-        for order in orders
-            try
-                execute_order!(portfolio, order, surface)
-            catch e
-                verbose && @warn "Order failed" order exception=e
-            end
-        end
-        
-        # Record snapshot
-        record_snapshot!(portfolio, surface)
-        
-        if verbose && i % 100 == 0
-            snap = portfolio.history[end]
-            println("  [$i/$(length(iter))] $(surface.timestamp): MTM=$(round(snap.mtm_value, digits=4))")
-        end
-    end
-    
-    # Compute metrics
-    metrics = compute_metrics(portfolio.history, portfolio.trade_log)
-    
-    verbose && println("Backtest complete: $(metrics.total_trades) trades, P&L=$(round(metrics.total_pnl, digits=4))")
-    
-    return BacktestResult(
-        portfolio.history,
-        portfolio.trade_log,
-        metrics,
-        start_date,
-        end_date,
-        underlying
-    )
+    timestamps::Vector{DateTime}
+    realized_pnl::Vector{Float64}
+    cumulative_pnl::Vector{Float64}
+    positions::Union{Nothing, Vector{Vector{Position}}}
 end
 
 """
-    execute_order!(portfolio, order, surface)
+    backtest_strategy(strategy, iter) -> (positions, pnl)
 
-Execute an order on the portfolio.
+Event-driven backtest for scheduled strategies. For each scheduled entry time,
+the strategy is executed at the next available surface tick (first timestamp
+>= entry time). Positions are settled at their expiry using the surface spot at
+that time.
+
+Returns:
+- `positions::Vector{Position}`: all entered positions (entry_timestamp reflects
+  the actual tick used)
+- `pnl::Vector{Union{Missing, Float64}}`: realized P&L per position; `missing`
+  if no surface is available at expiry
 """
-function execute_order!(portfolio::Portfolio, order::Order,
-                        surface::VolatilitySurface)
-    trade = Trade(
-        order.underlying,
-        order.strike,
-        order.expiry,
-        order.option_type;
-        direction=order.direction,
-        quantity=order.quantity
-    )
+function backtest_strategy(strategy::ScheduledStrategy, iter::SurfaceIterator)
+    ts = timestamps(iter)
+    entry_times = entry_schedule(strategy)
 
-    pos = open_position(trade, surface)
-    push!(portfolio.positions, pos)
-    return pos
+    surfaces = filter(!isnothing, map(t -> _next_surface(iter, ts, t), entry_times))
+    positions_by_surface = map(s -> entry_positions(strategy, s), surfaces)
+    positions = reduce(vcat, positions_by_surface; init=Position[])
+    pnl = map(pos -> _settle_at_expiry(iter, pos), positions)
+
+    return positions, pnl
 end
 
-# ============================================================================
-# Utility Functions
-# ============================================================================
-
-"""
-    pnl_series(result::BacktestResult) -> Tuple{Vector{DateTime}, Vector{Float64}}
-
-Extract P&L time series from backtest result.
-"""
-function pnl_series(result::BacktestResult)::Tuple{Vector{DateTime}, Vector{Float64}}
-    times = [s.timestamp for s in result.snapshots]
-    pnl = [s.realized_pnl + s.unrealized_pnl for s in result.snapshots]
-    return (times, pnl)
+function _next_surface(
+    iter::SurfaceIterator,
+    ts::Vector{DateTime},
+    entry_time::DateTime
+)::Union{VolatilitySurface, Nothing}
+    idx = findfirst(t -> t >= entry_time, ts)
+    return idx === nothing ? nothing : surface_at(iter, idx)
 end
 
-"""
-    equity_curve(result::BacktestResult) -> Tuple{Vector{DateTime}, Vector{Float64}}
-
-Extract equity curve (MTM value over time) from backtest result.
-"""
-function equity_curve(result::BacktestResult)::Tuple{Vector{DateTime}, Vector{Float64}}
-    times = [s.timestamp for s in result.snapshots]
-    equity = [s.mtm_value for s in result.snapshots]
-    return (times, equity)
+function _settle_at_expiry(
+    iter::SurfaceIterator,
+    pos::Position
+)::Union{Missing, Float64}
+    expiry_surface = surface_at(iter, pos.trade.expiry)
+    return expiry_surface === nothing ? missing : settle(pos, expiry_surface.spot)
 end
-
-"""
-    trades_summary(result::BacktestResult) -> DataFrame
-
-Get a DataFrame summary of all trades.
-"""
-function trades_summary(result::BacktestResult)
-    log = result.trade_log
-    return DataFrame(
-        position_id = [t.position_id for t in log],
-        action = [t.action for t in log],
-        timestamp = [t.timestamp for t in log],
-        underlying = [t.trade.underlying for t in log],
-        strike = [t.trade.strike for t in log],
-        expiry = [t.trade.expiry for t in log],
-        option_type = [t.trade.option_type for t in log],
-        direction = [t.trade.direction for t in log],
-        quantity = [t.trade.quantity for t in log],
-        price = [t.price for t in log],
-        vol = [t.vol for t in log],
-        pnl = [t.pnl for t in log]
-    )
-end
-
-# Import Statistics for mean/std
-using Statistics: mean, std

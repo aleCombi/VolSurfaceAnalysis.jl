@@ -17,6 +17,7 @@ include("api.jl")       # Deribit API functions
 include("local_data.jl")           # Local data store
 include("backtest/iterator.jl")    # Surface iterator for backtesting
 include("backtest/portfolio.jl")   # Position management (pure)
+include("backtest/engine.jl")      # Minimal backtest engine
 
 # Data types
 export VolRecord, OptionType, Underlying
@@ -50,5 +51,10 @@ export date_range, timestamps, filter_timestamps
 
 # Position management (pure functions)
 export Position, open_position, entry_cost, settle
+
+# Backtest engine (minimal)
+export Strategy, ScheduledStrategy
+export next_portfolio, entry_schedule, entry_positions
+export BacktestResult, backtest_strategy
 
 end # module
