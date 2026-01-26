@@ -28,6 +28,83 @@ const DEFAULT_SHORT_CALL_PCT = 1.03  # Sell call at 103% of spot (3% OTM)
 const DEFAULT_LONG_PUT_PCT = 0.90    # Buy put at 90% of spot (10% OTM)
 const DEFAULT_LONG_CALL_PCT = 1.10   # Buy call at 110% of spot (10% OTM)
 
+# ============================================================================
+# Deribit Fee Structure
+# ============================================================================
+# Trading fee: 0.03% of underlying value per contract, capped at 12.5% of option price
+# Delivery fee: 0.015% of underlying value for ITM options at settlement
+const TRADING_FEE_RATE = 0.0003      # 0.03% of underlying
+const TRADING_FEE_CAP = 0.125        # 12.5% of option price
+const DELIVERY_FEE_RATE = 0.00015    # 0.015% of underlying
+
+"""
+    calculate_trading_fee(option_price_btc, spot) -> Float64
+
+Calculate Deribit trading fee for one leg.
+Fee = min(0.03% of underlying, 12.5% of option price)
+Returns fee in USD.
+"""
+function calculate_trading_fee(option_price_btc::Float64, spot::Float64)::Float64
+    fee_by_underlying = TRADING_FEE_RATE * spot  # 0.03% of spot in USD
+    fee_cap = TRADING_FEE_CAP * option_price_btc * spot  # 12.5% of option value in USD
+    return min(fee_by_underlying, fee_cap)
+end
+
+"""
+    calculate_delivery_fee(spot) -> Float64
+
+Calculate Deribit delivery/settlement fee for ITM option.
+Fee = 0.015% of underlying value.
+Returns fee in USD.
+"""
+function calculate_delivery_fee(spot::Float64)::Float64
+    return DELIVERY_FEE_RATE * spot
+end
+
+"""
+    calculate_condor_fees(entry_prices, entry_spot, settlement_payoffs, settle_spot) -> NamedTuple
+
+Calculate all fees for an iron condor trade.
+- Entry: 4 trading fees (one per leg)
+- Settlement: Delivery fees only for ITM legs
+"""
+function calculate_condor_fees(
+    short_put_px::Float64, short_call_px::Float64,
+    long_put_px::Float64, long_call_px::Float64,
+    entry_spot::Float64,
+    short_put_payoff::Float64, short_call_payoff::Float64,
+    long_put_payoff::Float64, long_call_payoff::Float64,
+    settle_spot::Float64
+)
+    # Entry fees (4 legs)
+    entry_fee_short_put = calculate_trading_fee(short_put_px, entry_spot)
+    entry_fee_short_call = calculate_trading_fee(short_call_px, entry_spot)
+    entry_fee_long_put = calculate_trading_fee(long_put_px, entry_spot)
+    entry_fee_long_call = calculate_trading_fee(long_call_px, entry_spot)
+    total_entry_fees = entry_fee_short_put + entry_fee_short_call + entry_fee_long_put + entry_fee_long_call
+
+    # Delivery fees (only for ITM options at settlement)
+    delivery_fee = 0.0
+    if short_put_payoff > 0
+        delivery_fee += calculate_delivery_fee(settle_spot)
+    end
+    if short_call_payoff > 0
+        delivery_fee += calculate_delivery_fee(settle_spot)
+    end
+    if long_put_payoff > 0
+        delivery_fee += calculate_delivery_fee(settle_spot)
+    end
+    if long_call_payoff > 0
+        delivery_fee += calculate_delivery_fee(settle_spot)
+    end
+
+    return (
+        entry_fees=total_entry_fees,
+        delivery_fees=delivery_fee,
+        total_fees=total_entry_fees + delivery_fee
+    )
+end
+
 output_file = joinpath(@__DIR__, "iron_condor_backtest_results.txt")
 
 function write_results(results::Vector{String}, filepath::String)
@@ -231,8 +308,15 @@ function daily_iron_condor(store::LocalDataStore, underlying::Underlying, trade_
     # Net payoff (positive = we owe, negative = we receive)
     net_payoff_usd = (short_put_payoff + short_call_payoff) - (long_put_payoff + long_call_payoff)
 
-    # P&L = premium received - net payoff owed
-    pnl_usd = net_premium_usd - net_payoff_usd
+    # Calculate fees
+    fees = calculate_condor_fees(
+        short_put_px, short_call_px, long_put_px, long_call_px, spot_entry,
+        short_put_payoff, short_call_payoff, long_put_payoff, long_call_payoff, spot_settle
+    )
+
+    # P&L = premium received - net payoff owed - fees
+    pnl_gross = net_premium_usd - net_payoff_usd
+    pnl_usd = pnl_gross - fees.total_fees
 
     # Calculate actual % OTM achieved
     short_put_otm = (spot_entry - short_put_K) / spot_entry * 100
@@ -268,9 +352,14 @@ function daily_iron_condor(store::LocalDataStore, underlying::Underlying, trade_
         long_put_payoff=long_put_payoff,
         long_call_payoff=long_call_payoff,
         net_payoff_usd=net_payoff_usd,
+        # Fees
+        entry_fees=fees.entry_fees,
+        delivery_fees=fees.delivery_fees,
+        total_fees=fees.total_fees,
         # Summary
         net_premium_usd=net_premium_usd,
         max_loss_usd=max_loss_usd,
+        pnl_gross=pnl_gross,
         pnl_usd=pnl_usd,
     )
 end
@@ -338,6 +427,8 @@ function main()
     push!(results, "-" ^ 90)
 
     total = 0.0
+    total_gross = 0.0
+    total_fees = 0.0
     total_max_loss = 0.0
     wins = 0
     max_pnl = -Inf
@@ -346,6 +437,8 @@ function main()
     for r in day_results
         pnl = r.pnl_usd
         total += pnl
+        total_gross += r.pnl_gross
+        total_fees += r.total_fees
         total_max_loss += r.max_loss_usd
         wins += pnl > 0 ? 1 : 0
         max_pnl = max(max_pnl, pnl)
@@ -384,9 +477,17 @@ function main()
             push!(results, "  SETTLE: All legs expired worthless (max profit)")
         end
 
+        # Fees
+        push!(results,
+              "  FEES: Entry=$(@sprintf("%.2f", r.entry_fees)) USD | " *
+              "Delivery=$(@sprintf("%.2f", r.delivery_fees)) USD | " *
+              "Total=$(@sprintf("%.2f", r.total_fees)) USD")
+
         # Return on capital at risk
         roc = r.max_loss_usd > 0 ? (pnl / r.max_loss_usd) * 100 : 0.0
-        push!(results, "  P&L: $(@sprintf("%+.2f", pnl)) USD | ROC: $(@sprintf("%+.2f", roc))% (P&L / max loss)")
+        push!(results,
+              "  P&L: Gross=$(@sprintf("%+.2f", r.pnl_gross)) USD | " *
+              "Net=$(@sprintf("%+.2f", pnl)) USD | ROC: $(@sprintf("%+.2f", roc))%")
         push!(results, "")
     end
 

@@ -309,20 +309,20 @@ end
 
 Execute an order on the portfolio.
 """
-function execute_order!(portfolio::Portfolio, order::Order, 
+function execute_order!(portfolio::Portfolio, order::Order,
                         surface::VolatilitySurface)
-    # Create trade from order
     trade = Trade(
         order.underlying,
         order.strike,
         order.expiry,
-        order.option_type,
-        surface.timestamp;
+        order.option_type;
         direction=order.direction,
         quantity=order.quantity
     )
-    
-    add_position!(portfolio, trade, surface)
+
+    pos = open_position(trade, surface)
+    push!(portfolio.positions, pos)
+    return pos
 end
 
 # ============================================================================

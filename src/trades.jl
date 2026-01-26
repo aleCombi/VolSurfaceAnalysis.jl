@@ -4,7 +4,8 @@
 """
     Trade
 
-Represents a single option trade (long or short position).
+Represents a single option contract specification (long or short).
+This is a time-independent description of what to trade, not when.
 
 # Fields
 - `underlying::Underlying`: The underlying asset (BTC or ETH)
@@ -13,7 +14,6 @@ Represents a single option trade (long or short position).
 - `option_type::OptionType`: Call or Put
 - `direction::Int`: +1 for long, -1 for short
 - `quantity::Float64`: Number of contracts
-- `trade_date::DateTime`: Date/time when the trade was executed
 """
 struct Trade
     underlying::Underlying
@@ -22,18 +22,17 @@ struct Trade
     option_type::OptionType
     direction::Int
     quantity::Float64
-    trade_date::DateTime
 end
 
 """
-    Trade(underlying, strike, expiry, option_type, trade_date; direction=1, quantity=1.0)
+    Trade(underlying, strike, expiry, option_type; direction=1, quantity=1.0)
 
 Convenience constructor with default direction (long) and quantity (1.0).
 """
 function Trade(underlying::Underlying, strike::Float64, expiry::DateTime,
-               option_type::OptionType, trade_date::DateTime;
+               option_type::OptionType;
                direction::Int=1, quantity::Float64=1.0)
-    return Trade(underlying, strike, expiry, option_type, direction, quantity, trade_date)
+    return Trade(underlying, strike, expiry, option_type, direction, quantity)
 end
 
 # ============================================================================
@@ -168,11 +167,11 @@ Calculate the payoff of a trade at expiration.
 # Examples
 ```julia
 # Long call with strike 100, spot at expiry 110
-t = Trade(BTC, 100.0, expiry, Call, trade_date)
+t = Trade(BTC, 100.0, expiry, Call)
 payoff(t, 110.0)  # → 10.0
 
 # Short put with strike 100, spot at expiry 90
-t = Trade(BTC, 100.0, expiry, Put, trade_date; direction=-1)
+t = Trade(BTC, 100.0, expiry, Put; direction=-1)
 payoff(t, 90.0)   # → -10.0 (loss for short put)
 ```
 """

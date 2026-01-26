@@ -16,8 +16,7 @@ include("trades.jl")    # Trade representation and pricing
 include("api.jl")       # Deribit API functions
 include("local_data.jl")           # Local data store
 include("backtest/iterator.jl")    # Surface iterator for backtesting
-include("backtest/portfolio.jl")   # Portfolio management
-include("backtest/engine.jl")      # Backtest engine
+include("backtest/portfolio.jl")   # Position management (pure)
 
 # Data types
 export VolRecord, OptionType, Underlying
@@ -49,18 +48,7 @@ export load_file, load_all, load_date, load_range, get_timestamps
 export SurfaceIterator, surface_at, first_timestamp, last_timestamp
 export date_range, timestamps, filter_timestamps
 
-# Portfolio management
-export Position, PortfolioSnapshot, TradeRecord, Portfolio
-export add_position!, close_position!, close_all!
-export position_value, position_pnl, mark_to_market, record_snapshot!
-export position_delta, position_vega
-export num_positions, total_value, get_positions, positions_expiring
-
-# Backtest engine
-export Strategy, Order, on_snapshot, on_expiry
-export PerformanceMetrics, BacktestResult
-export run_backtest, execute_order!
-export pnl_series, equity_curve, trades_summary
-export compute_metrics
+# Position management (pure functions)
+export Position, open_position, entry_cost, settle
 
 end # module
