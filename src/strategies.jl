@@ -16,7 +16,7 @@ strike selection around spot.
 - `long_put_pct::Float64`: Spot multiplier for long put strike
 - `long_call_pct::Float64`: Spot multiplier for long call strike
 - `quantity::Float64`: Contracts per leg
-- `tau_tol::Float64`: Tolerance for matching expiry tenor on the surface
+- `tau_tol::Float64`: Tolerance for expiry tenor mismatch (used for warnings)
 - `debug::Bool`: Emit diagnostics when entries fail
 """
 struct IronCondorStrategy <: ScheduledStrategy
@@ -32,8 +32,6 @@ struct IronCondorStrategy <: ScheduledStrategy
 end
 
 entry_schedule(strategy::IronCondorStrategy)::Vector{DateTime} = strategy.schedule
-
-@inline _tau(point::VolPoint)::Float64 = getfield(point, 2)
 
 function IronCondorStrategy(
     schedule::Vector{DateTime},
@@ -95,37 +93,46 @@ function entry_positions(
         return Position[]
     end
 
-    taus = unique(_tau(p) for p in surface.points)
-    if isempty(taus)
+    expiries = unique(rec.expiry for rec in surface.records)
+    if isempty(expiries)
         if strategy.debug
-            println("No entry: surface has no tenors (timestamp=$(surface.timestamp))")
+            println("No entry: surface has no records (timestamp=$(surface.timestamp))")
         end
         return Position[]
     end
 
-    tau_closest = taus[argmin(abs.(taus .- tau_target))]
-    expiry = _expiry_from_tau(surface.timestamp, tau_closest)
+    taus = [time_to_expiry(e, surface.timestamp) for e in expiries]
+    idx = argmin(abs.(taus .- tau_target))
+    expiry = expiries[idx]
+    tau_closest = taus[idx]
+
     if strategy.debug && expiry != expiry_target
-        println("Using closest tenor: target_tau=$(tau_target), closest_tau=$(tau_closest), expiry=$(expiry)")
+        println("Using closest expiry: target_tau=$(tau_target), closest_tau=$(tau_closest), expiry=$(expiry)")
+    elseif strategy.debug && abs(tau_closest - tau_target) > strategy.tau_tol
+        println("Warning: large tenor mismatch target_tau=$(tau_target), closest_tau=$(tau_closest)")
     end
-    points = filter(p -> abs(_tau(p) - tau_closest) <= strategy.tau_tol, surface.points)
-    if isempty(points)
+
+    recs = filter(r -> r.expiry == expiry, surface.records)
+    if isempty(recs)
         if strategy.debug
-            println("No entry: no surface points at closest tenor (timestamp=$(surface.timestamp), tau=$(tau_closest))")
+            println("No entry: no records for expiry (timestamp=$(surface.timestamp), expiry=$(expiry))")
         end
         return Position[]
     end
 
-    strikes = sort(unique(surface.spot * exp(p.log_moneyness) for p in points))
-    if isempty(strikes)
+    put_strikes = sort(unique(r.strike for r in recs if r.option_type == Put))
+    call_strikes = sort(unique(r.strike for r in recs if r.option_type == Call))
+
+    if isempty(put_strikes) || isempty(call_strikes)
         if strategy.debug
-            println("No entry: no strikes at target tenor (timestamp=$(surface.timestamp))")
+            println("No entry: missing puts or calls for expiry (timestamp=$(surface.timestamp), expiry=$(expiry))")
         end
         return Position[]
     end
 
     strikes_tuple = _condor_strikes(
-        strikes,
+        put_strikes,
+        call_strikes,
         surface.spot,
         strategy.short_put_pct,
         strategy.short_call_pct,
@@ -152,7 +159,8 @@ function entry_positions(
 end
 
 function _condor_strikes(
-    strikes::Vector{Float64},
+    put_strikes::Vector{Float64},
+    call_strikes::Vector{Float64},
     spot::Float64,
     short_put_pct::Float64,
     short_call_pct::Float64,
@@ -164,27 +172,27 @@ function _condor_strikes(
     target_long_put = spot * long_put_pct
     target_long_call = spot * long_call_pct
 
-    otm_puts = filter(s -> s < spot, strikes)
-    otm_calls = filter(s -> s > spot, strikes)
+    otm_puts = filter(s -> s < spot, put_strikes)
+    otm_calls = filter(s -> s > spot, call_strikes)
 
     short_put = !isempty(otm_puts) ? _nearest_strike(otm_puts, target_short_put) :
-                _nearest_strike(strikes, target_short_put)
+                _nearest_strike(put_strikes, target_short_put)
     short_call = !isempty(otm_calls) ? _nearest_strike(otm_calls, target_short_call) :
-                 _nearest_strike(strikes, target_short_call)
+                 _nearest_strike(call_strikes, target_short_call)
 
-    far_otm_puts = filter(s -> s < short_put, strikes)
-    far_otm_calls = filter(s -> s > short_call, strikes)
+    far_otm_puts = filter(s -> s < short_put, put_strikes)
+    far_otm_calls = filter(s -> s > short_call, call_strikes)
 
     long_put = if !isempty(far_otm_puts)
         _nearest_strike(far_otm_puts, target_long_put)
     else
-        !isempty(otm_puts) ? minimum(otm_puts) : _nearest_strike(strikes, target_long_put)
+        !isempty(otm_puts) ? minimum(otm_puts) : _nearest_strike(put_strikes, target_long_put)
     end
 
     long_call = if !isempty(far_otm_calls)
         _nearest_strike(far_otm_calls, target_long_call)
     else
-        !isempty(otm_calls) ? maximum(otm_calls) : _nearest_strike(strikes, target_long_call)
+        !isempty(otm_calls) ? maximum(otm_calls) : _nearest_strike(call_strikes, target_long_call)
     end
 
     if !(long_put < short_put < spot < short_call < long_call)
@@ -197,9 +205,4 @@ end
 function _nearest_strike(strikes::Vector{Float64}, target::Float64)::Float64
     distances = abs.(strikes .- target)
     return strikes[argmin(distances)]
-end
-
-function _expiry_from_tau(now::DateTime, tau_years::Float64)::DateTime
-    ms = round(Int, tau_years * DAYS_PER_YEAR * 24 * 60 * 60 * 1000)
-    return now + Millisecond(ms)
 end

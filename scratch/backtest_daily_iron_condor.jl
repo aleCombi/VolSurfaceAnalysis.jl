@@ -9,10 +9,12 @@ using Dates
 
 const DEFAULT_HISTORY_PATH = raw"C:\repos\DeribitVols\data\local_db\history"
 const DEFAULT_ENTRY_TIME = Time(12, 0)  # UTC
+const DEFAULT_ENTRY_INTERVAL = Hour(4)
+const DEFAULT_EXPIRY_INTERVAL = Hour(4)
 
 # Short strikes (sell) - inner legs
-const DEFAULT_SHORT_PUT_PCT = 0.97
-const DEFAULT_SHORT_CALL_PCT = 1.03
+const DEFAULT_SHORT_PUT_PCT = 0.98
+const DEFAULT_SHORT_CALL_PCT = 1.02
 
 # Long strikes (buy) - outer legs
 const DEFAULT_LONG_PUT_PCT = 0.90
@@ -35,8 +37,12 @@ function pick_data_path(arg_path::Union{Nothing,String})::String
     return isdir(DEFAULT_HISTORY_PATH) ? DEFAULT_HISTORY_PATH : joinpath(@__DIR__, "..", "data")
 end
 
-function build_schedule(dates::Vector{Date}; entry_time::Time=DEFAULT_ENTRY_TIME)
-    return [DateTime(d) + Hour(Dates.hour(entry_time)) + Minute(Dates.minute(entry_time)) for d in dates]
+function build_schedule(dates::Vector{Date};
+                        entry_time::Time=DEFAULT_ENTRY_TIME,
+                        entry_interval::Period=DEFAULT_ENTRY_INTERVAL)
+    start_dt = DateTime(first(dates)) + Hour(Dates.hour(entry_time)) + Minute(Dates.minute(entry_time))
+    end_dt = DateTime(last(dates) + Day(1))
+    return collect(start_dt:entry_interval:end_dt)
 end
 
 function main()
@@ -57,11 +63,11 @@ function main()
     last_n = dates[max(1, length(dates) - (n_days - 1)):end]
     date_set = Set(dates)
     sched_dates = filter(d -> (d + Day(1)) in date_set, last_n)
-    schedule = build_schedule(sched_dates; entry_time=DEFAULT_ENTRY_TIME)
+    schedule = build_schedule(sched_dates; entry_time=DEFAULT_ENTRY_TIME, entry_interval=DEFAULT_ENTRY_INTERVAL)
 
     strategy = IronCondorStrategy(
         schedule,
-        Day(1),
+        DEFAULT_EXPIRY_INTERVAL,
         short_put_pct,
         short_call_pct,
         long_put_pct,
@@ -122,6 +128,7 @@ function main()
     println("Underlying: $underlying | Entry time: $(DEFAULT_ENTRY_TIME)")
     println("Short: Put $(short_put_pct*100)% | Call $(short_call_pct*100)%")
     println("Long : Put $(long_put_pct*100)% | Call $(long_call_pct*100)%")
+    println("Expiry interval: $(DEFAULT_EXPIRY_INTERVAL)")
     println("Entries: $(length(schedule)) | Positions: $(length(positions)) | Condors: $(length(condor_keys))")
     println("PnL: total=$(round(total_pnl, digits=2)) | avg/condor=$(round(avg_pnl, digits=2))")
     missing_n > 0 && println("Missing settlements: $missing_n")
@@ -155,14 +162,26 @@ function main()
         net_entry = sum(entry_costs)
         net_payoff = sum(payoffs)
         net_pnl = net_payoff - net_entry
-        println("  net_entry=$(round(net_entry, digits=2)) net_payoff=$(round(net_payoff, digits=2)) pnl=$(round(net_pnl, digits=2))")
+        qty = positions[idxs[1]].trade.quantity
+        put_width = strikes[2].trade.strike - strikes[1].trade.strike
+        call_width = strikes[4].trade.strike - strikes[3].trade.strike
+        max_loss = max(put_width, call_width) * qty + net_entry
+        println("  net_entry=$(round(net_entry, digits=2)) net_payoff=$(round(net_payoff, digits=2)) pnl=$(round(net_pnl, digits=2)) max_loss=$(round(max_loss, digits=2))")
 
         for (p, ec, pf) in zip(strikes, entry_costs, payoffs)
             side = p.trade.direction > 0 ? "Long" : "Short"
             opt = p.trade.option_type == Call ? "C" : "P"
             entry_px = p.entry_price * p.entry_spot
             entry_frac = p.entry_price
-            println("    $(side) $(opt) K=$(round(p.trade.strike, digits=2)) entry_px=$(round(entry_px, digits=6)) entry_frac=$(round(entry_frac, digits=8)) entry_cost=$(round(ec, digits=6)) payoff=$(round(pf, digits=6))")
+            rec = find_record(surface_at(iter, entry_ts), p.trade.strike, p.trade.expiry, p.trade.option_type)
+            if rec === missing
+                println("    $(side) $(opt) K=$(round(p.trade.strike, digits=2)) entry_px=$(round(entry_px, digits=6)) entry_frac=$(round(entry_frac, digits=8)) entry_cost=$(round(ec, digits=6)) payoff=$(round(pf, digits=6)) rec=missing")
+            else
+                bid = rec.bid_price
+                ask = rec.ask_price
+                mark = rec.mark_price
+                println("    $(side) $(opt) K=$(round(p.trade.strike, digits=2)) entry_px=$(round(entry_px, digits=6)) entry_frac=$(round(entry_frac, digits=8)) entry_cost=$(round(ec, digits=6)) payoff=$(round(pf, digits=6)) bid=$(bid) ask=$(ask) mark=$(mark)")
+            end
         end
     end
 end

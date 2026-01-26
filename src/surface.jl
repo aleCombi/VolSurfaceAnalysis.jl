@@ -194,13 +194,18 @@ end
     build_surface(records::Vector{VolRecord}) -> VolatilitySurface
 
 Build a VolatilitySurface from a vector of VolRecords (assumed to be from a single timestamp).
-Stores the raw records on the surface for exact bid/ask lookup.
+Records with missing bid/ask are filtered out. Stores the remaining raw records on the surface
+for exact bid/ask lookup.
 
 For each (strike, expiry) pair, chooses the ITM option. At ATM, uses highest volume as tiebreaker.
 Records with missing mark_iv are skipped.
 """
 function build_surface(records::Vector{VolRecord})::VolatilitySurface
     isempty(records) && error("Cannot build surface from empty records")
+
+    # Filter out records without complete bid/ask quotes
+    records = filter(r -> !ismissing(r.bid_price) && !ismissing(r.ask_price), records)
+    isempty(records) && error("Cannot build surface: no records with bid/ask quotes")
 
     # Use first record for metadata (assuming all from same timestamp/underlying)
     first_rec = records[1]

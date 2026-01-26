@@ -34,6 +34,7 @@ export time_to_expiry
 
 # Surface types and functions
 export VolPoint, VolatilitySurface, build_surface
+export find_record
 export TermStructure, atm_term_structure
 export bid_iv, ask_iv
 
