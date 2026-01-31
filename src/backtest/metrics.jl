@@ -18,6 +18,8 @@ Summary metrics computed from aggregated P&L.
 - `min_pnl::Union{Float64,Missing}`: minimum P&L or missing if none
 - `max_pnl::Union{Float64,Missing}`: maximum P&L or missing if none
 - `win_rate::Union{Float64,Missing}`: fraction of wins or missing if none
+- `avg_bid_ask_spread_usd::Union{Float64,Missing}`: mean entry bid-ask spread (USD)
+- `avg_bid_ask_spread_rel::Union{Float64,Missing}`: mean entry bid-ask spread / mid (unitless)
 """
 struct BacktestMetrics
     count::Int
@@ -27,6 +29,8 @@ struct BacktestMetrics
     min_pnl::Union{Float64,Missing}
     max_pnl::Union{Float64,Missing}
     win_rate::Union{Float64,Missing}
+    avg_bid_ask_spread_usd::Union{Float64,Missing}
+    avg_bid_ask_spread_rel::Union{Float64,Missing}
 end
 
 """
@@ -42,6 +46,8 @@ Extended performance metrics computed from aggregated P&L and optional margin.
 - `min_pnl::Union{Float64,Missing}`: minimum P&L or missing if none
 - `max_pnl::Union{Float64,Missing}`: maximum P&L or missing if none
 - `win_rate::Union{Float64,Missing}`: fraction of wins or missing if none
+- `avg_bid_ask_spread_usd::Union{Float64,Missing}`: mean entry bid-ask spread (USD)
+- `avg_bid_ask_spread_rel::Union{Float64,Missing}`: mean entry bid-ask spread / mid (unitless)
 - `total_roi::Union{Float64,Missing}`: total ROI on margin (if provided)
 - `annualized_roi_simple::Union{Float64,Missing}`: simple annualized ROI
 - `annualized_roi_cagr::Union{Float64,Missing}`: CAGR annualized ROI
@@ -60,6 +66,8 @@ struct PerformanceMetrics
     min_pnl::Union{Float64,Missing}
     max_pnl::Union{Float64,Missing}
     win_rate::Union{Float64,Missing}
+    avg_bid_ask_spread_usd::Union{Float64,Missing}
+    avg_bid_ask_spread_rel::Union{Float64,Missing}
     total_roi::Union{Float64,Missing}
     annualized_roi_simple::Union{Float64,Missing}
     annualized_roi_cagr::Union{Float64,Missing}
@@ -99,6 +107,38 @@ function aggregate_pnl(
 end
 
 """
+    average_entry_spread(positions; unit=:usd) -> Union{Float64,Missing}
+
+Compute the mean entry bid-ask spread across positions. Uses entry bid/ask
+when available. If `unit=:usd`, converts spread to USD via entry spot.
+If `unit=:relative`, returns (ask - bid) / mid (unitless).
+"""
+function average_entry_spread(
+    positions::Vector{Position};
+    unit::Symbol=:usd
+)::Union{Float64,Missing}
+    spreads = Float64[]
+    for pos in positions
+        bid = pos.entry_bid
+        ask = pos.entry_ask
+        if ismissing(bid) || ismissing(ask)
+            continue
+        end
+        spread = Float64(ask) - Float64(bid)
+        isfinite(spread) || continue
+        if unit == :usd
+            spread *= pos.entry_spot
+        elseif unit == :relative
+            mid = (Float64(ask) + Float64(bid)) / 2.0
+            mid <= 0.0 && continue
+            spread /= mid
+        end
+        push!(spreads, spread)
+    end
+    return isempty(spreads) ? missing : mean(spreads)
+end
+
+"""
     backtest_metrics(positions, pnls; key=default_key) -> BacktestMetrics
 
 Compute summary statistics from backtest outputs. Aggregates per-position P&L
@@ -119,6 +159,9 @@ function backtest_metrics(
     max_pnl = trade_count == 0 ? missing : maximum(pnl_values)
     win_rate = trade_count == 0 ? missing : count(x -> x > 0, pnl_values) / trade_count
 
+    avg_spread_usd = average_entry_spread(positions; unit=:usd)
+    avg_spread_rel = average_entry_spread(positions; unit=:relative)
+
     return BacktestMetrics(
         trade_count,
         missing_count,
@@ -126,7 +169,9 @@ function backtest_metrics(
         avg,
         min_pnl,
         max_pnl,
-        win_rate
+        win_rate,
+        avg_spread_usd,
+        avg_spread_rel
     )
 end
 
@@ -178,6 +223,9 @@ function performance_metrics(
         duration_years = duration_days / 365.25
     end
 
+    avg_spread_usd = average_entry_spread(positions; unit=:usd)
+    avg_spread_rel = average_entry_spread(positions; unit=:relative)
+
     total_roi = missing
     annualized_roi_simple = missing
     annualized_roi_cagr = missing
@@ -218,6 +266,8 @@ function performance_metrics(
         min_pnl,
         max_pnl,
         win_rate,
+        avg_spread_usd,
+        avg_spread_rel,
         total_roi,
         annualized_roi_simple,
         annualized_roi_cagr,

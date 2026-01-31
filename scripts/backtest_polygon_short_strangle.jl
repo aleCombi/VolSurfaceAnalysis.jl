@@ -317,6 +317,7 @@ function main()
     metrics_df = DataFrame(
         Metric = [
             "count", "missing", "total_pnl", "avg_pnl", "min_pnl", "max_pnl", "win_rate",
+            "avg_bid_ask_spread_rel",
             "total_roi", "annualized_roi_simple", "annualized_roi_cagr",
             "avg_return", "volatility", "sharpe", "sortino",
             "duration_days", "duration_years"
@@ -329,6 +330,7 @@ function main()
             metrics.min_pnl,
             metrics.max_pnl,
             metrics.win_rate,
+            metrics.avg_bid_ask_spread_rel,
             metrics.total_roi,
             metrics.annualized_roi_simple,
             metrics.annualized_roi_cagr,

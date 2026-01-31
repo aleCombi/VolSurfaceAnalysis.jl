@@ -13,14 +13,25 @@ This is a value type with no side effects.
 - `trade::Trade`: The contract specification
 - `entry_price::Float64`: Price paid/received (fraction of underlying)
 - `entry_spot::Float64`: Spot price at entry (USD)
+- `entry_bid::Union{Float64,Missing}`: Bid price at entry (fraction of underlying)
+- `entry_ask::Union{Float64,Missing}`: Ask price at entry (fraction of underlying)
 - `entry_timestamp::DateTime`: When position was opened
 """
 struct Position
     trade::Trade
     entry_price::Float64
     entry_spot::Float64
+    entry_bid::Union{Float64,Missing}
+    entry_ask::Union{Float64,Missing}
     entry_timestamp::DateTime
 end
+
+Position(
+    trade::Trade,
+    entry_price::Float64,
+    entry_spot::Float64,
+    entry_timestamp::DateTime
+) = Position(trade, entry_price, entry_spot, missing, missing, entry_timestamp)
 
 # ============================================================================
 # Position Creation
@@ -52,8 +63,10 @@ function open_position(trade::Trade, surface::VolatilitySurface)::Position
     ismissing(price) && error("Missing bid/ask price for $(trade.strike)/$(trade.expiry)/$(trade.option_type)")
 
     entry_price = price
+    entry_bid = rec.bid_price
+    entry_ask = rec.ask_price
 
-    return Position(trade, entry_price, surface.spot, surface.timestamp)
+    return Position(trade, entry_price, surface.spot, entry_bid, entry_ask, surface.timestamp)
 end
 
 """
