@@ -1,60 +1,78 @@
 module VolSurfaceAnalysis
 
 using Dates
-using DataFrames
-using Parquet2
 using Distributions: Normal, cdf, pdf
-using Statistics: mean, std
-using HTTP
-using JSON3
+using Roots: Brent, find_zero
+using Statistics: mean, std, median
 
-# Include submodules in dependency order
-include("data.jl")      # Types: OptionType, Underlying, VolRecord
-include("models.jl")    # Black-76 pricing functions
-include("surface.jl")   # Volatility surface representation
-include("trades.jl")    # Trade representation and pricing
-include("api.jl")       # Deribit API functions
-include("local_data.jl")           # Local data store
-include("backtest/iterator.jl")    # Surface iterator for backtesting
+# ============================================================================
+# Data Layer (types and conversions)
+# ============================================================================
+include("data/option_records.jl")  # Types & common utilities
+include("data/deribit.jl")         # Deribit source logic
+include("data/polygon.jl")         # Polygon source logic
+
+# ============================================================================
+# Core Library
+# ============================================================================
+include("models.jl")               # Black-76 pricing functions
+include("surface.jl")              # Volatility surface representation
+include("trades.jl")               # Trade representation and pricing
+
+# ============================================================================
+# Backtesting
+# ============================================================================
 include("backtest/portfolio.jl")   # Position management (pure)
 include("backtest/engine.jl")      # Minimal backtest engine
 include("strategies.jl")           # Strategy implementations
 
-# Data types
-export VolRecord, OptionType, Underlying
-export Call, Put, BTC, ETH
+# ============================================================================
+# Exports: Data Types
+# ============================================================================
+# Core types
+export OptionType, Call, Put
+export Underlying, ticker
 
-# Data import functions
-export read_vol_records, split_by_timestamp
+# Source types (match parquet schemas)
+export DeribitQuote, PolygonBar, DeribitDelivery
 
-# Model functions
+# Internal type (unified)
+export OptionRecord
+
+
+# ============================================================================
+# Exports: Data Utilities
+# ============================================================================
+export parse_polygon_ticker
+export to_option_record
+
+# ============================================================================
+# Exports: Pricing Models
+# ============================================================================
 export black76_price, vol_to_price, black76_vega, price_to_iv
 export black76_delta, black76_gamma, black76_theta
 export time_to_expiry
 
-# Surface types and functions
+# ============================================================================
+# Exports: Volatility Surface
+# ============================================================================
 export VolPoint, VolatilitySurface, build_surface
 export find_record
 export TermStructure, atm_term_structure
 export bid_iv, ask_iv
 
-# Trade types and functions
+# ============================================================================
+# Exports: Trades
+# ============================================================================
 export Trade, price, payoff, find_vol
 
-# API functions
-export DeliveryPrice, fetch_delivery_prices, fetch_delivery_prices_df
-export get_delivery_price, save_delivery_prices
-
-# Local data and backtesting
-export LocalDataStore, list_parquet_files, available_dates
-export load_file, load_all, load_date, load_range, get_timestamps
-export SurfaceIterator, surface_at, first_timestamp, last_timestamp
-export date_range, timestamps, filter_timestamps
-
-# Position management (pure functions)
+# ============================================================================
+# Exports: Backtesting
+# ============================================================================
+# Position management
 export Position, open_position, entry_cost, settle
 
-# Backtest engine (minimal)
+# Engine
 export Strategy, ScheduledStrategy
 export next_portfolio, entry_schedule, entry_positions
 export BacktestResult, backtest_strategy

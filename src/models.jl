@@ -222,7 +222,7 @@ end
     price_to_iv(price, F, K, T, option_type; r=0.0, tol=1e-8, max_iter=100) -> Float64
 
 Convert an option price (as fraction of underlying) to implied volatility.
-Uses Newton-Raphson iteration with vega.
+Uses `Roots.find_zero` with a bracketing method (Brent).
 
 # Arguments
 - `price::Float64`: Option price as fraction of underlying
@@ -261,62 +261,19 @@ function price_to_iv(price::Float64, F::Float64, K::Float64, T::Float64,
         return NaN  # Price too high
     end
 
-    # Initial guess using Brenner-Subrahmanyam approximation for ATM
-    σ = sqrt(2π / T) * price  # Good starting point
-    σ = clamp(σ, 0.01, 5.0)   # Keep in reasonable range
+    f(σ) = vol_to_price(σ, F, K, T, option_type; r=r) - price
 
-    # Newton-Raphson iteration
-    for _ in 1:max_iter
-        computed_price = vol_to_price(σ, F, K, T, option_type; r=r)
-        diff = computed_price - price
-
-        if abs(diff) < tol
-            return σ
-        end
-
-        # Vega (as fraction of F)
-        vega = black76_vega(F, K, T, σ, option_type; r=r) / F
-
-        if abs(vega) < 1e-15
-            # Vega too small, switch to bisection
-            break
-        end
-
-        # Newton step with damping
-        step = diff / vega
-        σ_new = σ - step
-
-        # Keep σ positive and bounded
-        σ_new = clamp(σ_new, 0.001, 10.0)
-
-        # Check for convergence
-        if abs(σ_new - σ) < tol
-            return σ_new
-        end
-
-        σ = σ_new
+    σ_low, σ_high = 0.001, 10.0
+    f_low = f(σ_low)
+    f_high = f(σ_high)
+    if f_low > 0.0 || f_high < 0.0
+        return NaN
     end
 
-    # Fallback: bisection if Newton didn't converge
-    σ_low, σ_high = 0.001, 5.0
-    for _ in 1:100
-        σ_mid = (σ_low + σ_high) / 2
-        computed_price = vol_to_price(σ_mid, F, K, T, option_type; r=r)
-
-        if abs(computed_price - price) < tol
-            return σ_mid
-        end
-
-        if computed_price < price
-            σ_low = σ_mid
-        else
-            σ_high = σ_mid
-        end
-
-        if σ_high - σ_low < tol
-            return σ_mid
-        end
+    try
+        return find_zero(f, (σ_low, σ_high), Brent(); atol=tol, rtol=0.0, maxiters=max_iter)
+    catch
+        return NaN
     end
 
-    return NaN  # Failed to converge
 end
