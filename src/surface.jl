@@ -265,6 +265,59 @@ function build_surface(records::Vector{OptionRecord})::VolatilitySurface
 end
 
 # ============================================================================
+# Surface Construction Helpers
+# ============================================================================
+
+"""
+    build_surfaces_for_timestamps(timestamps; path_for_timestamp, read_records, ts_col=:timestamp, debug=false)
+        -> Dict{DateTime,VolatilitySurface}
+
+Build VolatilitySurface objects for a set of timestamps. Data loading is delegated
+to the provided `read_records` function, and file routing is handled by
+`path_for_timestamp`, making this helper source-agnostic.
+
+# Arguments
+- `timestamps`: vector of timestamps to load
+- `path_for_timestamp`: function `ts -> path` that returns the parquet path for a timestamp
+- `read_records`: function `(path; where="") -> Vector{OptionRecord}`
+- `ts_col`: timestamp column name in the parquet file (default: :timestamp)
+- `debug`: print diagnostics on missing data or build errors
+"""
+function build_surfaces_for_timestamps(
+    timestamps::Vector{DateTime};
+    path_for_timestamp::Function,
+    read_records::Function,
+    ts_col::Symbol=:timestamp,
+    debug::Bool=false
+)::Dict{DateTime,VolatilitySurface}
+    surfaces = Dict{DateTime,VolatilitySurface}()
+    for ts in timestamps
+        path = path_for_timestamp(ts)
+        if !isfile(path)
+            debug && println("Missing file: $path")
+            continue
+        end
+
+        ts_str = Dates.format(ts, "yyyy-mm-dd HH:MM:SS")
+        where = "$(String(ts_col)) = '$ts_str'"
+
+        records = read_records(path; where=where)
+        if isempty(records)
+            debug && println("No records at $ts in $path")
+            continue
+        end
+
+        try
+            surfaces[ts] = build_surface(records)
+        catch e
+            debug && println("Failed build_surface at $ts: $e")
+        end
+    end
+
+    return surfaces
+end
+
+# ============================================================================
 # Raw Record Lookup
 # ============================================================================
 

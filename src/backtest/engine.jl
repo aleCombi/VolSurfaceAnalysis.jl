@@ -143,3 +143,50 @@ function backtest_strategy(
 
     return all_positions, all_pnl
 end
+
+"""
+    backtest_strategy(strategy, surfaces, spots) -> (positions, pnl)
+
+Event-driven backtest for scheduled strategies using a spot time series for
+settlement. This allows expiry settlement without requiring a full surface
+at the expiry timestamp.
+
+# Arguments
+- `strategy`: A ScheduledStrategy
+- `surfaces`: Dict mapping timestamp -> VolatilitySurface (for entries)
+- `spots`: Dict mapping timestamp -> spot price (for settlement)
+
+# Returns
+- `positions::Vector{Position}`: all entered positions
+- `pnl::Vector{Union{Missing, Float64}}`: realized P&L per position; `missing` if no spot at expiry
+"""
+function backtest_strategy(
+    strategy::ScheduledStrategy,
+    surfaces::Dict{DateTime, VolatilitySurface},
+    spots::AbstractDict{DateTime, Float64}
+)
+    ts = sort(collect(keys(surfaces)))
+    entry_times = entry_schedule(strategy)
+
+    all_positions = Position[]
+    all_pnl = Union{Missing, Float64}[]
+
+    for entry_time in entry_times
+        # Find next available surface
+        idx = findfirst(t -> t >= entry_time, ts)
+        idx === nothing && continue
+
+        surface = surfaces[ts[idx]]
+        positions = entry_positions(strategy, surface)
+
+        for pos in positions
+            settlement_spot = get(spots, pos.trade.expiry, missing)
+            pnl = ismissing(settlement_spot) ? missing : settle(pos, settlement_spot)
+
+            push!(all_positions, pos)
+            push!(all_pnl, pnl)
+        end
+    end
+
+    return all_positions, all_pnl
+end

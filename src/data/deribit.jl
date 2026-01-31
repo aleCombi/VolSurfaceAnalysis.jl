@@ -137,6 +137,62 @@ function to_option_record(dq::DeribitQuote)::OptionRecord
 end
 
 # ============================================================================
+# Spot Parquet Readers
+# ============================================================================
+
+"""
+    read_deribit_spot_parquet(path; where="", underlying=nothing) -> Vector{SpotPrice}
+
+Load Deribit spot prices from a parquet file using DuckDB.
+Spot is derived from the `underlying_price` column and grouped by timestamp.
+"""
+function read_deribit_spot_parquet(
+    path::AbstractString;
+    where::AbstractString="",
+    underlying::Union{Nothing,Underlying,AbstractString}=nothing
+)::Vector{SpotPrice}
+    path_sql = replace(String(path), "\\" => "/")
+
+    conds = String[]
+    !isempty(strip(where)) && push!(conds, "($where)")
+    if underlying !== nothing
+        u = underlying isa Underlying ? ticker(underlying) : uppercase(String(underlying))
+        push!(conds, "underlying = '$u'")
+    end
+
+    where_clause = isempty(conds) ? "" : " WHERE " * join(conds, " AND ")
+
+    query = "SELECT ts AS timestamp, underlying, avg(underlying_price) AS price " *
+            "FROM '$path_sql'" * where_clause * " GROUP BY ts, underlying ORDER BY ts"
+
+    df = _duckdb_query_df(query)
+    spots = SpotPrice[]
+    for row in eachrow(df)
+        price = to_float_or_missing(row.price)
+        ismissing(price) && continue
+        u = hasproperty(row, :underlying) ? Underlying(string(row.underlying)) : missing
+        ts = to_datetime(row.timestamp)
+        push!(spots, SpotPrice(u, price, ts))
+    end
+
+    return spots
+end
+
+"""
+    read_deribit_spot_prices(path; where="", underlying=nothing) -> Dict{DateTime,Float64}
+
+Load Deribit spot data and return a timestamp -> spot dictionary.
+"""
+function read_deribit_spot_prices(
+    path::AbstractString;
+    where::AbstractString="",
+    underlying::Union{Nothing,Underlying,AbstractString}=nothing
+)::Dict{DateTime,Float64}
+    spots = read_deribit_spot_parquet(path; where=where, underlying=underlying)
+    return spot_dict(spots; underlying=underlying)
+end
+
+# ============================================================================
 # DuckDB Parquet Readers
 # ============================================================================
 

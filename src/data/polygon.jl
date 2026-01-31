@@ -233,6 +233,162 @@ function to_option_record(bar::PolygonBar, spot::Float64; warn::Bool=true)::Opti
 end
 
 # ============================================================================
+# Spot Parquet Readers
+# ============================================================================
+
+function _find_parquet_files(path::AbstractString)::Vector{String}
+    files = String[]
+    if isfile(path) && endswith(lowercase(String(path)), ".parquet")
+        push!(files, String(path))
+    elseif isdir(path)
+        for (root, _, filenames) in walkdir(path)
+            for f in filenames
+                endswith(f, ".parquet") && push!(files, joinpath(root, f))
+            end
+        end
+    end
+    sort!(files)
+    return files
+end
+
+"""
+    read_polygon_spot_parquet(path; where="", price_col=:close, ts_col=:timestamp, underlying=nothing)
+        -> Vector{SpotPrice}
+
+Load Polygon spot data from a parquet file using DuckDB.
+By default, uses the `close` column as the spot price.
+"""
+function read_polygon_spot_parquet(
+    path::AbstractString;
+    where::AbstractString="",
+    price_col::Symbol=:close,
+    ts_col::Symbol=:timestamp,
+    underlying::Union{Nothing,Underlying,AbstractString}=nothing
+)::Vector{SpotPrice}
+    cols = "$(String(ts_col)), $(String(price_col))"
+    df = _duckdb_parquet_df(path; columns=cols, where=where)
+
+    u = underlying === nothing ? missing :
+        (underlying isa Underlying ? underlying : Underlying(underlying))
+
+    spots = SpotPrice[]
+    for row in eachrow(df)
+        price = to_float_or_missing(getproperty(row, price_col))
+        ismissing(price) && continue
+        ts = to_datetime(getproperty(row, ts_col))
+        push!(spots, SpotPrice(u, price, ts))
+    end
+
+    return spots
+end
+
+"""
+    read_polygon_spot_prices(path; where="", price_col=:close, ts_col=:timestamp, underlying=nothing)
+        -> Dict{DateTime,Float64}
+
+Load Polygon spot data and return a timestamp -> spot dictionary.
+"""
+function read_polygon_spot_prices(
+    path::AbstractString;
+    where::AbstractString="",
+    price_col::Symbol=:close,
+    ts_col::Symbol=:timestamp,
+    underlying::Union{Nothing,Underlying,AbstractString}=nothing
+)::Dict{DateTime,Float64}
+    spots = read_polygon_spot_parquet(
+        path;
+        where=where,
+        price_col=price_col,
+        ts_col=ts_col,
+        underlying=underlying
+    )
+    return spot_dict(spots)
+end
+
+"""
+    read_polygon_spot_prices_for_timestamps(root, timestamps; symbol, price_col=:close, ts_col=:timestamp)
+        -> Dict{DateTime,Float64}
+
+Load Polygon spot data only for a specific set of timestamps, grouped by date.
+This avoids scanning entire daily files when only a few minutes are needed.
+"""
+function read_polygon_spot_prices_for_timestamps(
+    root::AbstractString,
+    timestamps::Vector{DateTime};
+    symbol::Union{Underlying,AbstractString},
+    price_col::Symbol=:close,
+    ts_col::Symbol=:timestamp
+)::Dict{DateTime,Float64}
+    by_date = Dict{Date, Vector{DateTime}}()
+    for ts in timestamps
+        d = Date(ts)
+        push!(get!(by_date, d, DateTime[]), ts)
+    end
+
+    sym = symbol isa Underlying ? ticker(symbol) : uppercase(String(symbol))
+    spots = Dict{DateTime,Float64}()
+
+    for (d, ts_list) in sort(collect(by_date); by=first)
+        date_str = Dates.format(d, "yyyy-mm-dd")
+        path = joinpath(root, "date=$date_str", "symbol=$sym", "data.parquet")
+        isfile(path) || continue
+
+        ts_unique = unique(ts_list)
+        ts_strs = [Dates.format(ts, "yyyy-mm-dd HH:MM:SS") for ts in ts_unique]
+        in_clause = join(["'$s'" for s in ts_strs], ", ")
+        where = "timestamp IN ($in_clause)"
+
+        dict = read_polygon_spot_prices(
+            path;
+            where=where,
+            price_col=price_col,
+            ts_col=ts_col,
+            underlying=sym
+        )
+        merge!(spots, dict)
+    end
+
+    return spots
+end
+
+"""
+    read_polygon_spot_prices_dir(root; symbol=nothing, where="", price_col=:close, ts_col=:timestamp)
+        -> Dict{DateTime,Float64}
+
+Load Polygon spot data from all parquet files under a root directory.
+Optionally filters to `symbol=...` subfolders.
+"""
+function read_polygon_spot_prices_dir(
+    root::AbstractString;
+    symbol::Union{Nothing,Underlying,AbstractString}=nothing,
+    where::AbstractString="",
+    price_col::Symbol=:close,
+    ts_col::Symbol=:timestamp
+)::Dict{DateTime,Float64}
+    files = _find_parquet_files(root)
+
+    if symbol !== nothing
+        sym = symbol isa Underlying ? ticker(symbol) : uppercase(String(symbol))
+        needle = "symbol=$(sym)"
+        files = filter(f -> occursin(lowercase(needle), lowercase(f)), files)
+    end
+
+    spots = Dict{DateTime,Float64}()
+    for f in files
+        dict = read_polygon_spot_prices(
+            f;
+            where=where,
+            price_col=price_col,
+            ts_col=ts_col,
+            underlying=symbol
+        )
+        merge!(spots, dict)
+    end
+
+    return spots
+end
+
+# ============================================================================
 # DuckDB Parquet Readers
 # ============================================================================
 

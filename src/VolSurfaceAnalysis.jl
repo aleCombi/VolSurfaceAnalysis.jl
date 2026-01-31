@@ -29,6 +29,8 @@ include("trades.jl")               # Trade representation and pricing
 # ============================================================================
 include("backtest/portfolio.jl")   # Position management (pure)
 include("backtest/engine.jl")      # Minimal backtest engine
+include("backtest/metrics.jl")     # Backtest metrics
+include("backtest/plots.jl")       # Backtest plots
 include("strategies.jl")           # Strategy implementations
 
 # ============================================================================
@@ -40,6 +42,7 @@ export Underlying, ticker
 
 # Source types (match parquet schemas)
 export DeribitQuote, PolygonBar, DeribitDelivery
+export SpotPrice
 
 # Internal type (unified)
 export OptionRecord
@@ -51,7 +54,12 @@ export OptionRecord
 export parse_polygon_ticker
 export to_option_record
 export read_deribit_parquet, read_deribit_option_records
+export read_deribit_spot_parquet, read_deribit_spot_prices
 export read_polygon_parquet, read_polygon_option_records
+export read_polygon_spot_parquet, read_polygon_spot_prices
+export read_polygon_spot_prices_for_timestamps
+export read_polygon_spot_prices_dir
+export spot_dict
 
 # ============================================================================
 # Exports: Pricing Models
@@ -64,6 +72,7 @@ export time_to_expiry
 # Exports: Volatility Surface
 # ============================================================================
 export VolPoint, VolatilitySurface, build_surface
+export build_surfaces_for_timestamps
 export find_record
 export TermStructure, atm_term_structure
 export bid_iv, ask_iv
@@ -83,8 +92,12 @@ export Position, open_position, entry_cost, settle
 export Strategy, ScheduledStrategy
 export next_portfolio, entry_schedule, entry_positions
 export BacktestResult, backtest_strategy
+export BacktestMetrics, PerformanceMetrics
+export aggregate_pnl, backtest_metrics, performance_metrics
+export save_pnl_distribution, save_equity_curve, save_pnl_and_equity_curve
 
 # Strategies
 export IronCondorStrategy
+export ShortStrangleStrategy
 
 end # module

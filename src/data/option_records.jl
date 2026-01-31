@@ -91,6 +91,27 @@ struct OptionRecord
 end
 
 # ============================================================================
+# Spot Records (independent spot time series)
+# ============================================================================
+
+"""
+    SpotPrice
+
+Spot price record used when you only need the underlying price time series
+(e.g., settlement at expiry without a full volatility surface).
+
+# Fields
+- `underlying::Union{Underlying,Missing}`: Underlying asset, if known
+- `price::Float64`: Spot price
+- `timestamp::DateTime`: Observation time
+"""
+struct SpotPrice
+    underlying::Union{Underlying,Missing}
+    price::Float64
+    timestamp::DateTime
+end
+
+# ============================================================================
 # Parsing Helpers
 # ============================================================================
 
@@ -149,3 +170,25 @@ end
 Convert a source record (DeribitQuote, PolygonBar, etc.) to an OptionRecord.
 """
 function to_option_record end
+
+"""
+    spot_dict(spots; underlying=nothing) -> Dict{DateTime,Float64}
+
+Build a timestamp -> spot map from a vector of SpotPrice records.
+If `underlying` is provided, filters to that underlying.
+"""
+function spot_dict(
+    spots::Vector{SpotPrice};
+    underlying::Union{Nothing,Underlying,AbstractString}=nothing
+)::Dict{DateTime,Float64}
+    if underlying === nothing
+        return Dict(s.timestamp => s.price for s in spots)
+    end
+
+    u = underlying isa Underlying ? underlying : Underlying(underlying)
+    return Dict(
+        s.timestamp => s.price
+        for s in spots
+        if s.underlying isa Underlying && s.underlying == u
+    )
+end
