@@ -174,6 +174,10 @@ This function uses a CONSERVATIVE approximation:
 
 This is pessimistic and may underestimate strategy performance.
 
+# IMPORTANT: Implied Volatility
+Polygon trade data does not include IV. We infer mark_iv from mark_price
+using Black-76 with spot as forward and r=0.0. Stored as a percentage.
+
 # Arguments
 - `bar`: The PolygonBar to convert
 - `spot`: Spot price of underlying (required for price normalization)
@@ -201,6 +205,15 @@ function to_option_record(bar::PolygonBar, spot::Float64; warn::Bool=true)::Opti
     ask_frac = bar.high / spot
     mark_frac = bar.close / spot
 
+    # Infer IV from mark price (if possible)
+    T = time_to_expiry(bar.expiry, bar.timestamp)
+    mark_iv = if T <= 0.0
+        missing
+    else
+        iv = price_to_iv(mark_frac, spot, bar.strike, T, bar.option_type)
+        isnan(iv) ? missing : iv * 100.0
+    end
+
     return OptionRecord(
         bar.ticker,
         bar.underlying,
@@ -210,7 +223,7 @@ function to_option_record(bar::PolygonBar, spot::Float64; warn::Bool=true)::Opti
         bid_frac,
         ask_frac,
         mark_frac,
-        missing,
+        mark_iv,
         missing,
         Float64(bar.volume),
         spot,

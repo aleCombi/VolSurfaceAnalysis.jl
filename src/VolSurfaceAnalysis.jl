@@ -6,16 +6,20 @@ using Roots: Brent, find_zero
 using Statistics: mean, std, median
 
 # ============================================================================
-# Data Layer (types and conversions)
+# Core Types & Models
 # ============================================================================
 include("data/option_records.jl")  # Types & common utilities
+include("models.jl")               # Black-76 pricing functions
+
+# ============================================================================
+# Data Layer (source conversions)
+# ============================================================================
 include("data/deribit.jl")         # Deribit source logic
 include("data/polygon.jl")         # Polygon source logic
 
 # ============================================================================
 # Core Library
 # ============================================================================
-include("models.jl")               # Black-76 pricing functions
 include("surface.jl")              # Volatility surface representation
 include("trades.jl")               # Trade representation and pricing
 
