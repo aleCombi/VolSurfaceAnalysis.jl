@@ -18,8 +18,13 @@ at +/- N sigma from spot.
 - `quantity::Float64`: Contracts per leg
 - `tau_tol::Float64`: Tolerance for expiry tenor mismatch (used for warnings)
 - `debug::Bool`: Emit diagnostics when entries fail
+- `strike_selector`: Optional strike selector. If `nothing`, uses default
+  sigma-based logic. Otherwise, must be callable as `f(ctx)` and return
+  `(short_put, short_call)` or `nothing`.
+  The `ctx` is a named tuple with:
+  `surface`, `expiry`, `tau`, `recs`, `put_strikes`, `call_strikes`.
 """
-struct ShortStrangleStrategy <: ScheduledStrategy
+struct ShortStrangleStrategy{F} <: ScheduledStrategy
     schedule::Vector{DateTime}
     expiry_interval::Period
     short_sigmas::Float64
@@ -28,6 +33,7 @@ struct ShortStrangleStrategy <: ScheduledStrategy
     quantity::Float64
     tau_tol::Float64
     debug::Bool
+    strike_selector::F
 end
 
 entry_schedule(strategy::ShortStrangleStrategy)::Vector{DateTime} = strategy.schedule
@@ -39,7 +45,8 @@ function ShortStrangleStrategy(
     rate::Float64,
     div_yield::Float64,
     quantity::Float64,
-    tau_tol::Float64
+    tau_tol::Float64;
+    strike_selector=nothing
 )
     return ShortStrangleStrategy(
         schedule,
@@ -49,7 +56,8 @@ function ShortStrangleStrategy(
         div_yield,
         quantity,
         tau_tol,
-        false
+        false,
+        strike_selector
     )
 end
 
@@ -61,7 +69,8 @@ function ShortStrangleStrategy(
     div_yield::Float64=0.0,
     quantity::Float64=1.0,
     tau_tol::Float64=1e-6,
-    debug::Bool=false
+    debug::Bool=false,
+    strike_selector=nothing
 )
     return ShortStrangleStrategy(
         schedule,
@@ -71,7 +80,8 @@ function ShortStrangleStrategy(
         div_yield,
         quantity,
         tau_tol,
-        debug
+        debug,
+        strike_selector
     )
 end
 
@@ -90,30 +100,41 @@ function entry_positions(
     recs = filter(r -> r.expiry == expiry, surface.records)
     isempty(recs) && return Position[]
 
-    atm_rec = recs[argmin([abs(r.strike - surface.spot) for r in recs])]
-    ismissing(atm_rec.mark_price) && return Position[]
-
-    F_atm = surface.spot * exp((strategy.rate - strategy.div_yield) * tau_closest)
-    atm_iv = price_to_iv(atm_rec.mark_price, F_atm, atm_rec.strike, tau_closest, atm_rec.option_type; r=strategy.rate)
-    if isnan(atm_iv) || atm_iv <= 0.0
-        return Position[]
-    end
-
-    sigma_move = atm_iv * sqrt(tau_closest)
-    short_put_pct = 1.0 - strategy.short_sigmas * sigma_move
-    short_call_pct = 1.0 + strategy.short_sigmas * sigma_move
-
     put_strikes = sort(unique(r.strike for r in recs if r.option_type == Put))
     call_strikes = sort(unique(r.strike for r in recs if r.option_type == Call))
     if isempty(put_strikes) || isempty(call_strikes)
         return Position[]
     end
 
-    target_put = surface.spot * short_put_pct
-    target_call = surface.spot * short_call_pct
+    ctx = (
+        surface=surface,
+        expiry=expiry,
+        tau=tau_closest,
+        recs=recs,
+        put_strikes=put_strikes,
+        call_strikes=call_strikes
+    )
 
-    short_put_K = _pick_otm_strike(put_strikes, surface.spot, target_put; side=:put)
-    short_call_K = _pick_otm_strike(call_strikes, surface.spot, target_call; side=:call)
+    strikes_tuple = if strategy.strike_selector === nothing
+        _sigma_strangle_strikes(
+            ctx,
+            strategy.short_sigmas,
+            strategy.rate,
+            strategy.div_yield;
+            debug=strategy.debug
+        )
+    else
+        strategy.strike_selector(ctx)
+    end
+
+    if strikes_tuple === nothing
+        if strategy.debug
+            println("No entry: invalid strangle strikes (timestamp=$(surface.timestamp), spot=$(surface.spot))")
+        end
+        return Position[]
+    end
+
+    short_put_K, short_call_K = strikes_tuple
 
     trades = Trade[
         Trade(surface.underlying, short_put_K, expiry, Put; direction=-1, quantity=strategy.quantity),

@@ -19,8 +19,13 @@ configurable multiples of the implied sigma move.
 - `quantity::Float64`: Contracts per leg
 - `tau_tol::Float64`: Tolerance for expiry tenor mismatch (used for warnings)
 - `debug::Bool`: Emit diagnostics when entries fail
+- `strike_selector`: Optional strike selector. If `nothing`, uses default
+  sigma-based logic. Otherwise, must be callable as `f(ctx)` and return
+  `(short_put, short_call, long_put, long_call)` or `nothing`.
+  The `ctx` is a named tuple with:
+  `surface`, `expiry`, `tau`, `recs`, `put_strikes`, `call_strikes`.
 """
-struct IronCondorStrategy <: ScheduledStrategy
+struct IronCondorStrategy{F} <: ScheduledStrategy
     schedule::Vector{DateTime}
     expiry_interval::Period
     short_sigmas::Float64
@@ -30,6 +35,7 @@ struct IronCondorStrategy <: ScheduledStrategy
     quantity::Float64
     tau_tol::Float64
     debug::Bool
+    strike_selector::F
 end
 
 entry_schedule(strategy::IronCondorStrategy)::Vector{DateTime} = strategy.schedule
@@ -42,7 +48,8 @@ function IronCondorStrategy(
     rate::Float64,
     div_yield::Float64,
     quantity::Float64,
-    tau_tol::Float64
+    tau_tol::Float64;
+    strike_selector=nothing
 )
     return IronCondorStrategy(
         schedule,
@@ -53,7 +60,8 @@ function IronCondorStrategy(
         div_yield,
         quantity,
         tau_tol,
-        false
+        false,
+        strike_selector
     )
 end
 
@@ -66,7 +74,8 @@ function IronCondorStrategy(
     div_yield::Float64=0.0,
     quantity::Float64=1.0,
     tau_tol::Float64=1e-6,
-    debug::Bool=false
+    debug::Bool=false,
+    strike_selector=nothing
 )
     return IronCondorStrategy(
         schedule,
@@ -77,7 +86,8 @@ function IronCondorStrategy(
         div_yield,
         quantity,
         tau_tol,
-        debug
+        debug,
+        strike_selector
     )
 end
 
@@ -106,39 +116,6 @@ function entry_positions(
         return Position[]
     end
 
-    # --- ATM IV lookup for sigma-based strike placement ---
-    atm_rec = recs[argmin([abs(r.strike - surface.spot) for r in recs])]
-    if ismissing(atm_rec.mark_price)
-        if strategy.debug
-            println("No entry: ATM record has no mark_price (timestamp=$(surface.timestamp))")
-        end
-        return Position[]
-    end
-    F_atm = surface.spot * exp((strategy.rate - strategy.div_yield) * tau_closest)
-    atm_iv = price_to_iv(atm_rec.mark_price, F_atm, atm_rec.strike, tau_closest, atm_rec.option_type; r=strategy.rate)
-    if isnan(atm_iv) || atm_iv <= 0
-        if strategy.debug
-            println("No entry: could not compute ATM IV (timestamp=$(surface.timestamp))")
-        end
-        return Position[]
-    end
-
-    # Derive strike targets: +/- N sigma from spot
-    sigma_move = atm_iv * sqrt(tau_closest)
-    short_put_pct = 1.0 - strategy.short_sigmas * sigma_move
-    short_call_pct = 1.0 + strategy.short_sigmas * sigma_move
-    long_put_pct = 1.0 - strategy.long_sigmas * sigma_move
-    long_call_pct = 1.0 + strategy.long_sigmas * sigma_move
-
-    if strategy.debug
-        println(
-            "  ATM IV=$(round(atm_iv * 100; digits=1))%, sigma=$(round(sigma_move * 100; digits=2))%, " *
-            "shorts +/-$(round(strategy.short_sigmas * sigma_move * 100; digits=2))%, " *
-            "longs +/-$(round(strategy.long_sigmas * sigma_move * 100; digits=2))%"
-        )
-    end
-    # --- end ATM IV ---
-
     put_strikes = sort(unique(r.strike for r in recs if r.option_type == Put))
     call_strikes = sort(unique(r.strike for r in recs if r.option_type == Call))
 
@@ -149,15 +126,28 @@ function entry_positions(
         return Position[]
     end
 
-    strikes_tuple = _condor_strikes(
-        put_strikes,
-        call_strikes,
-        surface.spot,
-        short_put_pct,
-        short_call_pct,
-        long_put_pct,
-        long_call_pct
+    ctx = (
+        surface=surface,
+        expiry=expiry,
+        tau=tau_closest,
+        recs=recs,
+        put_strikes=put_strikes,
+        call_strikes=call_strikes
     )
+
+    strikes_tuple = if strategy.strike_selector === nothing
+        _sigma_condor_strikes(
+            ctx,
+            strategy.short_sigmas,
+            strategy.long_sigmas,
+            strategy.rate,
+            strategy.div_yield;
+            debug=strategy.debug
+        )
+    else
+        strategy.strike_selector(ctx)
+    end
+
     if strikes_tuple === nothing
         if strategy.debug
             println("No entry: invalid condor strikes (timestamp=$(surface.timestamp), spot=$(surface.spot))")

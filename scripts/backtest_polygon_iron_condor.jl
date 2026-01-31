@@ -23,6 +23,9 @@ const EXPIRY_INTERVAL = Day(1)
 
 const SHORT_SIGMAS = 0.7
 const LONG_SIGMAS = 1.5
+const SHORT_DELTA_ABS = 0.16
+const LONG_DELTA_ABS = 0.05
+const MIN_DELTA_GAP = 0.08
 const RISK_FREE_RATE = 0.045
 const DIV_YIELD = 0.013
 const QUANTITY = 1.0
@@ -168,16 +171,28 @@ function run_symbol_backtest(symbol::String)
     end
 
     schedule = sort(collect(keys(surfaces)))
+    strike_selector = ctx -> VolSurfaceAnalysis._delta_condor_strikes(
+        ctx,
+        SHORT_DELTA_ABS,
+        SHORT_DELTA_ABS,
+        LONG_DELTA_ABS,
+        LONG_DELTA_ABS;
+        rate=RISK_FREE_RATE,
+        div_yield=DIV_YIELD,
+        min_delta_gap=MIN_DELTA_GAP,
+        debug=false
+    )
     strategy = IronCondorStrategy(
         schedule,
         EXPIRY_INTERVAL,
         SHORT_SIGMAS,
-        LONG_SIGMAS,
-        RISK_FREE_RATE,
-        DIV_YIELD,
-        QUANTITY,
-        TAU_TOL,
-        false
+        LONG_SIGMAS;
+        rate=RISK_FREE_RATE,
+        div_yield=DIV_YIELD,
+        quantity=QUANTITY,
+        tau_tol=TAU_TOL,
+        debug=false,
+        strike_selector=strike_selector
     )
 
     expiry_ts = DateTime[]
@@ -270,8 +285,8 @@ function run_symbol_backtest(symbol::String)
     push!(lines, "Strategy Parameters:")
     push!(lines, "  Entry time: $(ENTRY_TIME_ET) ET (DST-aware)")
     push!(lines, "  Expiry: ~$EXPIRY_INTERVAL from entry")
-    push!(lines, "  Short legs: +/-$(SHORT_SIGMAS) sigma from ATM IV")
-    push!(lines, "  Long legs: +/-$(LONG_SIGMAS) sigma from ATM IV")
+    push!(lines, "  Short legs: +/-$(round(SHORT_DELTA_ABS * 100, digits=0)) delta")
+    push!(lines, "  Long legs: +/-$(round(LONG_DELTA_ABS * 100, digits=0)) delta")
     push!(lines, "  Quantity per leg: $QUANTITY")
     push!(lines, "")
     push!(lines, "Results:")

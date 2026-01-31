@@ -1,6 +1,6 @@
 # Short Strangle Backtest on Polygon SPY Data
 # Uses VolSurfaceAnalysis ScheduledStrategy interface and DuckDB readers
-# Sells short put + short call at +/- short_sigmas * ATM sigma
+# Sells short put + short call using a custom strike selector
 # Uses conservative OHLC bid/ask approximation from Polygon minute bars
 
 using Pkg
@@ -22,6 +22,8 @@ const ENTRY_TIME_ET = Time(10, 0)  # 10:00 AM Eastern Time (DST-aware)
 const EXPIRY_INTERVAL = Day(1)
 
 const SHORT_SIGMAS = 0.8
+const FIXED_WING_PCT = 0.02  # +/- 2% from spot (overrides sigma-based if selector set)
+const TARGET_DELTA = 0.15   # 15-delta strangle (custom selector)
 const RISK_FREE_RATE = 0.045
 const DIV_YIELD = 0.013
 const QUANTITY = 1.0
@@ -56,6 +58,33 @@ function build_entry_timestamps(dates::Vector{Date})::Vector{DateTime}
         push!(ts, et_to_utc(date, ENTRY_TIME_ET))
     end
     return ts
+end
+
+# Fixed-wing strike selector (+/- pct from spot)
+function _pick_otm_strike(
+    strikes::Vector{Float64},
+    spot::Float64,
+    target::Float64;
+    side::Symbol
+)::Float64
+    otm = side == :put ? filter(s -> s < spot, strikes) : filter(s -> s > spot, strikes)
+    candidates = !isempty(otm) ? otm : strikes
+    distances = abs.(candidates .- target)
+    return candidates[argmin(distances)]
+end
+
+function _fixed_wing_strangle(ctx, pct::Float64)::Union{Nothing,Tuple{Float64,Float64}}
+    put_strikes = ctx.put_strikes
+    call_strikes = ctx.call_strikes
+    isempty(put_strikes) && return nothing
+    isempty(call_strikes) && return nothing
+
+    target_put = ctx.surface.spot * (1.0 - pct)
+    target_call = ctx.surface.spot * (1.0 + pct)
+
+    short_put_K = _pick_otm_strike(put_strikes, ctx.surface.spot, target_put; side=:put)
+    short_call_K = _pick_otm_strike(call_strikes, ctx.surface.spot, target_call; side=:call)
+    return (short_put_K, short_call_K)
 end
 
 # -----------------------------------------------------------------------------
@@ -110,15 +139,23 @@ function main()
     isempty(surfaces) && error("No surfaces built (check data and filters)")
 
     schedule = sort(collect(keys(surfaces)))
+    strike_selector = ctx -> VolSurfaceAnalysis._delta_strangle_strikes(
+        ctx,
+        TARGET_DELTA;
+        rate=RISK_FREE_RATE,
+        div_yield=DIV_YIELD,
+        debug=false
+    )
     strategy = ShortStrangleStrategy(
         schedule,
         EXPIRY_INTERVAL,
-        SHORT_SIGMAS,
-        RISK_FREE_RATE,
-        DIV_YIELD,
-        QUANTITY,
-        TAU_TOL,
-        false
+        SHORT_SIGMAS;
+        rate=RISK_FREE_RATE,
+        div_yield=DIV_YIELD,
+        quantity=QUANTITY,
+        tau_tol=TAU_TOL,
+        debug=false,
+        strike_selector=strike_selector
     )
 
     expiry_ts = DateTime[]
@@ -203,7 +240,7 @@ function main()
     push!(lines, "Strategy Parameters:")
     push!(lines, "  Entry time: $(ENTRY_TIME_ET) ET (DST-aware)")
     push!(lines, "  Expiry: ~$EXPIRY_INTERVAL from entry")
-    push!(lines, "  Short legs: +/-$(SHORT_SIGMAS) sigma from ATM IV")
+    push!(lines, "  Short legs: +/-$(round(TARGET_DELTA * 100, digits=0)) delta")
     push!(lines, "  Quantity per leg: $QUANTITY")
     push!(lines, "")
     push!(lines, "Results:")
