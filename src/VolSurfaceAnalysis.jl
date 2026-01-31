@@ -59,6 +59,7 @@ export read_polygon_parquet, read_polygon_option_records
 export read_polygon_spot_parquet, read_polygon_spot_prices
 export read_polygon_spot_prices_for_timestamps
 export read_polygon_spot_prices_dir
+export et_to_utc
 export spot_dict
 
 # ============================================================================
@@ -93,8 +94,9 @@ export Strategy, ScheduledStrategy
 export next_portfolio, entry_schedule, entry_positions
 export BacktestResult, backtest_strategy
 export BacktestMetrics, PerformanceMetrics
-export aggregate_pnl, backtest_metrics, performance_metrics
-export save_pnl_distribution, save_equity_curve, save_pnl_and_equity_curve
+export aggregate_pnl, backtest_metrics, performance_metrics, profit_curve
+export settlement_zone_analysis, settlement_zone_summary
+export save_pnl_distribution, save_equity_curve, save_pnl_and_equity_curve, save_profit_curve, save_spot_curve
 
 # Strategies
 export IronCondorStrategy

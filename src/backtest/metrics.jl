@@ -3,6 +3,7 @@
 
 using Dates
 using Statistics
+using DataFrames
 
 """
     BacktestMetrics
@@ -109,17 +110,17 @@ function backtest_metrics(
     key::Function = pos -> (pos.entry_timestamp, pos.trade.expiry)
 )::BacktestMetrics
     pnl_by_key, missing_count = aggregate_pnl(positions, pnls; key=key)
-    values = collect(values(pnl_by_key))
+    pnl_values = collect(values(pnl_by_key))
 
-    count = length(values)
-    total = count == 0 ? 0.0 : sum(values)
-    avg = count == 0 ? 0.0 : total / count
-    min_pnl = count == 0 ? missing : minimum(values)
-    max_pnl = count == 0 ? missing : maximum(values)
-    win_rate = count == 0 ? missing : count(x -> x > 0, values) / count
+    trade_count = length(pnl_values)
+    total = trade_count == 0 ? 0.0 : sum(pnl_values)
+    avg = trade_count == 0 ? 0.0 : total / trade_count
+    min_pnl = trade_count == 0 ? missing : minimum(pnl_values)
+    max_pnl = trade_count == 0 ? missing : maximum(pnl_values)
+    win_rate = trade_count == 0 ? missing : count(x -> x > 0, pnl_values) / trade_count
 
     return BacktestMetrics(
-        count,
+        trade_count,
         missing_count,
         total,
         avg,
@@ -159,13 +160,13 @@ function performance_metrics(
         end
     end
 
-    values = collect(values(pnl_by_key))
-    count = length(values)
-    total = count == 0 ? 0.0 : sum(values)
-    avg = count == 0 ? 0.0 : total / count
-    min_pnl = count == 0 ? missing : minimum(values)
-    max_pnl = count == 0 ? missing : maximum(values)
-    win_rate = count == 0 ? missing : count(x -> x > 0, values) / count
+    pnl_values = collect(values(pnl_by_key))
+    trade_count = length(pnl_values)
+    total = trade_count == 0 ? 0.0 : sum(pnl_values)
+    avg = trade_count == 0 ? 0.0 : total / trade_count
+    min_pnl = trade_count == 0 ? missing : minimum(pnl_values)
+    max_pnl = trade_count == 0 ? missing : maximum(pnl_values)
+    win_rate = trade_count == 0 ? missing : count(x -> x > 0, pnl_values) / trade_count
 
     duration_days = missing
     duration_years = missing
@@ -185,8 +186,8 @@ function performance_metrics(
     sharpe = missing
     sortino = missing
 
-    if margin_per_trade !== nothing && margin_per_trade > 0 && count > 0
-        returns = [v / margin_per_trade for v in values]
+    if margin_per_trade !== nothing && margin_per_trade > 0 && trade_count > 0
+        returns = [v / margin_per_trade for v in pnl_values]
         avg_return = mean(returns)
         volatility = std(returns)
 
@@ -210,7 +211,7 @@ function performance_metrics(
     end
 
     return PerformanceMetrics(
-        count,
+        trade_count,
         missing_count,
         total,
         avg,
@@ -227,4 +228,180 @@ function performance_metrics(
         duration_days,
         duration_years
     )
+end
+
+"""
+    profit_curve(dates, pnls) -> (Vector{Date}, Vector{Float64})
+
+Prepare a per-trade profit curve by pairing dates and P&L values, filtering
+missing/non-finite entries, and sorting by date. Returns dates and P&L values
+in matching order (non-cumulative).
+"""
+function profit_curve(dates, pnls)::Tuple{Vector{Date}, Vector{Float64}}
+    pairs = Tuple{Date,Float64}[]
+    for (d, v) in zip(dates, pnls)
+        d === missing && continue
+        v === missing && continue
+        fv = Float64(v)
+        isfinite(fv) || continue
+        push!(pairs, (Date(d), fv))
+    end
+    sort!(pairs, by=first)
+    xs = [p[1] for p in pairs]
+    ys = [p[2] for p in pairs]
+    return xs, ys
+end
+
+"""
+    settlement_zone_analysis(positions, settlement_spots; first_year_only=true) -> DataFrame
+
+Analyze where the underlying settled relative to the option strikes for each trade group.
+Groups positions by entry date (all legs on the same day = one condor/strangle).
+
+# Arguments
+- `positions::Vector{Position}`: All positions from the backtest
+- `settlement_spots::AbstractDict{DateTime,Float64}`: Settlement prices by expiry timestamp
+- `first_year_only::Bool`: If true, only analyze the first year of data (default: true)
+
+# Returns
+DataFrame with columns:
+- `entry_date`: Date of entry
+- `expiry`: Expiry timestamp
+- `settlement_spot`: Where the underlying settled
+- `zone`: Settlement zone (String)
+- `short_put`, `long_put`, `short_call`, `long_call`: Strike prices (missing if not applicable)
+"""
+function settlement_zone_analysis(
+    positions::Vector{Position},
+    settlement_spots::AbstractDict{DateTime,Float64};
+    first_year_only::Bool=true
+)::DataFrame
+    # Group positions by (entry_date, expiry)
+    groups = Dict{Tuple{Date,DateTime}, Vector{Position}}()
+    for pos in positions
+        key = (Date(pos.entry_timestamp), pos.trade.expiry)
+        push!(get!(groups, key, Position[]), pos)
+    end
+
+    # Filter to first year if requested
+    all_dates = [k[1] for k in keys(groups)]
+    isempty(all_dates) && return DataFrame()
+
+    min_date = minimum(all_dates)
+    if first_year_only
+        cutoff = min_date + Year(1)
+        groups = filter(kv -> kv[1][1] < cutoff, groups)
+    end
+
+    rows = NamedTuple[]
+
+    for ((entry_date, expiry), group_positions) in sort(collect(groups); by=first)
+        settlement = get(settlement_spots, expiry, missing)
+        ismissing(settlement) && continue
+
+        # Extract strikes by option type and direction
+        short_puts = Float64[]
+        long_puts = Float64[]
+        short_calls = Float64[]
+        long_calls = Float64[]
+
+        for pos in group_positions
+            t = pos.trade
+            if t.option_type == Put
+                if t.direction < 0
+                    push!(short_puts, t.strike)
+                else
+                    push!(long_puts, t.strike)
+                end
+            else  # Call
+                if t.direction < 0
+                    push!(short_calls, t.strike)
+                else
+                    push!(long_calls, t.strike)
+                end
+            end
+        end
+
+        # Determine zone based on structure
+        short_put = isempty(short_puts) ? missing : maximum(short_puts)
+        long_put = isempty(long_puts) ? missing : minimum(long_puts)
+        short_call = isempty(short_calls) ? missing : minimum(short_calls)
+        long_call = isempty(long_calls) ? missing : maximum(long_calls)
+
+        zone = _determine_zone(settlement, short_put, long_put, short_call, long_call)
+
+        push!(rows, (
+            entry_date = entry_date,
+            expiry = expiry,
+            settlement_spot = settlement,
+            zone = zone,
+            short_put = short_put,
+            long_put = long_put,
+            short_call = short_call,
+            long_call = long_call
+        ))
+    end
+
+    return DataFrame(rows)
+end
+
+"""Determine the settlement zone based on spot and strikes."""
+function _determine_zone(
+    spot::Float64,
+    short_put::Union{Float64,Missing},
+    long_put::Union{Float64,Missing},
+    short_call::Union{Float64,Missing},
+    long_call::Union{Float64,Missing}
+)::String
+    # Iron condor (all 4 legs)
+    if !ismissing(short_put) && !ismissing(long_put) && !ismissing(short_call) && !ismissing(long_call)
+        if spot < long_put
+            return "below_long_put"
+        elseif spot < short_put
+            return "between_puts"
+        elseif spot <= short_call
+            return "max_profit"
+        elseif spot <= long_call
+            return "between_calls"
+        else
+            return "above_long_call"
+        end
+    end
+
+    # Strangle (short put + short call, no longs)
+    if !ismissing(short_put) && !ismissing(short_call) && ismissing(long_put) && ismissing(long_call)
+        if spot < short_put
+            return "below_short_put"
+        elseif spot <= short_call
+            return "max_profit"
+        else
+            return "above_short_call"
+        end
+    end
+
+    return "unknown"
+end
+
+"""
+    settlement_zone_summary(zone_df::DataFrame) -> DataFrame
+
+Summarize settlement zone frequencies from zone analysis.
+
+# Returns
+DataFrame with columns: zone, count, percentage
+"""
+function settlement_zone_summary(zone_df::DataFrame)::DataFrame
+    isempty(zone_df) && return DataFrame(zone=String[], count=Int[], percentage=Float64[])
+
+    total = nrow(zone_df)
+    zone_counts = combine(groupby(zone_df, :zone), nrow => :count)
+    zone_counts.percentage = round.(zone_counts.count ./ total .* 100, digits=1)
+
+    # Sort by a logical order
+    zone_order = ["below_long_put", "between_puts", "below_short_put",
+                  "max_profit",
+                  "between_calls", "above_short_call", "above_long_call", "unknown"]
+    sort!(zone_counts, :zone, by=z -> findfirst(==(z), zone_order))
+
+    return zone_counts
 end

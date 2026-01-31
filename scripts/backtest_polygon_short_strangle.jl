@@ -18,10 +18,10 @@ const START_DATE = Date(2024, 1, 29)
 const END_DATE_CUTOFF = Date(2025, 8, 1)
 
 # Strategy parameters
-const ENTRY_TIME_UTC = Time(14, 0)  # 10:00 ET
+const ENTRY_TIME_ET = Time(10, 0)  # 10:00 AM Eastern Time (DST-aware)
 const EXPIRY_INTERVAL = Day(1)
 
-const SHORT_SIGMAS = 0.6
+const SHORT_SIGMAS = 0.8
 const RISK_FREE_RATE = 0.045
 const DIV_YIELD = 0.013
 const QUANTITY = 1.0
@@ -53,7 +53,7 @@ end
 function build_entry_timestamps(dates::Vector{Date})::Vector{DateTime}
     ts = DateTime[]
     for date in dates
-        push!(ts, DateTime(date) + Hour(Dates.hour(ENTRY_TIME_UTC)) + Minute(Dates.minute(ENTRY_TIME_UTC)))
+        push!(ts, et_to_utc(date, ENTRY_TIME_ET))
     end
     return ts
 end
@@ -201,7 +201,7 @@ function main()
     push!(lines, "Excluded dates >= $END_DATE_CUTOFF")
     push!(lines, "")
     push!(lines, "Strategy Parameters:")
-    push!(lines, "  Entry time: $(ENTRY_TIME_UTC) UTC")
+    push!(lines, "  Entry time: $(ENTRY_TIME_ET) ET (DST-aware)")
     push!(lines, "  Expiry: ~$EXPIRY_INTERVAL from entry")
     push!(lines, "  Short legs: +/-$(SHORT_SIGMAS) sigma from ATM IV")
     push!(lines, "  Quantity per leg: $QUANTITY")
@@ -235,7 +235,7 @@ function main()
     push!(lines, "")
     push!(lines, "=" ^ 80)
 
-    output_file = joinpath(RUN_DIR, "polygon_short_strangle_results.txt")
+    output_file = joinpath(RUN_DIR, "results_$(UNDERLYING_SYMBOL)_results.txt")
     open(output_file, "w") do io
         for line in lines
             println(io, line)
@@ -268,15 +268,15 @@ function main()
         ))
     end
 
-    csv_path = joinpath(RUN_DIR, "polygon_short_strangle_pnl.csv")
+    csv_path = joinpath(RUN_DIR, "results_$(UNDERLYING_SYMBOL)_pnl.csv")
     CSV.write(csv_path, df_results)
     println("Daily P&L saved to: $csv_path")
 
-    trades_csv_path = joinpath(RUN_DIR, "polygon_short_strangle_trades.csv")
+    trades_csv_path = joinpath(RUN_DIR, "results_$(UNDERLYING_SYMBOL)_trades.csv")
     CSV.write(trades_csv_path, detailed_results)
     println("Detailed trades saved to: $trades_csv_path")
 
-    metrics_csv_path = joinpath(RUN_DIR, "polygon_short_strangle_metrics.csv")
+    metrics_csv_path = joinpath(RUN_DIR, "results_$(UNDERLYING_SYMBOL)_metrics.csv")
     metrics_df = DataFrame(
         Metric = [
             "count", "missing", "total_pnl", "avg_pnl", "min_pnl", "max_pnl", "win_rate",
@@ -306,8 +306,22 @@ function main()
     CSV.write(metrics_csv_path, metrics_df)
     println("Metrics saved to: $metrics_csv_path")
 
+    # Settlement zone analysis (first year only)
+    zone_df = settlement_zone_analysis(positions, settlement_spots; first_year_only=true)
+    if !isempty(zone_df)
+        zone_summary = settlement_zone_summary(zone_df)
+        zone_path = joinpath(RUN_DIR, "results_$(UNDERLYING_SYMBOL)_zones.csv")
+        zone_detail_path = joinpath(RUN_DIR, "results_$(UNDERLYING_SYMBOL)_zones_detail.csv")
+        CSV.write(zone_path, zone_summary)
+        CSV.write(zone_detail_path, zone_df)
+        println("Settlement zone analysis (first year):")
+        for row in eachrow(zone_summary)
+            println("  $(row.zone): $(row.count) ($(row.percentage)%)")
+        end
+    end
+
     if !isempty(df_results)
-        plot_path = joinpath(RUN_DIR, "plots", "strangle_pnl_distribution.png")
+        plot_path = joinpath(RUN_DIR, "plots", "short_strangle_$(UNDERLYING_SYMBOL)_pnl_distribution.png")
         save_pnl_and_equity_curve(
             df_results.EntryDate,
             df_results.PnL,
@@ -315,6 +329,21 @@ function main()
             title_prefix="Short Strangle"
         )
         println("P&L distribution plot saved to: $plot_path")
+
+        profit_path = joinpath(RUN_DIR, "plots", "short_strangle_$(UNDERLYING_SYMBOL)_profit_curve.png")
+        save_profit_curve(
+            df_results.EntryDate,
+            df_results.PnL,
+            profit_path;
+            title="Short Strangle $(UNDERLYING_SYMBOL) - Profit per Trade"
+        )
+        println("Profit curve saved to: $profit_path")
+    end
+
+    if !isempty(entry_spots)
+        spot_path = joinpath(RUN_DIR, "plots", "short_strangle_$(UNDERLYING_SYMBOL)_spot_curve.png")
+        save_spot_curve(entry_spots, spot_path; title="Spot Curve $(UNDERLYING_SYMBOL)")
+        println("Spot curve saved to: $spot_path")
     end
 end
 

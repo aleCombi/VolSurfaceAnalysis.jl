@@ -17,16 +17,8 @@ function _clean_pnls(pnls)::Vector{Float64}
 end
 
 function _paired_series(dates, pnls)
-    pairs = Tuple{Date,Float64}[]
-    for (d, v) in zip(dates, pnls)
-        d === missing && continue
-        v === missing && continue
-        fv = Float64(v)
-        isfinite(fv) || continue
-        push!(pairs, (Date(d), fv))
-    end
-    sort!(pairs, by=first)
-    return pairs
+    xs, ys = profit_curve(dates, pnls)
+    return collect(zip(xs, ys))
 end
 
 """
@@ -71,11 +63,9 @@ function save_equity_curve(
     path::AbstractString;
     title::AbstractString="Cumulative P&L"
 )::AbstractString
-    pairs = _paired_series(dates, pnls)
-    isempty(pairs) && return path
-
-    xs = [p[1] for p in pairs]
-    ys = cumsum([p[2] for p in pairs])
+    xs, vals = profit_curve(dates, pnls)
+    isempty(xs) && return path
+    ys = cumsum(vals)
 
     p = plot(
         xs,
@@ -95,6 +85,71 @@ function save_equity_curve(
 end
 
 """
+    save_profit_curve(dates, pnls, path; title="Profit per Trade")
+
+Save a per-trade profit curve (non-cumulative) to `path`.
+"""
+function save_profit_curve(
+    dates,
+    pnls,
+    path::AbstractString;
+    title::AbstractString="Profit per Trade"
+)::AbstractString
+    xs, ys = profit_curve(dates, pnls)
+    isempty(xs) && return path
+
+    p = plot(
+        xs,
+        ys,
+        label="Profit",
+        title=title,
+        xlabel="Date",
+        ylabel="P&L (USD)",
+        linewidth=1.5,
+        color=:darkorange,
+        legend=:topleft
+    )
+    hline!(p, [0], color=:black, linestyle=:dash, label="", linewidth=1)
+
+    mkpath(dirname(path))
+    savefig(p, path)
+    return path
+end
+
+"""
+    save_spot_curve(spots, path; title="Spot Curve")
+
+Save a spot price curve to `path`. `spots` is a Dict{DateTime,Float64}.
+"""
+function save_spot_curve(
+    spots::AbstractDict{DateTime,Float64},
+    path::AbstractString;
+    title::AbstractString="Spot Curve"
+)::AbstractString
+    isempty(spots) && return path
+
+    pairs = sort(collect(spots); by=first)
+    xs = [Date(p[1]) for p in pairs]
+    ys = [p[2] for p in pairs]
+
+    p = plot(
+        xs,
+        ys,
+        label="Spot",
+        title=title,
+        xlabel="Date",
+        ylabel="Spot (USD)",
+        linewidth=2,
+        color=:navy,
+        legend=:topleft
+    )
+
+    mkpath(dirname(path))
+    savefig(p, path)
+    return path
+end
+
+"""
     save_pnl_and_equity_curve(dates, pnls, path; title_prefix="")
 
 Save a combined equity curve + P&L distribution figure to `path`.
@@ -105,11 +160,8 @@ function save_pnl_and_equity_curve(
     path::AbstractString;
     title_prefix::AbstractString=""
 )::AbstractString
-    pairs = _paired_series(dates, pnls)
-    isempty(pairs) && return path
-
-    xs = [p[1] for p in pairs]
-    vals = [p[2] for p in pairs]
+    xs, vals = profit_curve(dates, pnls)
+    isempty(xs) && return path
     ys = cumsum(vals)
 
     title_eq = isempty(title_prefix) ? "Cumulative P&L" : "$title_prefix - Cumulative P&L"

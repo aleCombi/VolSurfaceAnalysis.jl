@@ -3,33 +3,44 @@
 
 using Dates
 using DataFrames
+using TimeZones
 
 # Global flag to suppress repeated warnings
 const _POLYGON_WARNINGS_SHOWN = Ref(false)
 
+# US Eastern timezone (handles DST automatically)
+const TZ_ET = tz"America/New_York"
+
 # ============================================================================
-# US DST Helpers (Eastern time, post-2007 rules)
+# Timezone Conversion Helpers
 # ============================================================================
 
-function _first_sunday(year::Int, month::Int)::Date
-    d = Date(year, month, 1)
-    offset = (7 - Dates.dayofweek(d)) % 7
-    return d + Day(offset)
+"""
+    et_to_utc(date::Date, et_time::Time) -> DateTime
+
+Convert an Eastern Time (ET) date and time to a UTC DateTime.
+Automatically handles EDT/EST transitions using TimeZones.jl.
+
+# Example
+```julia
+et_to_utc(Date(2024, 7, 15), Time(10, 0))  # Summer (EDT): 14:00 UTC
+et_to_utc(Date(2024, 12, 15), Time(10, 0)) # Winter (EST): 15:00 UTC
+```
+"""
+function et_to_utc(date::Date, et_time::Time)::DateTime
+    local_dt = DateTime(date) + Hour(Dates.hour(et_time)) + Minute(Dates.minute(et_time))
+    zdt = ZonedDateTime(local_dt, TZ_ET)
+    return DateTime(zdt, UTC)
 end
 
-function _second_sunday_in_march(year::Int)::Date
-    return _first_sunday(year, 3) + Day(7)
-end
+"""
+    et_to_utc(dt::DateTime) -> DateTime
 
-function _first_sunday_in_november(year::Int)::Date
-    return _first_sunday(year, 11)
-end
-
-function _is_us_dst(date::Date)::Bool
-    year = Dates.year(date)
-    dst_start = _second_sunday_in_march(year)
-    dst_end = _first_sunday_in_november(year)
-    return date >= dst_start && date < dst_end
+Convert an Eastern Time DateTime to UTC.
+"""
+function et_to_utc(dt::DateTime)::DateTime
+    zdt = ZonedDateTime(dt, TZ_ET)
+    return DateTime(zdt, UTC)
 end
 
 # ============================================================================
@@ -70,11 +81,9 @@ function parse_polygon_ticker(ticker::String)::Tuple{String, DateTime, OptionTyp
     strike_padded = parse(Int, m[6])
 
     # US equity options expire at market close: 4 PM ET
-    # EDT (Mar-Nov): 20:00 UTC | EST (Nov-Mar): 21:00 UTC
-    # Assumption: apply US DST rules (post-2007) for the expiry date.
+    # Use TimeZones.jl to handle EDT/EST automatically
     expiry_date = Date(year, month, day)
-    expiry_hour = _is_us_dst(expiry_date) ? 20 : 21
-    expiry = DateTime(expiry_date) + Hour(expiry_hour)
+    expiry = et_to_utc(expiry_date, Time(16, 0))  # 4 PM ET → UTC
 
     # Option type
     option_type = option_type_str == "C" ? Call : Put
