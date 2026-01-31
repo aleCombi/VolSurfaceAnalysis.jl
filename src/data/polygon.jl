@@ -2,6 +2,7 @@
 # Structs + DataFrame Parsing + Internal Conversions
 
 using Dates
+using DataFrames
 
 # Global flag to suppress repeated warnings
 const _POLYGON_WARNINGS_SHOWN = Ref(false)
@@ -229,4 +230,68 @@ function to_option_record(bar::PolygonBar, spot::Float64; warn::Bool=true)::Opti
         spot,
         bar.timestamp
     )
+end
+
+# ============================================================================
+# DuckDB Parquet Readers
+# ============================================================================
+
+"""
+    read_polygon_parquet(path; where="", min_volume=0) -> Vector{PolygonBar}
+
+Load Polygon minute bars from a parquet file using DuckDB.
+"""
+function read_polygon_parquet(
+    path::AbstractString;
+    where::AbstractString="",
+    min_volume::Int=0
+)::Vector{PolygonBar}
+    cols = "ticker, open, high, low, close, volume, transactions, timestamp"
+
+    conds = String[]
+    !isempty(strip(where)) && push!(conds, "($where)")
+    min_volume > 0 && push!(conds, "volume >= $min_volume")
+    where_clause = isempty(conds) ? "" : join(conds, " AND ")
+
+    df = _duckdb_parquet_df(path; columns=cols, where=where_clause)
+    return [PolygonBar(row) for row in eachrow(df)]
+end
+
+"""
+    read_polygon_option_records(path, spot; where="", min_volume=0, warn=true) -> Vector{OptionRecord}
+
+Load Polygon minute bars from parquet and convert to OptionRecord using a constant spot.
+"""
+function read_polygon_option_records(
+    path::AbstractString,
+    spot::Float64;
+    where::AbstractString="",
+    min_volume::Int=0,
+    warn::Bool=true
+)::Vector{OptionRecord}
+    bars = read_polygon_parquet(path; where=where, min_volume=min_volume)
+    return [to_option_record(bar, spot; warn=warn) for bar in bars]
+end
+
+"""
+    read_polygon_option_records(path, spot_by_ts; where="", min_volume=0, warn=true) -> Vector{OptionRecord}
+
+Load Polygon minute bars from parquet and convert to OptionRecord using a spot map.
+Records with missing spot are skipped.
+"""
+function read_polygon_option_records(
+    path::AbstractString,
+    spot_by_ts::AbstractDict{DateTime,Float64};
+    where::AbstractString="",
+    min_volume::Int=0,
+    warn::Bool=true
+)::Vector{OptionRecord}
+    bars = read_polygon_parquet(path; where=where, min_volume=min_volume)
+    records = OptionRecord[]
+    for bar in bars
+        spot = get(spot_by_ts, bar.timestamp, missing)
+        ismissing(spot) && continue
+        push!(records, to_option_record(bar, spot; warn=warn))
+    end
+    return records
 end

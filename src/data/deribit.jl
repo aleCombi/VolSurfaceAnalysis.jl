@@ -2,6 +2,7 @@
 # Structs + DataFrame Parsing + Internal Conversions
 
 using Dates
+using DataFrames
 
 # ============================================================================
 # Source Records (match parquet/file schemas exactly)
@@ -133,4 +134,34 @@ function to_option_record(dq::DeribitQuote)::OptionRecord
         dq.underlying_price,
         dq.timestamp
     )
+end
+
+# ============================================================================
+# DuckDB Parquet Readers
+# ============================================================================
+
+"""
+    read_deribit_parquet(path; where="") -> Vector{DeribitQuote}
+
+Load Deribit quotes from a parquet file using DuckDB.
+"""
+function read_deribit_parquet(
+    path::AbstractString;
+    where::AbstractString=""
+)::Vector{DeribitQuote}
+    df = _duckdb_parquet_df(path; where=where)
+    return [DeribitQuote(row) for row in eachrow(df)]
+end
+
+"""
+    read_deribit_option_records(path; where="") -> Vector{OptionRecord}
+
+Load Deribit quotes from parquet and convert to OptionRecord.
+"""
+function read_deribit_option_records(
+    path::AbstractString;
+    where::AbstractString=""
+)::Vector{OptionRecord}
+    quotes = read_deribit_parquet(path; where=where)
+    return to_option_record.(quotes)
 end

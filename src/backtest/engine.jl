@@ -99,44 +99,47 @@ struct BacktestResult
 end
 
 """
-    backtest_strategy(strategy, iter) -> (positions, pnl)
+    backtest_strategy(strategy, surfaces::Dict{DateTime, VolatilitySurface}) -> (positions, pnl)
 
 Event-driven backtest for scheduled strategies. For each scheduled entry time,
-the strategy is executed at the next available surface tick (first timestamp
->= entry time). Positions are settled at their expiry using the surface spot at
-that time.
+the strategy is executed at the next available surface (first timestamp >= entry time).
+Positions are settled at their expiry using the surface spot at that time.
 
-Returns:
-- `positions::Vector{Position}`: all entered positions (entry_timestamp reflects
-  the actual tick used)
-- `pnl::Vector{Union{Missing, Float64}}`: realized P&L per position; `missing`
-  if no surface is available at expiry
+# Arguments
+- `strategy`: A ScheduledStrategy
+- `surfaces`: Dict mapping timestamp → VolatilitySurface
+
+# Returns
+- `positions::Vector{Position}`: all entered positions
+- `pnl::Vector{Union{Missing, Float64}}`: realized P&L per position; `missing` if no surface at expiry
 """
-function backtest_strategy(strategy::ScheduledStrategy, iter::SurfaceIterator)
-    ts = timestamps(iter)
+function backtest_strategy(
+    strategy::ScheduledStrategy,
+    surfaces::Dict{DateTime, VolatilitySurface}
+)
+    ts = sort(collect(keys(surfaces)))
     entry_times = entry_schedule(strategy)
 
-    surfaces = filter(!isnothing, map(t -> _next_surface(iter, ts, t), entry_times))
-    positions_by_surface = map(s -> entry_positions(strategy, s), surfaces)
-    positions = reduce(vcat, positions_by_surface; init=Position[])
-    pnl = map(pos -> _settle_at_expiry(iter, pos), positions)
+    all_positions = Position[]
+    all_pnl = Union{Missing, Float64}[]
 
-    return positions, pnl
-end
+    for entry_time in entry_times
+        # Find next available surface
+        idx = findfirst(t -> t >= entry_time, ts)
+        idx === nothing && continue
 
-function _next_surface(
-    iter::SurfaceIterator,
-    ts::Vector{DateTime},
-    entry_time::DateTime
-)::Union{VolatilitySurface, Nothing}
-    idx = findfirst(t -> t >= entry_time, ts)
-    return idx === nothing ? nothing : surface_at(iter, idx)
-end
+        surface = surfaces[ts[idx]]
+        positions = entry_positions(strategy, surface)
 
-function _settle_at_expiry(
-    iter::SurfaceIterator,
-    pos::Position
-)::Union{Missing, Float64}
-    expiry_surface = surface_at(iter, pos.trade.expiry)
-    return expiry_surface === nothing ? missing : settle(pos, expiry_surface.spot)
+        for pos in positions
+            # Settle at expiry
+            expiry_surface = get(surfaces, pos.trade.expiry, nothing)
+            pnl = expiry_surface === nothing ? missing : settle(pos, expiry_surface.spot)
+
+            push!(all_positions, pos)
+            push!(all_pnl, pnl)
+        end
+    end
+
+    return all_positions, all_pnl
 end

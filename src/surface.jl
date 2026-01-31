@@ -31,14 +31,14 @@ A volatility surface at a single point in time.
 - `timestamp::DateTime`: observation timestamp
 - `underlying::Underlying`: the underlying asset
 - `points::Vector{VolPoint}`: the vol surface points
-- `records::Vector{VolRecord}`: raw records for this timestamp
+- `records::Vector{OptionRecord}`: raw records for this timestamp
 """
 struct VolatilitySurface
     spot::Float64
     timestamp::DateTime
     underlying::Underlying
     points::Vector{VolPoint}
-    records::Vector{VolRecord}
+    records::Vector{OptionRecord}
 end
 
 """
@@ -69,27 +69,26 @@ struct TermStructure
 end
 
 # ============================================================================
-# VolRecord convenience wrappers for pricing functions
+# OptionRecord convenience wrappers for pricing functions
 # ============================================================================
 
 """
-    vol_to_price(record::VolRecord) -> Union{Float64, Missing}
+    vol_to_price(record::OptionRecord) -> Union{Float64, Missing}
 
-Convert a VolRecord's mark_iv to the corresponding option price (as fraction of underlying).
+Convert an OptionRecord's mark_iv to the corresponding option price (as fraction of spot).
 Returns missing if mark_iv is missing.
 
-Uses the record's underlying_price as forward, and interest_rate if available.
+Uses the record's spot as the forward/spot reference.
 """
-function vol_to_price(record::VolRecord)::Union{Float64,Missing}
+function vol_to_price(record::OptionRecord)::Union{Float64,Missing}
     ismissing(record.mark_iv) && return missing
 
     σ = record.mark_iv / 100.0  # Convert from percentage to decimal
-    F = record.underlying_price
+    F = record.spot
     K = record.strike
     T = time_to_expiry(record.expiry, record.timestamp)
 
-    # Use interest_rate from record if available (stored as decimal, e.g., 0.05 for 5%)
-    r = 0.0  # Default to 0 if not available
+    r = 0.0  # Default to 0 (no rate info in OptionRecord)
 
     if T <= 0.0
         # Expired option: intrinsic value
@@ -104,18 +103,17 @@ function vol_to_price(record::VolRecord)::Union{Float64,Missing}
 end
 
 """
-    price_to_iv(record::VolRecord) -> Union{Float64, Missing}
+    price_to_iv(record::OptionRecord) -> Union{Float64, Missing}
 
-Convert a VolRecord's mark_price to implied volatility.
+Convert an OptionRecord's mark_price to implied volatility.
 Returns missing if mark_price is missing.
 
-Uses Deribit's 08:00 UTC expiry convention for time calculation.
 """
-function price_to_iv(record::VolRecord)::Union{Float64,Missing}
+function price_to_iv(record::OptionRecord)::Union{Float64,Missing}
     ismissing(record.mark_price) && return missing
 
     price = record.mark_price
-    F = record.underlying_price
+    F = record.spot
     K = record.strike
     T = time_to_expiry(record.expiry, record.timestamp)
 
@@ -128,16 +126,16 @@ function price_to_iv(record::VolRecord)::Union{Float64,Missing}
 end
 
 """
-    bid_iv(record::VolRecord) -> Union{Float64, Missing}
+    bid_iv(record::OptionRecord) -> Union{Float64, Missing}
 
-Compute implied volatility from a VolRecord's bid_price.
+Compute implied volatility from an OptionRecord's bid_price.
 Returns missing if bid_price is missing or IV cannot be computed.
 """
-function bid_iv(record::VolRecord)::Union{Float64,Missing}
+function bid_iv(record::OptionRecord)::Union{Float64,Missing}
     ismissing(record.bid_price) && return missing
 
     price = record.bid_price
-    F = record.underlying_price
+    F = record.spot
     K = record.strike
     T = time_to_expiry(record.expiry, record.timestamp)
 
@@ -150,16 +148,16 @@ function bid_iv(record::VolRecord)::Union{Float64,Missing}
 end
 
 """
-    ask_iv(record::VolRecord) -> Union{Float64, Missing}
+    ask_iv(record::OptionRecord) -> Union{Float64, Missing}
 
-Compute implied volatility from a VolRecord's ask_price.
+Compute implied volatility from an OptionRecord's ask_price.
 Returns missing if ask_price is missing or IV cannot be computed.
 """
-function ask_iv(record::VolRecord)::Union{Float64,Missing}
+function ask_iv(record::OptionRecord)::Union{Float64,Missing}
     ismissing(record.ask_price) && return missing
 
     price = record.ask_price
-    F = record.underlying_price
+    F = record.spot
     K = record.strike
     T = time_to_expiry(record.expiry, record.timestamp)
 
@@ -191,16 +189,16 @@ function is_itm_preferred(log_moneyness::Float64, option_type::OptionType)::Bool
 end
 
 """
-    build_surface(records::Vector{VolRecord}) -> VolatilitySurface
+    build_surface(records::Vector{OptionRecord}) -> VolatilitySurface
 
-Build a VolatilitySurface from a vector of VolRecords (assumed to be from a single timestamp).
+Build a VolatilitySurface from a vector of OptionRecords (assumed to be from a single timestamp).
 Records with missing bid/ask are filtered out. Stores the remaining raw records on the surface
 for exact bid/ask lookup.
 
 For each (strike, expiry) pair, chooses the ITM option. At ATM, uses highest volume as tiebreaker.
 Records with missing mark_iv are skipped.
 """
-function build_surface(records::Vector{VolRecord})::VolatilitySurface
+function build_surface(records::Vector{OptionRecord})::VolatilitySurface
     isempty(records) && error("Cannot build surface from empty records")
 
     # Filter out records without complete bid/ask quotes
@@ -209,17 +207,17 @@ function build_surface(records::Vector{VolRecord})::VolatilitySurface
 
     # Use first record for metadata (assuming all from same timestamp/underlying)
     first_rec = records[1]
-    spot = first_rec.underlying_price
+    spot = first_rec.spot
     timestamp = first_rec.timestamp
     underlying = first_rec.underlying
 
     # Group by (strike, expiry)
-    grouped = Dict{Tuple{Float64,DateTime},Vector{VolRecord}}()
+    grouped = Dict{Tuple{Float64,DateTime},Vector{OptionRecord}}()
     for rec in records
         ismissing(rec.mark_iv) && continue
         key = (rec.strike, rec.expiry)
         if !haskey(grouped, key)
-            grouped[key] = VolRecord[]
+            grouped[key] = OptionRecord[]
         end
         push!(grouped[key], rec)
     end
@@ -272,9 +270,9 @@ end
 
 """
     find_record(surface::VolatilitySurface, strike::Float64, expiry::DateTime, option_type::OptionType)
-        -> Union{VolRecord, Missing}
+        -> Union{OptionRecord, Missing}
 
-Find the raw VolRecord for an exact strike/expiry/option_type at this surface.
+Find the raw OptionRecord for an exact strike/expiry/option_type at this surface.
 Returns `missing` if no matching record exists.
 """
 function find_record(
@@ -282,7 +280,7 @@ function find_record(
     strike::Float64,
     expiry::DateTime,
     option_type::OptionType
-)::Union{VolRecord, Missing}
+)::Union{OptionRecord, Missing}
     for rec in surface.records
         if rec.strike == strike && rec.expiry == expiry && rec.option_type == option_type
             return rec
@@ -350,11 +348,11 @@ function atm_term_structure(surface::VolatilitySurface; atm_threshold::Float64=0
 end
 
 """
-    atm_term_structure(records::Vector{VolRecord}; atm_threshold::Float64=0.05) -> TermStructure
+    atm_term_structure(records::Vector{OptionRecord}; atm_threshold::Float64=0.05) -> TermStructure
 
 Build ATM term structure directly from records (convenience method).
 """
-function atm_term_structure(records::Vector{VolRecord}; atm_threshold::Float64=0.05)::TermStructure
+function atm_term_structure(records::Vector{OptionRecord}; atm_threshold::Float64=0.05)::TermStructure
     surface = build_surface(records)
     return atm_term_structure(surface; atm_threshold=atm_threshold)
 end

@@ -14,6 +14,7 @@ include("models.jl")               # Black-76 pricing functions
 # ============================================================================
 # Data Layer (source conversions)
 # ============================================================================
+include("data/duckdb.jl")          # DuckDB parquet helpers
 include("data/deribit.jl")         # Deribit source logic
 include("data/polygon.jl")         # Polygon source logic
 
@@ -49,6 +50,8 @@ export OptionRecord
 # ============================================================================
 export parse_polygon_ticker
 export to_option_record
+export read_deribit_parquet, read_deribit_option_records
+export read_polygon_parquet, read_polygon_option_records
 
 # ============================================================================
 # Exports: Pricing Models
