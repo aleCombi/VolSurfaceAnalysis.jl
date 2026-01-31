@@ -265,6 +265,70 @@ function _delta_strangle_strikes(
     return (short_put, short_call)
 end
 
+"""
+    _delta_strangle_strikes_asymmetric(ctx, put_delta_abs, call_delta_abs; rate, div_yield, debug)
+        -> Union{Nothing, Tuple{Float64, Float64}}
+
+Select strangle strikes with potentially different deltas for put and call legs.
+This allows the ML model to predict asymmetric strangles.
+
+# Arguments
+- `ctx`: Strike selection context
+- `put_delta_abs::Float64`: Absolute delta for short put (e.g., 0.15 for 15-delta)
+- `call_delta_abs::Float64`: Absolute delta for short call (e.g., 0.20 for 20-delta)
+- `rate::Float64`: Risk-free rate
+- `div_yield::Float64`: Dividend yield
+- `debug::Bool`: Print debug info
+
+# Returns
+- Tuple of (short_put_K, short_call_K) or nothing
+"""
+function _delta_strangle_strikes_asymmetric(
+    ctx,
+    put_delta_abs::Float64,
+    call_delta_abs::Float64;
+    rate::Float64=0.0,
+    div_yield::Float64=0.0,
+    debug::Bool=false
+)::Union{Nothing,Tuple{Float64,Float64}}
+    tau = ctx.tau
+    tau <= 0.0 && return nothing
+
+    put_recs = filter(r -> r.option_type == Put, ctx.recs)
+    call_recs = filter(r -> r.option_type == Call, ctx.recs)
+    isempty(put_recs) && return nothing
+    isempty(call_recs) && return nothing
+
+    F = ctx.surface.spot * exp((rate - div_yield) * tau)
+
+    short_put = _best_delta_strike(
+        put_recs,
+        -abs(put_delta_abs),
+        ctx.surface.spot,
+        :put,
+        F,
+        tau,
+        rate;
+        debug=debug
+    )
+    short_call = _best_delta_strike(
+        call_recs,
+        abs(call_delta_abs),
+        ctx.surface.spot,
+        :call,
+        F,
+        tau,
+        rate;
+        debug=debug
+    )
+
+    if short_put === nothing || short_call === nothing
+        return nothing
+    end
+
+    return (short_put, short_call)
+end
+
 function _filter_by_delta(
     recs::Vector{OptionRecord},
     target_abs::Float64,

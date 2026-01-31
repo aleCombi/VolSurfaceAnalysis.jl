@@ -4,6 +4,10 @@ using Dates
 using Distributions: Normal, cdf, pdf
 using Roots: Brent, find_zero
 using Statistics: mean, std, median
+using Random
+using Flux
+using BSON
+using ChenSignatures: sig, logsig
 
 # ============================================================================
 # Core Types & Models
@@ -32,6 +36,14 @@ include("backtest/engine.jl")      # Minimal backtest engine
 include("backtest/metrics.jl")     # Backtest metrics
 include("backtest/plots.jl")       # Backtest plots
 include("strategies.jl")           # Strategy implementations
+
+# ============================================================================
+# Machine Learning Module
+# ============================================================================
+include("ml/features.jl")          # Feature extraction from vol surfaces
+include("ml/model.jl")             # Flux.jl neural network definition
+include("ml/training.jl")          # Training loop and data generation
+include("ml/strike_selector.jl")   # ML-based strike selector
 
 # ============================================================================
 # Exports: Data Types
@@ -101,5 +113,30 @@ export save_pnl_distribution, save_equity_curve, save_pnl_and_equity_curve, save
 # Strategies
 export IronCondorStrategy
 export ShortStrangleStrategy
+
+# ============================================================================
+# Exports: Machine Learning
+# ============================================================================
+# Feature extraction
+export SurfaceFeatures, SpotHistory, N_FEATURES, SIGNATURE_LEVEL, SIGNATURE_DIM
+export extract_features, features_to_vector
+export compute_path_signature, compute_logsig_features
+export normalize_features, apply_normalization
+
+# Model
+export create_strike_model, scale_deltas, unscale_deltas
+export delta_loss, predict_deltas
+
+# Training
+export TrainingDataset, DELTA_GRID
+export simulate_strangle_pnl, find_optimal_deltas
+export generate_training_data, train_model!, evaluate_model
+
+# Strike selector
+export MLStrikeSelector
+export save_ml_selector, load_ml_selector
+
+# Asymmetric delta helper (also used internally)
+export _delta_strangle_strikes_asymmetric
 
 end # module
