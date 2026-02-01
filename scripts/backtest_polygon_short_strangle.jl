@@ -31,8 +31,7 @@ const SPREAD_LAMBDA = 0.0
 
 # Output directory (scripts/runs/<script>_<timestamp>)
 const RUN_ID = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
-const SCRIPT_BASE = splitext(basename(PROGRAM_FILE))[1]
-const RUN_DIR = joinpath(@__DIR__, "runs", "$(SCRIPT_BASE)_$(RUN_ID)")
+const RUN_DIR = joinpath(@__DIR__, "runs", "backtest_polygon_short_strangle_$(RUN_ID)")
 
 # -----------------------------------------------------------------------------
 # Data loading helpers

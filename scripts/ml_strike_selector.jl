@@ -55,7 +55,7 @@ const DROPOUT_RATE = 0.2
 
 # Output paths
 const RUN_ID = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
-const RUN_DIR = joinpath(@__DIR__, "runs", "ml_$(STRATEGY)_selector_$(RUN_ID)")
+const RUN_DIR = joinpath(@__DIR__, "runs", "ml_strike_selector_$(RUN_ID)")
 const MODEL_PATH = joinpath(RUN_DIR, "strike_selector.bson")
 
 # =============================================================================
