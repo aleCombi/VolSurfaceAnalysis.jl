@@ -139,6 +139,131 @@ function average_entry_spread(
 end
 
 """
+    condor_group_stats(group_positions::Vector{Position}) -> Union{NamedTuple, Missing}
+
+Compute iron condor stats for a single grouped trade (all 4 legs).
+
+Returns a NamedTuple with:
+- `credit`: net credit (positive) or debit (negative)
+- `max_loss`: max loss in USD
+- `width_put`: put spread width
+- `width_call`: call spread width
+"""
+function condor_group_stats(group_positions::Vector{Position})::Union{NamedTuple,Missing}
+    short_puts = Float64[]
+    long_puts = Float64[]
+    short_calls = Float64[]
+    long_calls = Float64[]
+    total_entry_cost = 0.0
+
+    for pos in group_positions
+        total_entry_cost += entry_cost(pos)
+        t = pos.trade
+        if t.option_type == Put
+            if t.direction < 0
+                push!(short_puts, t.strike)
+            else
+                push!(long_puts, t.strike)
+            end
+        else
+            if t.direction < 0
+                push!(short_calls, t.strike)
+            else
+                push!(long_calls, t.strike)
+            end
+        end
+    end
+
+    if isempty(short_puts) || isempty(long_puts) || isempty(short_calls) || isempty(long_calls)
+        return missing
+    end
+
+    short_put = maximum(short_puts)
+    long_put = minimum(long_puts)
+    short_call = minimum(short_calls)
+    long_call = maximum(long_calls)
+
+    width_put = abs(short_put - long_put)
+    width_call = abs(long_call - short_call)
+    max_width = max(width_put, width_call)
+
+    credit = -total_entry_cost
+    max_loss = if total_entry_cost <= 0
+        max_width - credit  # credit > 0 for short condor
+    else
+        total_entry_cost     # debit for long condor
+    end
+    max_loss = max(max_loss, 0.0)
+
+    return (
+        credit=credit,
+        max_loss=max_loss,
+        width_put=width_put,
+        width_call=width_call
+    )
+end
+
+"""
+    condor_trade_table(positions, pnls; key=default_key) -> DataFrame
+
+Build a per-condor trade table with P&L and max loss metrics.
+"""
+function condor_trade_table(
+    positions::Vector{Position},
+    pnls::Vector{Union{Missing,Float64}};
+    key::Function = pos -> (pos.entry_timestamp, pos.trade.expiry)
+)::DataFrame
+    pnl_by_key, _ = aggregate_pnl(positions, pnls; key=key)
+
+    groups = Dict{Any,Vector{Position}}()
+    for pos in positions
+        k = key(pos)
+        push!(get!(groups, k, Position[]), pos)
+    end
+
+    rows = DataFrame(
+        EntryTimestamp=DateTime[],
+        Expiry=DateTime[],
+        PnL=Union{Missing,Float64}[],
+        Credit=Union{Missing,Float64}[],
+        MaxLoss=Union{Missing,Float64}[],
+        WidthPut=Union{Missing,Float64}[],
+        WidthCall=Union{Missing,Float64}[],
+        ReturnOnRisk=Union{Missing,Float64}[]
+    )
+
+    for k in sort(collect(keys(groups)); by=x -> x[1])
+        group_positions = groups[k]
+        stats = condor_group_stats(group_positions)
+        pnl = get(pnl_by_key, k, missing)
+
+        if stats === missing
+            push!(rows, (k[1], k[2], pnl, missing, missing, missing, missing, missing))
+            continue
+        end
+
+        ror = if ismissing(pnl) || stats.max_loss <= 0
+            missing
+        else
+            pnl / stats.max_loss
+        end
+
+        push!(rows, (
+            k[1],
+            k[2],
+            pnl,
+            stats.credit,
+            stats.max_loss,
+            stats.width_put,
+            stats.width_call,
+            ror
+        ))
+    end
+
+    return rows
+end
+
+"""
     backtest_metrics(positions, pnls; key=default_key) -> BacktestMetrics
 
 Compute summary statistics from backtest outputs. Aggregates per-position P&L

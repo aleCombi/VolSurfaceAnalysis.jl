@@ -107,6 +107,7 @@ export next_portfolio, entry_schedule, entry_positions
 export BacktestResult, backtest_strategy
 export BacktestMetrics, PerformanceMetrics
 export aggregate_pnl, backtest_metrics, performance_metrics, profit_curve, average_entry_spread
+export condor_group_stats, condor_trade_table
 export settlement_zone_analysis, settlement_zone_summary
 export save_pnl_distribution, save_equity_curve, save_pnl_and_equity_curve, save_profit_curve, save_spot_curve
 
@@ -126,14 +127,18 @@ export normalize_features, apply_normalization
 # Model
 export create_strike_model, scale_deltas, unscale_deltas
 export delta_loss, predict_deltas
+export predict_with_sizing, combined_loss
 
 # Training
 export TrainingDataset, DELTA_GRID
 export simulate_strangle_pnl, find_optimal_deltas
 export generate_training_data, train_model!, evaluate_model
+export compute_size_labels
+export simulate_condor_pnl, find_optimal_condor_deltas, generate_condor_training_data
 
 # Strike selector
 export MLStrikeSelector
+export MLCondorStrikeSelector
 export save_ml_selector, load_ml_selector
 
 # Asymmetric delta helper (also used internally)

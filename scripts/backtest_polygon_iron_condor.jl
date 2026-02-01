@@ -31,6 +31,7 @@ const DIV_YIELD = 0.013
 const QUANTITY = 1.0
 const TAU_TOL = 1e-6
 const MIN_VOLUME = 5
+const SPREAD_LAMBDA = 0.0
 
 # Output directory (scripts/runs/<script>_<timestamp>)
 const RUN_ID = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
@@ -157,7 +158,8 @@ function run_symbol_backtest(symbol::String)
         entry_spots;
         where=where,
         min_volume=MIN_VOLUME,
-        warn=true
+        warn=true,
+        spread_lambda=SPREAD_LAMBDA
     )
     surfaces = build_surfaces_for_timestamps(
         entry_ts;

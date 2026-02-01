@@ -171,16 +171,21 @@ end
 # ============================================================================
 
 """
-    to_option_record(bar::PolygonBar, spot::Float64; warn::Bool=true) -> OptionRecord
+    to_option_record(bar::PolygonBar, spot::Float64; warn::Bool=true, spread_lambda::Float64=0.0) -> OptionRecord
 
 Convert a PolygonBar to the unified OptionRecord format.
 
 # IMPORTANT: Synthetic Bid/Ask
 Polygon data contains OHLC trade prices, NOT bid/ask quotes.
-This function uses a CONSERVATIVE approximation:
-- bid_price = low / spot (worst observed buy price)
-- ask_price = high / spot (worst observed sell price)
+This function uses a configurable approximation with `spread_lambda`:
+- spread = (high - low)
+- bid_price = (low + 0.5 * spread_lambda * spread) / spot
+- ask_price = (high - 0.5 * spread_lambda * spread) / spot
 - mark_price = close / spot
+
+`spread_lambda` in [0, 1] interpolates between:
+- 0.0: pessimistic (bid=low, ask=high)
+- 1.0: optimistic (bid=ask=mid)
 
 This is pessimistic and may underestimate strategy performance.
 
@@ -192,8 +197,14 @@ using Black-76 with spot as forward and r=0.0. Stored as a percentage.
 - `bar`: The PolygonBar to convert
 - `spot`: Spot price of underlying (required for price normalization)
 - `warn`: Show warning about synthetic spreads (default: true, shown once)
+- `spread_lambda`: Tightness of synthetic spread in [0, 1] (default: 0.0)
 """
-function to_option_record(bar::PolygonBar, spot::Float64; warn::Bool=true)::OptionRecord
+function to_option_record(
+    bar::PolygonBar,
+    spot::Float64;
+    warn::Bool=true,
+    spread_lambda::Float64=0.0
+)::OptionRecord
     # Show warning once
     if warn && !_POLYGON_WARNINGS_SHOWN[]
         _POLYGON_WARNINGS_SHOWN[] = true
@@ -201,18 +212,28 @@ function to_option_record(bar::PolygonBar, spot::Float64; warn::Bool=true)::Opti
         USING SYNTHETIC BID/ASK SPREADS (CONSERVATIVE)
 
         Polygon data contains trade prices (OHLC), NOT market quotes.
-        Converting with PESSIMISTIC approximation:
-          - bid_price = low  (worst buy price observed in minute)
-          - ask_price = high (worst sell price observed in minute)
+        Converting with configurable approximation:
+          - spread = (high - low)
+          - bid_price = low  + 0.5 * spread_lambda * spread
+          - ask_price = high - 0.5 * spread_lambda * spread
 
         This may UNDERESTIMATE strategy performance.
         (This warning will only be shown once per session)
         """
     end
 
-    # CONSERVATIVE bid/ask from OHLC (as fraction of spot)
-    bid_frac = bar.low / spot
-    ask_frac = bar.high / spot
+    λ = clamp(spread_lambda, 0.0, 1.0)
+    spread = bar.high - bar.low
+    bid_raw = bar.low + 0.5 * λ * spread
+    ask_raw = bar.high - 0.5 * λ * spread
+    if bid_raw > ask_raw
+        mid = (bar.high + bar.low) / 2
+        bid_raw = mid
+        ask_raw = mid
+    end
+
+    bid_frac = bid_raw / spot
+    ask_frac = ask_raw / spot
     mark_frac = bar.close / spot
 
     # Infer IV from mark price (if possible)
@@ -423,7 +444,7 @@ function read_polygon_parquet(
 end
 
 """
-    read_polygon_option_records(path, spot; where="", min_volume=0, warn=true) -> Vector{OptionRecord}
+    read_polygon_option_records(path, spot; where="", min_volume=0, warn=true, spread_lambda=0.0) -> Vector{OptionRecord}
 
 Load Polygon minute bars from parquet and convert to OptionRecord using a constant spot.
 """
@@ -432,14 +453,15 @@ function read_polygon_option_records(
     spot::Float64;
     where::AbstractString="",
     min_volume::Int=0,
-    warn::Bool=true
+    warn::Bool=true,
+    spread_lambda::Float64=0.0
 )::Vector{OptionRecord}
     bars = read_polygon_parquet(path; where=where, min_volume=min_volume)
-    return [to_option_record(bar, spot; warn=warn) for bar in bars]
+    return [to_option_record(bar, spot; warn=warn, spread_lambda=spread_lambda) for bar in bars]
 end
 
 """
-    read_polygon_option_records(path, spot_by_ts; where="", min_volume=0, warn=true) -> Vector{OptionRecord}
+    read_polygon_option_records(path, spot_by_ts; where="", min_volume=0, warn=true, spread_lambda=0.0) -> Vector{OptionRecord}
 
 Load Polygon minute bars from parquet and convert to OptionRecord using a spot map.
 Records with missing spot are skipped.
@@ -449,14 +471,15 @@ function read_polygon_option_records(
     spot_by_ts::AbstractDict{DateTime,Float64};
     where::AbstractString="",
     min_volume::Int=0,
-    warn::Bool=true
+    warn::Bool=true,
+    spread_lambda::Float64=0.0
 )::Vector{OptionRecord}
     bars = read_polygon_parquet(path; where=where, min_volume=min_volume)
     records = OptionRecord[]
     for bar in bars
         spot = get(spot_by_ts, bar.timestamp, missing)
         ismissing(spot) && continue
-        push!(records, to_option_record(bar, spot; warn=warn))
+        push!(records, to_option_record(bar, spot; warn=warn, spread_lambda=spread_lambda))
     end
     return records
 end
