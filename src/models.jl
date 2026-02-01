@@ -219,7 +219,7 @@ function black76_vega(F::Float64, K::Float64, T::Float64, σ::Float64,
 end
 
 """
-    price_to_iv(price, F, K, T, option_type; r=0.0, tol=1e-8, max_iter=100) -> Float64
+    price_to_iv(price, F, K, T, option_type; r=0.0, σ_min=0.001, σ_max=10.0, tol=1e-8, max_iter=100) -> Float64
 
 Convert an option price (as fraction of underlying) to implied volatility.
 Uses `Roots.find_zero` with a bracketing method (Brent).
@@ -231,6 +231,8 @@ Uses `Roots.find_zero` with a bracketing method (Brent).
 - `T::Float64`: Time to expiry in years
 - `option_type::OptionType`: Call or Put
 - `r::Float64`: Interest rate for discounting (default: 0.0)
+- `σ_min::Float64`: Minimum volatility bound for solver (default: 0.001)
+- `σ_max::Float64`: Maximum volatility bound for solver (default: 10.0)
 - `tol::Float64`: Convergence tolerance (default: 1e-8)
 - `max_iter::Int`: Maximum iterations (default: 100)
 
@@ -240,6 +242,7 @@ Uses `Roots.find_zero` with a bracketing method (Brent).
 """
 function price_to_iv(price::Float64, F::Float64, K::Float64, T::Float64,
                      option_type::OptionType; r::Float64=0.0,
+                     σ_min::Float64=0.001, σ_max::Float64=10.0,
                      tol::Float64=1e-8, max_iter::Int=100)::Float64
     # Handle edge cases
     if T <= 0.0
@@ -263,17 +266,17 @@ function price_to_iv(price::Float64, F::Float64, K::Float64, T::Float64,
 
     f(σ) = vol_to_price(σ, F, K, T, option_type; r=r) - price
 
-    σ_low, σ_high = 0.001, 10.0
-    f_low = f(σ_low)
-    f_high = f(σ_high)
+    f_low = f(σ_min)
+    f_high = f(σ_max)
     if f_low > 0.0 || f_high < 0.0
         return NaN
     end
 
     try
-        return find_zero(f, (σ_low, σ_high), Brent(); atol=tol, rtol=0.0, maxiters=max_iter)
+        return find_zero(f, (σ_min, σ_max), Brent(); atol=tol, rtol=0.0, maxiters=max_iter)
     catch
         return NaN
     end
 
 end
+

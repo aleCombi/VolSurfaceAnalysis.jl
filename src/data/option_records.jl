@@ -30,14 +30,12 @@ ticker(spy)  # "SPY"
 """
 struct Underlying
     ticker::String
+    Underlying(s::AbstractString) = new(uppercase(String(s)))
 end
 
 # Convenience: allow string comparison
 Base.:(==)(u::Underlying, s::AbstractString) = u.ticker == uppercase(s)
 Base.:(==)(s::AbstractString, u::Underlying) = u == s
-
-# Allow constructing from string
-Underlying(s::AbstractString) = Underlying(uppercase(String(s)))
 
 # Get the ticker string
 ticker(u::Underlying) = u.ticker

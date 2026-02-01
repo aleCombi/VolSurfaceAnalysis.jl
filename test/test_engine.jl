@@ -66,117 +66,134 @@
     end
 end
 
+using DuckDB
+
 @testset "Backtest Engine" begin
-    data_path = joinpath(@__DIR__, "..", "data")
-    sample_file = joinpath(data_path, "vols_20260117.parquet")
-    
-    if isfile(sample_file)
-        store = LocalDataStore(data_path)
-        
-        # Define a simple test strategy that does nothing
-        struct PassiveStrategy <: Strategy end
-        VolSurfaceAnalysis.on_snapshot(::PassiveStrategy, surface::VolatilitySurface, portfolio::Portfolio) = Order[]
-        
-        @testset "Passive Strategy Backtest" begin
-            result = run_backtest(
-                PassiveStrategy(),
-                store,
-                BTC,
-                Date(2026, 1, 17),
-                Date(2026, 1, 17);
-                resolution=Hour(1)
-            )
-            
-            @test result.underlying == BTC
-            @test length(result.snapshots) > 0
-            @test result.metrics.total_trades == 0
-            @test result.metrics.total_pnl == 0.0
-        end
-        
-        # Strategy that buys one ATM call at first snapshot
-        mutable struct BuyOnceStrategy <: Strategy
-            bought::Bool
-        end
-        BuyOnceStrategy() = BuyOnceStrategy(false)
-        
-        function VolSurfaceAnalysis.on_snapshot(s::BuyOnceStrategy, surface::VolatilitySurface, portfolio::Portfolio)
-            if s.bought
-                return Order[]
-            end
-            
-            # Find ATM option
-            atm_points = filter(p -> abs(p.log_moneyness) < 0.05, surface.points)
-            isempty(atm_points) && return Order[]
-            
-            # Get first ATM point's strike
-            point = first(atm_points)
-            strike = surface.spot * exp(point.log_moneyness)
-            
-            # Find matching expiry from records (need at least 7 days out)
-            matching = filter(surface.points) do p
-                p.τ > 7/365.25 && abs(p.log_moneyness) < 0.05
-            end
-            isempty(matching) && return Order[]
-            
-            best = first(matching)
-            expiry = surface.timestamp + Day(round(Int, best.τ * 365.25))
-            # Normalize to 08:00 UTC
-            expiry = DateTime(Date(expiry)) + Hour(8)
-            
-            s.bought = true
-            return [Order(BTC, surface.spot * exp(best.log_moneyness), expiry, Call)]
-        end
-        
-        @testset "Buy Once Strategy" begin
-            result = run_backtest(
-                BuyOnceStrategy(),
-                store,
-                BTC,
-                Date(2026, 1, 17),
-                Date(2026, 1, 17);
-                resolution=Hour(1)
-            )
-            
-            # Should have opened 1 position
-            opens = filter(t -> t.action == :open, result.trade_log)
-            @test length(opens) >= 0  # May be 0 if no ATM found
-            
-            # Snapshots should exist
-            @test length(result.snapshots) > 0
-        end
-        
-        @testset "Performance Metrics" begin
-            result = run_backtest(
-                PassiveStrategy(),
-                store,
-                BTC,
-                Date(2026, 1, 17),
-                Date(2026, 1, 17)
-            )
-            
-            metrics = result.metrics
-            @test metrics.total_pnl == 0.0
-            @test metrics.max_drawdown >= 0.0
-            @test 0.0 <= metrics.win_rate <= 1.0
-        end
-        
-        @testset "Utility Functions" begin
-            result = run_backtest(
-                PassiveStrategy(),
-                store,
-                BTC,
-                Date(2026, 1, 17),
-                Date(2026, 1, 17)
-            )
-            
-            times, pnl = pnl_series(result)
-            @test length(times) == length(pnl)
-            @test length(times) == length(result.snapshots)
-            
-            times2, equity = equity_curve(result)
-            @test length(times2) == length(equity)
-        end
-    else
-        @info "Test data not found, skipping Backtest Engine tests"
+    # ============================================================
+    # Fixture: single BTC call, entry → expiry next day
+    #
+    # Strike      100 000   (ITM at entry)
+    # Entry spot  105 000
+    # Settlement  110 000   (deeper ITM)
+    # ask         0.05      (fraction of underlying)
+    #
+    # entry_cost = ask × spot          = 0.05 × 105 000 = 5 250
+    # payoff     = max(110k − 100k, 0)                  = 10 000
+    # PnL        = payoff − entry_cost                  =  4 750
+    # ============================================================
+    entry_ts        = DateTime(2026, 1, 25, 12, 0, 0)
+    expiry_ts       = DateTime(2026, 1, 26,  8, 0, 0)   # Deribit 08:00 UTC
+    strike          = 100_000.0
+    entry_spot      = 105_000.0
+    settlement_spot = 110_000.0
+    bid             = 0.04
+    ask             = 0.05
+
+    # Two snapshots in one parquet (mirrors real Deribit data layout):
+    #   entry_ts  → live quote          → used to build the entry surface
+    #   expiry_ts → settlement snapshot → read_deribit_spot_prices picks up the spot
+    tmpfile = replace(joinpath(tempdir(), "test_backtest_btc.parquet"), "\\" => "/")
+    con = DuckDB.DBInterface.connect(DuckDB.DB, ":memory:")
+    try
+        DuckDB.DBInterface.execute(con, """
+            COPY (
+                SELECT 'BTC-26JAN26-100000-C'::VARCHAR AS instrument_name,
+                       'BTC'::VARCHAR                  AS underlying,
+                       TIMESTAMP '2026-01-26 08:00:00' AS expiry,
+                       $strike                         AS strike,
+                       'C'::VARCHAR                   AS option_type,
+                       $bid                           AS bid_price,
+                       $ask                           AS ask_price,
+                       0.045                          AS mark_price,
+                       80.0                           AS mark_iv,
+                       100.0                          AS open_interest,
+                       10.0                           AS volume,
+                       $entry_spot                    AS underlying_price,
+                       TIMESTAMP '2026-01-25 12:00:00' AS ts
+                UNION ALL
+                SELECT 'BTC-26JAN26-100000-C'::VARCHAR,
+                       'BTC'::VARCHAR,
+                       TIMESTAMP '2026-01-26 08:00:00',
+                       $strike,
+                       'C'::VARCHAR,
+                       0.10,
+                       0.11,
+                       0.105,
+                       50.0,
+                       90.0,
+                       5.0,
+                       $settlement_spot,
+                       TIMESTAMP '2026-01-26 08:00:00'
+            ) TO '$tmpfile' (FORMAT PARQUET)
+        """)
+    finally
+        DuckDB.DBInterface.close!(con)
     end
+
+    # ============================================================
+    # 1. Load all spots (entry + settlement from same file)
+    # ============================================================
+    all_spots = read_deribit_spot_prices(tmpfile; underlying="BTC")
+
+    # ============================================================
+    # 2. Build surfaces via build_surfaces_for_timestamps
+    #    (same pattern as backtest_polygon_iron_condor.jl)
+    # ============================================================
+    surfaces = build_surfaces_for_timestamps(
+        [entry_ts];
+        path_for_timestamp = _ -> tmpfile,
+        read_records       = (path; where="") -> read_deribit_option_records(path; where=where),
+        ts_col             = :ts
+    )
+
+    # ============================================================
+    # 3. Strategy + schedule (schedule from surfaces, as scripts do)
+    # ============================================================
+    struct BuyTheOnlyCall <: ScheduledStrategy end
+    schedule = sort(collect(keys(surfaces)))
+    VolSurfaceAnalysis.entry_schedule(::BuyTheOnlyCall) = schedule
+    function VolSurfaceAnalysis.entry_positions(::BuyTheOnlyCall, surf::VolatilitySurface)
+        trade = Trade(Underlying("BTC"), strike, expiry_ts, Call; direction=1, quantity=1.0)
+        return [open_position(trade, surf)]
+    end
+
+    # ============================================================
+    # 4. Collect expiry timestamps → extract settlement spots
+    #    (same pattern as scripts: dry-run entry_positions first)
+    # ============================================================
+    expiry_timestamps = unique([
+        pos.trade.expiry
+        for ts in schedule
+        for pos in entry_positions(BuyTheOnlyCall(), surfaces[ts])
+    ])
+    settlement_spots = Dict(ts => all_spots[ts] for ts in expiry_timestamps)
+
+    # ============================================================
+    # 5. Run backtest
+    # ============================================================
+    positions, pnl = backtest_strategy(BuyTheOnlyCall(), surfaces, settlement_spots)
+
+    @testset "Position entry" begin
+        @test length(positions) == 1
+
+        pos = positions[1]
+        @test pos.trade.strike      == strike
+        @test pos.trade.option_type == Call
+        @test pos.trade.direction   == 1
+        @test pos.entry_price       == ask          # long → filled at ask
+        @test pos.entry_spot        == entry_spot
+        @test pos.entry_timestamp   == entry_ts
+    end
+
+    @testset "Settlement PnL" begin
+        @test length(pnl) == 1
+        @test !ismissing(pnl[1])
+
+        expected_payoff  = max(settlement_spot - strike, 0.0)   # 10 000
+        expected_cost    = ask * entry_spot                      #  5 250
+        expected_pnl     = expected_payoff - expected_cost       #  4 750
+        @test pnl[1] ≈ expected_pnl
+    end
+
+    rm(tmpfile; force=true)
 end
