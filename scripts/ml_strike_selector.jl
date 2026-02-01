@@ -55,7 +55,8 @@ const DROPOUT_RATE = 0.2
 
 # Output paths
 const RUN_ID = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
-const RUN_DIR = joinpath(@__DIR__, "runs", "ml_strike_selector_$(RUN_ID)")
+const RUN_DIR    = joinpath(@__DIR__, "runs", "ml_strike_selector_$(RUN_ID)")
+const LATEST_DIR = joinpath(@__DIR__, "runs", "ml_strike_selector")
 const MODEL_PATH = joinpath(RUN_DIR, "strike_selector.bson")
 
 # =============================================================================
@@ -742,6 +743,11 @@ function main()
             )
         end
     end
+
+    # Overwrite the no-timestamp "latest" copy
+    isdir(LATEST_DIR) && rm(LATEST_DIR; recursive=true)
+    cp(RUN_DIR, LATEST_DIR)
+    println("Latest run: $LATEST_DIR")
 
     println()
     println("=" ^ 80)

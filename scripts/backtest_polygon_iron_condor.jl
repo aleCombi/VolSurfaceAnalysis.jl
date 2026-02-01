@@ -33,7 +33,8 @@ const SPREAD_LAMBDA = 0.0
 
 # Output directory (scripts/runs/<script>_<timestamp>)
 const RUN_ID = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
-const RUN_DIR = joinpath(@__DIR__, "runs", "backtest_polygon_iron_condor_$(RUN_ID)")
+const RUN_DIR    = joinpath(@__DIR__, "runs", "backtest_polygon_iron_condor_$(RUN_ID)")
+const LATEST_DIR = joinpath(@__DIR__, "runs", "backtest_polygon_iron_condor")
 
 # -----------------------------------------------------------------------------
 # Data loading helpers
@@ -403,6 +404,11 @@ function main()
             Base.showerror(stdout, e, catch_backtrace())
         end
     end
+
+    # Overwrite the no-timestamp "latest" copy
+    isdir(LATEST_DIR) && rm(LATEST_DIR; recursive=true)
+    cp(RUN_DIR, LATEST_DIR)
+    println("Latest run: $LATEST_DIR")
 end
 
 main()
