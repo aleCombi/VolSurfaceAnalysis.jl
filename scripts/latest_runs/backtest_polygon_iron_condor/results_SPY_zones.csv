@@ -1,0 +1,6 @@
+zone,count,percentage
+below_long_put,3,1.2
+between_puts,26,10.5
+max_profit,184,74.2
+between_calls,30,12.1
+above_long_call,5,2.0

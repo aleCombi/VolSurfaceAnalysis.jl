@@ -1,0 +1,39 @@
+================================================================================
+POLYGON IRON CONDOR BACKTEST RESULTS
+================================================================================
+
+WARNING: SYNTHETIC BID/ASK SPREADS (CONSERVATIVE)
+  bid = low, ask = high from minute bars
+
+Underlying: SPY
+Data range: 2024-01-29 to 2025-07-31
+Excluded dates >= 2025-08-01
+
+Strategy Parameters:
+  Entry time: 10:00:00 ET (DST-aware)
+  Expiry: ~1 day from entry
+  Short legs: +/-16.0 delta
+  Long legs: +/-5.0 delta
+  Quantity per leg: 1.0
+
+Results:
+  Scheduled entries: 375
+  Actual condors: 374
+  Total positions: 1496
+  Missing settlements: 5
+
+P&L (per condor):
+  Total: $-1.63
+  Count: 369
+  Average: $-0.0
+  Min: $-11.76
+  Max: $3.38
+  Winners: 287 / 369 (77.8%)
+
+Performance Metrics (margin per trade: $6.9; first condor max loss + 30%):
+  Total ROI: -23.68%
+  Sharpe: -0.04
+  Sortino: -0.05
+  Win Rate: 77.8%
+
+================================================================================

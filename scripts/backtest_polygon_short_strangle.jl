@@ -32,7 +32,7 @@ const SPREAD_LAMBDA = 0.0
 # Output directory (scripts/runs/<script>_<timestamp>)
 const RUN_ID = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
 const RUN_DIR    = joinpath(@__DIR__, "runs", "backtest_polygon_short_strangle_$(RUN_ID)")
-const LATEST_DIR = joinpath(@__DIR__, "runs", "backtest_polygon_short_strangle")
+const LATEST_DIR = joinpath(@__DIR__, "latest_runs", "backtest_polygon_short_strangle")
 
 # -----------------------------------------------------------------------------
 # Data loading helpers

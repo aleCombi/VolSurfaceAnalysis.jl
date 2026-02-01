@@ -1,0 +1,38 @@
+================================================================================
+POLYGON SPY SHORT STRANGLE BACKTEST RESULTS
+================================================================================
+
+WARNING: SYNTHETIC BID/ASK SPREADS (CONSERVATIVE)
+  bid = low, ask = high from minute bars
+
+Underlying: SPY
+Data range: 2024-01-29 to 2025-07-31
+Excluded dates >= 2025-08-01
+
+Strategy Parameters:
+  Entry time: 10:00:00 ET (DST-aware)
+  Expiry: ~1 day from entry
+  Short legs: +/-15.0 delta
+  Quantity per leg: 1.0
+
+Results:
+  Scheduled entries: 375
+  Actual strangles: 375
+  Total positions: 750
+  Missing settlements: 5
+
+P&L (per strangle):
+  Total: $31.67
+  Average: $0.09
+  Count: 370
+  Min: $-24.55
+  Max: $4.07
+  Winners: 296 / 370 (80.0%)
+
+Performance Metrics (margin per trade: $12000):
+  Total ROI: 0.26%
+  Sharpe: 0.61
+  Sortino: 0.67
+  Win Rate: 80.0%
+
+================================================================================
