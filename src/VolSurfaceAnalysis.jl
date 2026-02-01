@@ -21,6 +21,7 @@ include("models.jl")               # Black-76 pricing functions
 include("data/duckdb.jl")          # DuckDB parquet helpers
 include("data/deribit.jl")         # Deribit source logic
 include("data/polygon.jl")         # Polygon source logic
+include("data/local_store.jl")     # Local data-store path derivation
 
 # ============================================================================
 # Core Library
@@ -73,6 +74,13 @@ export read_polygon_spot_prices_for_timestamps
 export read_polygon_spot_prices_dir
 export et_to_utc
 export spot_dict
+
+# Local data store
+export LocalDataStore, DEFAULT_STORE
+export polygon_options_root, polygon_spot_root
+export polygon_options_path, polygon_spot_path
+export deribit_history_path, deribit_delivery_path
+export available_polygon_dates, available_deribit_dates
 
 # ============================================================================
 # Exports: Pricing Models

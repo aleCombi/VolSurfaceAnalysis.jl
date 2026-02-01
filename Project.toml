@@ -23,13 +23,12 @@ TimeZones = "f269a46b-ccf7-5d73-abea-4c690281aa53"
 [compat]
 ChenSignatures = "0.4.0"
 DataFrames = "1.8.1"
-Dates = "1.11.0"
 DuckDB = "1.4.1"
 Parquet2 = "0.2.33"
 Plots = "1.41.4"
 Roots = "2.2.10"
 TimeZones = "1.22.2"
-julia = "1.6.7"
+julia = "1.10"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

@@ -11,8 +11,6 @@ using Dates
 using CSV, DataFrames
 
 # Configuration
-const POLYGON_ROOT = raw"C:\repos\DeribitVols\data\massive_parquet\minute_aggs"
-const SPOT_ROOT = raw"C:\repos\DeribitVols\data\massive_parquet\spot_1min"
 const DEFAULT_TARGET_SYMBOLS = ["SPY", "QQQ", "IWM", "GLD", "SLV", "TLT", "USO", "HYG", "GDX", "XLE", "XLF", "VIX"]
 const TARGET_SYMBOLS = ["SPY"]
 const END_DATE_CUTOFF = Date(2025, 8, 1)
@@ -39,21 +37,8 @@ const SCRIPT_BASE = splitext(basename(PROGRAM_FILE))[1]
 const RUN_DIR = joinpath(@__DIR__, "runs", "$(SCRIPT_BASE)_$(RUN_ID)")
 
 # -----------------------------------------------------------------------------
-# Data loading helpers (use src readers)
+# Data loading helpers
 # -----------------------------------------------------------------------------
-
-function available_dates(root::String, symbol::String)::Vector{Date}
-    dirs = readdir(root)
-    dates = Date[]
-    for dir in dirs
-        m = match(r"date=(\d{4})-(\d{2})-(\d{2})", dir)
-        m === nothing && continue
-        date = Date(parse(Int, m[1]), parse(Int, m[2]), parse(Int, m[3]))
-        path = joinpath(root, dir, "underlying=$(symbol)", "data.parquet")
-        isfile(path) && push!(dates, date)
-    end
-    return sort(dates)
-end
 
 function build_entry_timestamps(dates::Vector{Date})::Vector{DateTime}
     ts = DateTime[]
@@ -132,7 +117,7 @@ function run_symbol_backtest(symbol::String)
     println("PROCESSING SYMBOL: $symbol")
     println("=" ^ 60)
 
-    all_dates = available_dates(POLYGON_ROOT, symbol)
+    all_dates = available_polygon_dates(DEFAULT_STORE, symbol)
     filtered_dates = filter(d -> d < END_DATE_CUTOFF, all_dates)
     if isempty(filtered_dates)
         println("  No data found for $symbol")
@@ -143,16 +128,13 @@ function run_symbol_backtest(symbol::String)
 
     entry_ts = build_entry_timestamps(filtered_dates)
     entry_spots = read_polygon_spot_prices_for_timestamps(
-        SPOT_ROOT,
+        polygon_spot_root(DEFAULT_STORE),
         entry_ts;
         symbol=symbol
     )
     println("  Loaded entry spots: $(length(entry_spots))")
 
-    path_for_ts = ts -> begin
-        date_str = Dates.format(Date(ts), "yyyy-mm-dd")
-        joinpath(POLYGON_ROOT, "date=$date_str", "underlying=$symbol", "data.parquet")
-    end
+    path_for_ts = ts -> polygon_options_path(DEFAULT_STORE, Date(ts), symbol)
     read_records = (path; where="") -> read_polygon_option_records(
         path,
         entry_spots;
@@ -207,7 +189,7 @@ function run_symbol_backtest(symbol::String)
     expiry_ts = unique(expiry_ts)
 
     settlement_spots = read_polygon_spot_prices_for_timestamps(
-        SPOT_ROOT,
+        polygon_spot_root(DEFAULT_STORE),
         expiry_ts;
         symbol=symbol
     )

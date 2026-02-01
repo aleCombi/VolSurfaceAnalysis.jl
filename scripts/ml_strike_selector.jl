@@ -16,8 +16,6 @@ using Printf
 # =============================================================================
 # Configuration
 # =============================================================================
-const POLYGON_ROOT = raw"C:\repos\DeribitVols\data\massive_parquet\minute_aggs"
-const SPOT_ROOT = raw"C:\repos\DeribitVols\data\massive_parquet\spot_1min"
 const UNDERLYING_SYMBOL = "SPY"
 const STRATEGY = "condor"  # "strangle" or "condor"
 
@@ -64,33 +62,6 @@ const MODEL_PATH = joinpath(RUN_DIR, "strike_selector.bson")
 # Data Loading Helpers
 # =============================================================================
 
-function available_dates(root::String, symbol::String)::Vector{Date}
-    dirs = readdir(root)
-    dates = Date[]
-    for dir in dirs
-        m = match(r"date=(\d{4})-(\d{2})-(\d{2})", dir)
-        m === nothing && continue
-        date = Date(parse(Int, m[1]), parse(Int, m[2]), parse(Int, m[3]))
-        path = joinpath(root, dir, "underlying=$(symbol)", "data.parquet")
-        isfile(path) && push!(dates, date)
-    end
-    return sort(dates)
-end
-
-function available_spot_dates(root::String, symbol::String)::Vector{Date}
-    dirs = readdir(root)
-    dates = Date[]
-    sym = uppercase(symbol)
-    for dir in dirs
-        m = match(r"date=(\d{4})-(\d{2})-(\d{2})", dir)
-        m === nothing && continue
-        date = Date(parse(Int, m[1]), parse(Int, m[2]), parse(Int, m[3]))
-        path = joinpath(root, dir, "symbol=$sym", "data.parquet")
-        isfile(path) && push!(dates, date)
-    end
-    return sort(dates)
-end
-
 function build_entry_timestamps(dates::Vector{Date}, entry_times::Vector{Time})::Vector{DateTime}
     ts = DateTime[]
     for date in dates
@@ -112,16 +83,15 @@ function load_minute_spots(
     lookback_days::Union{Nothing,Int}=SPOT_HISTORY_LOOKBACK_DAYS,
     symbol::String=UNDERLYING_SYMBOL
 )::Dict{DateTime,Float64}
-    all_dates = available_spot_dates(SPOT_ROOT, symbol)
-    isempty(all_dates) && error("No spot dates found in $SPOT_ROOT for $symbol")
+    all_dates = available_polygon_dates(DEFAULT_STORE, symbol)
+    isempty(all_dates) && error("No spot dates found for $symbol")
 
     min_date = lookback_days === nothing ? minimum(all_dates) : start_date - Day(lookback_days)
     filtered_dates = filter(d -> d >= min_date && d <= end_date, all_dates)
 
     spots = Dict{DateTime,Float64}()
     for d in filtered_dates
-        date_str = Dates.format(d, "yyyy-mm-dd")
-        path = joinpath(SPOT_ROOT, "date=$date_str", "symbol=$(uppercase(symbol))", "data.parquet")
+        path = polygon_spot_path(DEFAULT_STORE, d, symbol)
         isfile(path) || continue
         dict = read_polygon_spot_prices(path; underlying=symbol)
         merge!(spots, dict)
@@ -137,7 +107,7 @@ function load_surfaces_and_spots(
     entry_times::Union{Time,Vector{Time}}=TEST_ENTRY_TIME_ET
 )
     println("  Loading dates from $start_date to $end_date...")
-    all_dates = available_dates(POLYGON_ROOT, symbol)
+    all_dates = available_polygon_dates(DEFAULT_STORE, symbol)
     filtered_dates = filter(d -> d >= start_date && d <= end_date, all_dates)
 
     if isempty(filtered_dates)
@@ -150,17 +120,14 @@ function load_surfaces_and_spots(
 
     # Load entry spots
     entry_spots = read_polygon_spot_prices_for_timestamps(
-        SPOT_ROOT,
+        polygon_spot_root(DEFAULT_STORE),
         entry_ts;
         symbol=symbol
     )
     println("  Loaded $(length(entry_spots)) entry spots")
 
     # Build surfaces
-    path_for_ts = ts -> begin
-        date_str = Dates.format(Date(ts), "yyyy-mm-dd")
-        joinpath(POLYGON_ROOT, "date=$date_str", "underlying=$symbol", "data.parquet")
-    end
+    path_for_ts = ts -> polygon_options_path(DEFAULT_STORE, Date(ts), symbol)
     read_records = (path; where="") -> read_polygon_option_records(
         path,
         entry_spots;
@@ -191,7 +158,7 @@ function load_surfaces_and_spots(
     expiry_ts = unique(expiry_ts)
 
     settlement_spots = read_polygon_spot_prices_for_timestamps(
-        SPOT_ROOT,
+        polygon_spot_root(DEFAULT_STORE),
         expiry_ts;
         symbol=symbol
     )

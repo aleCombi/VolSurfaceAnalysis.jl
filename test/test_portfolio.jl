@@ -1,176 +1,109 @@
 @testset "Portfolio Management" begin
-    # Create test data
-    expiry = DateTime(2026, 2, 1, 8, 0, 0)  # 08:00 UTC
-    now = DateTime(2026, 1, 25, 12, 0, 0)
-    
-    # Create a simple trade
-    trade = Trade(BTC, 100000.0, expiry, Call, now; direction=1, quantity=1.0)
-    
-    @testset "Portfolio Construction" begin
-        portfolio = Portfolio()
-        @test num_positions(portfolio) == 0
-        @test portfolio.cash == 0.0
-        @test portfolio.realized_pnl == 0.0
-    end
-    
-    @testset "Portfolio with Initial Cash" begin
-        portfolio = Portfolio(initial_cash=1.0)
-        @test portfolio.cash == 1.0
-    end
-    
-    # Load real data for integration tests
-    data_path = joinpath(@__DIR__, "..", "data")
-    sample_file = joinpath(data_path, "vols_20260117.parquet")
-    
-    if isfile(sample_file)
-        store = LocalDataStore(data_path)
-        records = load_all(store; underlying=BTC)
-        
-        # Build a surface from first hour
-        by_hour = split_by_timestamp(records, Hour(1))
-        first_ts = minimum(keys(by_hour))
-        surface = build_surface(by_hour[first_ts])
-        
-        # Get a valid strike/expiry from the surface
-        point = first(surface.points)
-        strike = surface.spot * exp(point.log_moneyness)
-        
-        # Find corresponding record for expiry
-        sample_record = first(filter(r -> !ismissing(r.mark_iv), by_hour[first_ts]))
-        test_expiry = sample_record.expiry
-        test_strike = sample_record.strike
-        
-        test_trade = Trade(BTC, test_strike, test_expiry, Call, surface.timestamp; 
-                           direction=1, quantity=1.0)
-        
-        @testset "Add Position" begin
-            portfolio = Portfolio()
+    data_path = joinpath(@__DIR__, "..", "data", "vols_20260117.parquet")
 
-            # Check that we can find this option on the surface
-            # Use :ask since test_trade is a buy (direction=1)
-            σ = find_vol(surface, test_strike, test_expiry; side=:ask)
-            if !ismissing(σ)
-                pos = add_position!(portfolio, test_trade, surface)
+    if isfile(data_path)
+        # Load records and build a surface from the first timestamp
+        records = read_deribit_option_records(data_path; where="")
+        timestamps = sort(unique(r.timestamp for r in records))
+        ts = first(timestamps)
+        ts_records = filter(r -> r.timestamp == ts, records)
+        surface = build_surface(ts_records)
 
-                @test num_positions(portfolio) == 1
-                @test pos.trade == test_trade
-                @test pos.entry_vol == σ  # Now uses ask vol for buys
-                @test pos.entry_price > 0
-                @test portfolio.cash < 0  # We paid for the option
+        # Pick a valid record that exists on the surface (has bid/ask and mark_iv)
+        sample = first(filter(r ->
+            !ismissing(r.mark_iv) &&
+            !ismissing(r.bid_price) &&
+            !ismissing(r.ask_price) &&
+            r.bid_price > 0 &&
+            r.expiry > r.timestamp,
+            ts_records
+        ))
+
+        @testset "open_position long" begin
+            trade = Trade(surface.underlying, sample.strike, sample.expiry, sample.option_type;
+                          direction=1, quantity=1.0)
+            pos = open_position(trade, surface)
+
+            @test pos.trade == trade
+            @test pos.entry_price == sample.ask_price   # long fills at ask
+            @test pos.entry_spot == surface.spot
+            @test pos.entry_timestamp == surface.timestamp
+            @test !ismissing(pos.entry_bid)
+            @test !ismissing(pos.entry_ask)
+        end
+
+        @testset "open_position short" begin
+            trade = Trade(surface.underlying, sample.strike, sample.expiry, sample.option_type;
+                          direction=-1, quantity=1.0)
+            pos = open_position(trade, surface)
+
+            @test pos.entry_price == sample.bid_price   # short fills at bid
+        end
+
+        @testset "entry_cost" begin
+            # Long: positive cost (we pay ask * spot)
+            trade_long = Trade(surface.underlying, sample.strike, sample.expiry, sample.option_type;
+                               direction=1, quantity=1.0)
+            pos_long = open_position(trade_long, surface)
+            @test entry_cost(pos_long) > 0
+            @test entry_cost(pos_long) ≈ sample.ask_price * surface.spot atol=1e-6
+
+            # Short: negative cost (we receive bid * spot)
+            trade_short = Trade(surface.underlying, sample.strike, sample.expiry, sample.option_type;
+                                direction=-1, quantity=1.0)
+            pos_short = open_position(trade_short, surface)
+            @test entry_cost(pos_short) < 0
+            @test entry_cost(pos_short) ≈ -sample.bid_price * surface.spot atol=1e-6
+        end
+
+        @testset "settle at expiry" begin
+            trade = Trade(surface.underlying, sample.strike, sample.expiry, Call;
+                          direction=1, quantity=1.0)
+
+            # Find a call record on this surface for the trade
+            call_rec = findfirst(r ->
+                r.strike == sample.strike &&
+                r.expiry == sample.expiry &&
+                r.option_type == Call &&
+                !ismissing(r.bid_price) && !ismissing(r.ask_price),
+                ts_records
+            )
+
+            if call_rec !== nothing
+                rec = ts_records[call_rec]
+                trade = Trade(surface.underlying, rec.strike, rec.expiry, Call;
+                              direction=1, quantity=1.0)
+                pos = open_position(trade, surface)
+                cost = entry_cost(pos)
+
+                # Settle OTM (spot < strike): payoff = 0, PnL = -cost
+                pnl_otm = settle(pos, rec.strike * 0.5)
+                @test pnl_otm ≈ -cost atol=1e-6
+
+                # Settle deep ITM: payoff = (spot - strike), PnL = payoff - cost
+                deep_spot = rec.strike * 1.5
+                pnl_itm = settle(pos, deep_spot)
+                @test pnl_itm ≈ (deep_spot - rec.strike) - cost atol=1e-6
+
+                # ITM PnL should be greater than OTM PnL
+                @test pnl_itm > pnl_otm
             end
         end
-        
-        @testset "Position Value & Greeks" begin
-            portfolio = Portfolio()
-            
-            σ = find_vol(surface, test_strike, test_expiry)
-            if !ismissing(σ)
-                pos = add_position!(portfolio, test_trade, surface)
-                
-                # Position value should be positive for long call
-                val = position_value(pos, surface)
-                @test val >= 0
-                
-                # Delta should be between 0 and 1 for long call
-                delta = position_delta(pos, surface)
-                @test 0.0 <= delta <= 1.0
-                
-                # Vega should be positive for long option
-                vega = position_vega(pos, surface)
-                @test vega >= 0
-            end
-        end
-        
-        @testset "Mark to Market" begin
-            portfolio = Portfolio(initial_cash=0.1)
-            
-            σ = find_vol(surface, test_strike, test_expiry)
-            if !ismissing(σ)
-                pos = add_position!(portfolio, test_trade, surface)
-                
-                snapshot = mark_to_market(portfolio, surface)
-                
-                @test snapshot.positions == 1
-                @test snapshot.timestamp == surface.timestamp
-                @test snapshot.realized_pnl == 0.0  # Nothing closed yet
-                
-                # With same surface, unrealized P&L should be ~0 (minus spread)
-                @test abs(snapshot.unrealized_pnl) < surface.spot * 0.01
-            end
-        end
-        
-        @testset "Close Position" begin
-            portfolio = Portfolio(initial_cash=0.1)
-            
-            σ = find_vol(surface, test_strike, test_expiry)
-            if !ismissing(σ)
-                pos = add_position!(portfolio, test_trade, surface)
-                initial_cash = portfolio.cash
-                
-                # Close at same surface - P&L should be ~0
-                pnl = close_position!(portfolio, pos, surface)
-                
-                @test num_positions(portfolio) == 0
-                @test abs(pnl) < surface.spot * 0.01  # Small due to same prices
-                @test length(portfolio.trade_log) == 2  # Open + close
-            end
-        end
-        
-        @testset "Trade Log" begin
-            portfolio = Portfolio()
-            
-            σ = find_vol(surface, test_strike, test_expiry)
-            if !ismissing(σ)
-                pos = add_position!(portfolio, test_trade, surface)
-                
-                @test length(portfolio.trade_log) == 1
-                @test portfolio.trade_log[1].action == :open
-                @test portfolio.trade_log[1].position_id == pos.id
-                
-                close_position!(portfolio, pos, surface)
-                
-                @test length(portfolio.trade_log) == 2
-                @test portfolio.trade_log[2].action == :close
-            end
-        end
-        
-        @testset "Record Snapshot History" begin
-            portfolio = Portfolio()
-            
-            σ = find_vol(surface, test_strike, test_expiry)
-            if !ismissing(σ)
-                add_position!(portfolio, test_trade, surface)
-                
-                record_snapshot!(portfolio, surface)
-                
-                @test length(portfolio.history) == 1
-                @test portfolio.history[1].positions == 1
-            end
-        end
-        
-        @testset "Position Queries" begin
-            portfolio = Portfolio()
-            
-            σ = find_vol(surface, test_strike, test_expiry)
-            if !ismissing(σ)
-                add_position!(portfolio, test_trade, surface)
-                
-                # Query by underlying
-                btc_pos = get_positions(portfolio; underlying=BTC)
-                eth_pos = get_positions(portfolio; underlying=ETH)
-                
-                @test length(btc_pos) == 1
-                @test length(eth_pos) == 0
-                
-                # Query by option type
-                calls = get_positions(portfolio; option_type=Call)
-                puts = get_positions(portfolio; option_type=Put)
-                
-                @test length(calls) == 1
-                @test length(puts) == 0
-            end
+
+        @testset "settle vector" begin
+            # Long + short at same strike: payoffs cancel, PnL = spread cost
+            trade_long  = Trade(surface.underlying, sample.strike, sample.expiry, sample.option_type;
+                                direction=1, quantity=1.0)
+            trade_short = Trade(surface.underlying, sample.strike, sample.expiry, sample.option_type;
+                                direction=-1, quantity=1.0)
+            positions = [open_position(trade_long, surface), open_position(trade_short, surface)]
+
+            # At strike (ATM expiry), both payoffs are 0
+            total_pnl = settle(positions, sample.strike)
+            expected  = -(sample.ask_price - sample.bid_price) * surface.spot
+            @test total_pnl ≈ expected atol=1e-6
         end
     else
-        @info "Test data not found at $sample_file, skipping Portfolio integration tests"
+        @info "Test data not found at $data_path, skipping Portfolio tests"
     end
 end

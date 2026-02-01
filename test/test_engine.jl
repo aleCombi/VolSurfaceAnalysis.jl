@@ -195,5 +195,5 @@ using DuckDB
         @test pnl[1] ≈ expected_pnl
     end
 
-    rm(tmpfile; force=true)
+    try rm(tmpfile; force=true) catch end
 end

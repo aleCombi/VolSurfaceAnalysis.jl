@@ -7,5 +7,6 @@ using Dates
     include("test_data_ingestion.jl")
     include("test_portfolio.jl")
     include("test_engine.jl")
+    include("test_local_data.jl")
 end
 

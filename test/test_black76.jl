@@ -128,10 +128,10 @@
 end
 
 @testset "Mark IV to Mark Price Validation" begin
-    # Load sample data using read_vol_records (which normalizes expiry to 08:00 UTC)
+    # Load sample data (expiry is normalized to 08:00 UTC by the reader)
     data_path = joinpath(@__DIR__, "..", "data", "vols_20260117.parquet")
     if isfile(data_path)
-        records = read_vol_records(data_path)
+        records = read_deribit_option_records(data_path; where="")
         
         # Filter valid records: non-missing mark_iv, mark_price, and T > 7 days
         sample = filter(records) do record
@@ -158,8 +158,8 @@ end
 @testset "Bid/Ask IV Computation" begin
     data_path = joinpath(@__DIR__, "..", "data", "vols_20260117.parquet")
     if isfile(data_path)
-        records = read_vol_records(data_path)
-        
+        records = read_deribit_option_records(data_path; where="")
+
         # Find records with both bid and ask prices
         sample = filter(records) do record
             !ismissing(record.bid_price) && 
