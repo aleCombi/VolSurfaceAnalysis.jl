@@ -48,70 +48,6 @@ function build_entry_timestamps(dates::Vector{Date})::Vector{DateTime}
     return ts
 end
 
-function _condor_group_max_loss(group_positions::Vector{Position})::Union{Missing,Float64}
-    short_puts = Float64[]
-    long_puts = Float64[]
-    short_calls = Float64[]
-    long_calls = Float64[]
-    total_entry_cost = 0.0
-
-    for pos in group_positions
-        total_entry_cost += entry_cost(pos)
-        t = pos.trade
-        if t.option_type == Put
-            if t.direction < 0
-                push!(short_puts, t.strike)
-            else
-                push!(long_puts, t.strike)
-            end
-        else
-            if t.direction < 0
-                push!(short_calls, t.strike)
-            else
-                push!(long_calls, t.strike)
-            end
-        end
-    end
-
-    if isempty(short_puts) || isempty(long_puts) || isempty(short_calls) || isempty(long_calls)
-        return missing
-    end
-
-    short_put = maximum(short_puts)
-    long_put = minimum(long_puts)
-    short_call = minimum(short_calls)
-    long_call = maximum(long_calls)
-
-    put_width = abs(short_put - long_put)
-    call_width = abs(long_call - short_call)
-    max_width = max(put_width, call_width)
-
-    credit = -total_entry_cost
-    max_loss = max_width - credit
-    return max(max_loss, 0.0)
-end
-
-function _first_condor_margin(
-    positions::Vector{Position};
-    buffer::Float64=0.3
-)::Union{Nothing,Float64}
-    groups = Dict{Tuple{DateTime,DateTime}, Vector{Position}}()
-    for pos in positions
-        key = (pos.entry_timestamp, pos.trade.expiry)
-        push!(get!(groups, key, Position[]), pos)
-    end
-    isempty(groups) && return nothing
-
-    for key in sort(collect(keys(groups)); by=k -> k[1])
-        max_loss = _condor_group_max_loss(groups[key])
-        if max_loss !== missing
-            return max_loss * (1 + buffer)
-        end
-    end
-
-    return nothing
-end
-
 function run_symbol_backtest(symbol::String)
     println("=" ^ 60)
     println("PROCESSING SYMBOL: $symbol")
@@ -204,8 +140,7 @@ function run_symbol_backtest(symbol::String)
         return
     end
 
-    margin_per_trade = _first_condor_margin(positions; buffer=0.3)
-    metrics = performance_metrics(positions, pnls; margin_per_trade=margin_per_trade)
+    metrics = performance_metrics(positions, pnls; margin_by_key=condor_max_loss_by_key(positions))
 
     attempted = Set{Tuple{DateTime, DateTime}}()
     pnl_by_key = Dict{Tuple{DateTime, DateTime}, Float64}()
@@ -294,8 +229,7 @@ function run_symbol_backtest(symbol::String)
     end
 
     push!(lines, "")
-    margin_label = margin_per_trade === nothing ? "n/a" : "\$$(round(margin_per_trade, digits=2))"
-    push!(lines, "Performance Metrics (margin per trade: $margin_label; first condor max loss + 30%):")
+    push!(lines, "Performance Metrics (return basis: per-condor max loss):")
     push!(lines, "  Total ROI: $(metrics.total_roi === missing ? "n/a" : string(round(metrics.total_roi * 100, digits=2)) * "%")")
     push!(lines, "  Sharpe: $(metrics.sharpe === missing ? "n/a" : string(round(metrics.sharpe, digits=2)))")
     push!(lines, "  Sortino: $(metrics.sortino === missing ? "n/a" : string(round(metrics.sortino, digits=2)))")

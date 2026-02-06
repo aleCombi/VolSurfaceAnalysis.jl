@@ -46,6 +46,10 @@ const SHORT_SIGMAS = 0.7
 const LONG_SIGMAS = 1.5
 const TARGET_MAX_LOSS = 10.0  # Target maximum loss per contract in dollars (e.g., 10.0 = $1000 max loss)
 const PREFER_SYMMETRIC_WINGS = false
+const CONDOR_WING_OBJECTIVE = :roi  # :target_max_loss, :roi, or :pnl
+const CONDOR_MAX_LOSS_MIN = 5.0
+const CONDOR_MAX_LOSS_MAX = 30.0
+const CONDOR_MIN_CREDIT = 0.10
 
 # Training parameters
 const EPOCHS = 100
@@ -256,7 +260,11 @@ function main()
             div_yield=DIV_YIELD,
             expiry_interval=EXPIRY_INTERVAL,
             wing_delta_abs=nothing,
-            target_max_loss=TARGET_MAX_LOSS,
+            target_max_loss=(CONDOR_WING_OBJECTIVE == :target_max_loss ? TARGET_MAX_LOSS : nothing),
+            wing_objective=CONDOR_WING_OBJECTIVE,
+            max_loss_min=CONDOR_MAX_LOSS_MIN,
+            max_loss_max=CONDOR_MAX_LOSS_MAX,
+            min_credit=CONDOR_MIN_CREDIT,
             min_delta_gap=MIN_DELTA_GAP,
             prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             use_logsig=USE_LOGSIG,
@@ -318,7 +326,11 @@ function main()
             div_yield=DIV_YIELD,
             expiry_interval=EXPIRY_INTERVAL,
             wing_delta_abs=nothing,
-            target_max_loss=TARGET_MAX_LOSS,
+            target_max_loss=(CONDOR_WING_OBJECTIVE == :target_max_loss ? TARGET_MAX_LOSS : nothing),
+            wing_objective=CONDOR_WING_OBJECTIVE,
+            max_loss_min=CONDOR_MAX_LOSS_MIN,
+            max_loss_max=CONDOR_MAX_LOSS_MAX,
+            min_credit=CONDOR_MIN_CREDIT,
             min_delta_gap=MIN_DELTA_GAP,
             prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             use_logsig=USE_LOGSIG,
@@ -434,8 +446,12 @@ function main()
             model, feature_means, feature_stds;
             min_delta=0.05f0,
             max_delta=0.35f0,
-            wing_delta_abs=nothing,  # Disable fixed delta wings
-            target_max_loss=Float32(TARGET_MAX_LOSS),  # Use max loss wings
+            wing_delta_abs=nothing,
+            target_max_loss=(CONDOR_WING_OBJECTIVE == :target_max_loss ? Float32(TARGET_MAX_LOSS) : nothing),
+            wing_objective=CONDOR_WING_OBJECTIVE,
+            max_loss_min=Float32(CONDOR_MAX_LOSS_MIN),
+            max_loss_max=Float32(CONDOR_MAX_LOSS_MAX),
+            min_credit=Float32(CONDOR_MIN_CREDIT),
             min_delta_gap=Float32(MIN_DELTA_GAP),
             prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             rate=RISK_FREE_RATE,
@@ -486,17 +502,36 @@ function main()
     end
 
     strategy_baseline = if STRATEGY == "condor"
-        baseline_selector = ctx -> VolSurfaceAnalysis._delta_condor_strikes(
-            ctx,
-            SHORT_DELTA_ABS,
-            SHORT_DELTA_ABS,
-            WING_DELTA_ABS,
-            WING_DELTA_ABS;
-            rate=RISK_FREE_RATE,
-            div_yield=DIV_YIELD,
-            min_delta_gap=MIN_DELTA_GAP,
-            debug=false
-        )
+        baseline_selector = ctx -> begin
+            shorts = VolSurfaceAnalysis._delta_strangle_strikes_asymmetric(
+                ctx,
+                SHORT_DELTA_ABS,
+                SHORT_DELTA_ABS;
+                rate=RISK_FREE_RATE,
+                div_yield=DIV_YIELD
+            )
+            shorts === nothing && return nothing
+            short_put_K, short_call_K = shorts
+
+            wings = VolSurfaceAnalysis._condor_wings_by_objective(
+                ctx,
+                short_put_K,
+                short_call_K;
+                objective=CONDOR_WING_OBJECTIVE,
+                target_max_loss=(CONDOR_WING_OBJECTIVE == :target_max_loss ? TARGET_MAX_LOSS : nothing),
+                max_loss_min=CONDOR_MAX_LOSS_MIN,
+                max_loss_max=CONDOR_MAX_LOSS_MAX,
+                min_credit=CONDOR_MIN_CREDIT,
+                rate=RISK_FREE_RATE,
+                div_yield=DIV_YIELD,
+                min_delta_gap=MIN_DELTA_GAP,
+                prefer_symmetric=PREFER_SYMMETRIC_WINGS,
+                debug=false
+            )
+            wings === nothing && return nothing
+            long_put_K, long_call_K = wings
+            return (short_put_K, short_call_K, long_put_K, long_call_K)
+        end
         IronCondorStrategy(
             schedule,
             EXPIRY_INTERVAL,
@@ -565,10 +600,16 @@ function main()
     println()
 
     # Compute metrics
-    margin = 12000.0
-    metrics_ml = performance_metrics(pos_ml, pnl_ml; margin_per_trade=margin)
-    metrics_baseline = performance_metrics(pos_baseline, pnl_baseline; margin_per_trade=margin)
-    metrics_sigma = performance_metrics(pos_sigma, pnl_sigma; margin_per_trade=margin)
+    if STRATEGY == "condor"
+        metrics_ml = performance_metrics(pos_ml, pnl_ml; margin_by_key=condor_max_loss_by_key(pos_ml))
+        metrics_baseline = performance_metrics(pos_baseline, pnl_baseline; margin_by_key=condor_max_loss_by_key(pos_baseline))
+        metrics_sigma = performance_metrics(pos_sigma, pnl_sigma; margin_by_key=condor_max_loss_by_key(pos_sigma))
+    else
+        margin = 12000.0
+        metrics_ml = performance_metrics(pos_ml, pnl_ml; margin_per_trade=margin)
+        metrics_baseline = performance_metrics(pos_baseline, pnl_baseline; margin_per_trade=margin)
+        metrics_sigma = performance_metrics(pos_sigma, pnl_sigma; margin_per_trade=margin)
+    end
 
     # -------------------------------------------------------------------------
     # Results Summary
@@ -578,7 +619,11 @@ function main()
     println("=" ^ 80)
     println()
     println("Validation Period: $VAL_START to $VAL_END")
-    println("Margin per trade: \$$(Int(margin))")
+    if STRATEGY == "condor"
+        println("Return basis: per-trade max loss")
+    else
+        println("Margin per trade: \$$(Int(margin))")
+    end
     println()
 
     println("-" ^ 70)

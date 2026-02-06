@@ -127,12 +127,19 @@ end
 Callable selector for iron condors that predicts inner deltas and selects wings.
 
 Wing selection modes:
-1. Fixed delta mode (default): Uses `wing_delta_abs` to select wings at fixed deltas
-2. Max loss mode: Uses `target_max_loss` to select wings that achieve a target maximum loss
+1. Fixed delta mode: Uses `wing_delta_abs` to select wings at fixed deltas
+2. Objective mode: Uses `_condor_wings_by_objective` with `wing_objective`:
+   - `:target_max_loss` (legacy): match `target_max_loss`
+   - `:roi`: maximize entry credit / max loss
+   - `:pnl`: maximize entry credit
 
 Fields are similar to MLStrikeSelector with additional:
 - `wing_delta_abs::Union{Nothing,Float32}`: Absolute delta for long wings (fixed delta mode)
 - `target_max_loss::Union{Nothing,Float32}`: Target maximum loss per contract (max loss mode, in dollars)
+- `wing_objective::Symbol`: Objective for selecting wings in objective mode
+- `max_loss_min::Float32`: Minimum allowed max loss in dollars (objective mode)
+- `max_loss_max::Float32`: Maximum allowed max loss in dollars (objective mode)
+- `min_credit::Float32`: Minimum net credit in dollars (objective mode)
 - `min_delta_gap::Float32`: Minimum delta gap between short and long legs
 - `prefer_symmetric::Bool`: If true in max loss mode, prefer equal width spreads
 """
@@ -144,6 +151,10 @@ struct MLCondorStrikeSelector
     max_delta::Float32
     wing_delta_abs::Union{Nothing,Float32}
     target_max_loss::Union{Nothing,Float32}
+    wing_objective::Symbol
+    max_loss_min::Float32
+    max_loss_max::Float32
+    min_credit::Float32
     min_delta_gap::Float32
     prefer_symmetric::Bool
     rate::Float64
@@ -154,10 +165,13 @@ struct MLCondorStrikeSelector
 end
 
 """
-    MLCondorStrikeSelector(model, feature_means, feature_stds; wing_delta_abs, target_max_loss, min_delta_gap, prefer_symmetric, min_delta, max_delta, rate, div_yield, return_sizing)
+    MLCondorStrikeSelector(model, feature_means, feature_stds; wing_delta_abs, target_max_loss, wing_objective, max_loss_min, max_loss_max, min_credit, min_delta_gap, prefer_symmetric, min_delta, max_delta, rate, div_yield, return_sizing)
 
-Create an MLCondorStrikeSelector. Specify either `wing_delta_abs` for fixed delta wings
-or `target_max_loss` for wings based on maximum loss. If both are provided, `target_max_loss` takes precedence.
+Create an MLCondorStrikeSelector.
+
+Mode selection precedence:
+- Fixed mode if `wing_delta_abs !== nothing`, `target_max_loss===nothing`, and `wing_objective==:target_max_loss`
+- Objective mode otherwise (requires valid objective configuration)
 """
 function MLCondorStrikeSelector(
     model,
@@ -165,6 +179,10 @@ function MLCondorStrikeSelector(
     feature_stds::Vector{Float32};
     wing_delta_abs::Union{Nothing,Float32}=0.05f0,
     target_max_loss::Union{Nothing,Float32}=nothing,
+    wing_objective::Symbol=:target_max_loss,
+    max_loss_min::Float32=0.0f0,
+    max_loss_max::Float32=Float32(Inf),
+    min_credit::Float32=0.0f0,
     min_delta_gap::Float32=0.08f0,
     prefer_symmetric::Bool=true,
     min_delta::Float32=0.05f0,
@@ -175,9 +193,18 @@ function MLCondorStrikeSelector(
     return_sizing::Bool=true,
     use_logsig::Bool=false
 )
-    # Validate that at least one wing selection mode is specified
-    if wing_delta_abs === nothing && target_max_loss === nothing
-        error("Must specify either wing_delta_abs or target_max_loss")
+    if !(wing_objective in (:target_max_loss, :roi, :pnl))
+        error("wing_objective must be one of :target_max_loss, :roi, :pnl")
+    end
+
+    if max_loss_max < max_loss_min
+        error("max_loss_max must be >= max_loss_min")
+    end
+
+    # If objective mode is selected with :target_max_loss, a target is required.
+    uses_objective_mode = !(wing_delta_abs !== nothing && target_max_loss === nothing && wing_objective == :target_max_loss)
+    if uses_objective_mode && wing_objective == :target_max_loss && target_max_loss === nothing
+        error("target_max_loss must be provided when wing_objective=:target_max_loss in objective mode")
     end
 
     return MLCondorStrikeSelector(
@@ -188,6 +215,10 @@ function MLCondorStrikeSelector(
         max_delta,
         wing_delta_abs,
         target_max_loss,
+        wing_objective,
+        max_loss_min,
+        max_loss_max,
+        min_credit,
         min_delta_gap,
         prefer_symmetric,
         rate,
@@ -203,7 +234,7 @@ end
                                                     Tuple{Float64, Float64, Float64, Float64, Float64}}
 
 Returns inner/outer strikes, and optionally a position size.
-Uses either fixed delta wings or max loss wings depending on configuration.
+Uses either fixed-delta wings or objective-driven wings depending on configuration.
 """
 function (selector::MLCondorStrikeSelector)(ctx)
     surface = ctx.surface
@@ -239,22 +270,14 @@ function (selector::MLCondorStrikeSelector)(ctx)
     short_put_K, short_call_K = short_strikes
 
     # Select wings based on mode
-    wings = if selector.target_max_loss !== nothing
-        # Max loss mode
-        _max_loss_condor_wings(
-            ctx,
-            short_put_K,
-            short_call_K,
-            Float64(selector.target_max_loss);
-            rate=selector.rate,
-            div_yield=selector.div_yield,
-            min_delta_gap=Float64(selector.min_delta_gap),
-            prefer_symmetric=selector.prefer_symmetric,
-            debug=false
-        )
-    else
+    use_fixed_delta_wings = (
+        selector.wing_delta_abs !== nothing &&
+        selector.target_max_loss === nothing &&
+        selector.wing_objective == :target_max_loss
+    )
+
+    wings = if use_fixed_delta_wings
         # Fixed delta mode
-        # Find wings at fixed deltas
         long_put_K = _best_delta_strike(
             filter(r -> r.option_type == Put && r.strike < short_put_K, ctx.recs),
             -Float64(selector.wing_delta_abs),
@@ -276,6 +299,22 @@ function (selector::MLCondorStrikeSelector)(ctx)
             debug=false
         )
         (long_put_K === nothing || long_call_K === nothing) ? nothing : (long_put_K, long_call_K)
+    else
+        _condor_wings_by_objective(
+            ctx,
+            short_put_K,
+            short_call_K;
+            objective=selector.wing_objective,
+            target_max_loss=(selector.target_max_loss === nothing ? nothing : Float64(selector.target_max_loss)),
+            max_loss_min=Float64(selector.max_loss_min),
+            max_loss_max=Float64(selector.max_loss_max),
+            min_credit=Float64(selector.min_credit),
+            rate=selector.rate,
+            div_yield=selector.div_yield,
+            min_delta_gap=Float64(selector.min_delta_gap),
+            prefer_symmetric=selector.prefer_symmetric,
+            debug=false
+        )
     end
 
     wings === nothing && return nothing

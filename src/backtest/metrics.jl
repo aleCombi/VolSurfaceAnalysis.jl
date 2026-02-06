@@ -48,7 +48,7 @@ Extended performance metrics computed from aggregated P&L and optional margin.
 - `win_rate::Union{Float64,Missing}`: fraction of wins or missing if none
 - `avg_bid_ask_spread_usd::Union{Float64,Missing}`: mean entry bid-ask spread (USD)
 - `avg_bid_ask_spread_rel::Union{Float64,Missing}`: mean entry bid-ask spread / mid (unitless)
-- `total_roi::Union{Float64,Missing}`: total ROI on margin (if provided)
+- `total_roi::Union{Float64,Missing}`: total ROI on margin basis (if provided)
 - `annualized_roi_simple::Union{Float64,Missing}`: simple annualized ROI
 - `annualized_roi_cagr::Union{Float64,Missing}`: CAGR annualized ROI
 - `avg_return::Union{Float64,Missing}`: average per-trade return
@@ -301,16 +301,48 @@ function backtest_metrics(
 end
 
 """
-    performance_metrics(positions, pnls; margin_per_trade=nothing, annualization=252, key=default_key)
+    condor_max_loss_by_key(positions; key=default_key) -> Dict{Any,Float64}
 
-Compute extended performance metrics. If `margin_per_trade` is provided, ROI and
-return-based metrics (Sharpe/Sortino) are computed; otherwise those fields are
-returned as `missing`.
+Build a dictionary of per-condor max loss by grouped trade key.
+Only groups that can be parsed as condors and have positive max loss are included.
+"""
+function condor_max_loss_by_key(
+    positions::Vector{Position};
+    key::Function = pos -> (pos.entry_timestamp, pos.trade.expiry)
+)::Dict{Any,Float64}
+    groups = Dict{Any,Vector{Position}}()
+    for pos in positions
+        k = key(pos)
+        push!(get!(groups, k, Position[]), pos)
+    end
+
+    margin_by_key = Dict{Any,Float64}()
+    for (k, group_positions) in groups
+        stats = condor_group_stats(group_positions)
+        stats === missing && continue
+        stats.max_loss > 0 || continue
+        margin_by_key[k] = stats.max_loss
+    end
+
+    return margin_by_key
+end
+
+"""
+    performance_metrics(positions, pnls; margin_per_trade=nothing, margin_by_key=nothing,
+                        annualization=252, key=default_key)
+
+Compute extended performance metrics.
+
+- If `margin_per_trade` is provided, fixed-margin return metrics are computed.
+- If `margin_by_key` is provided, per-trade margin metrics are computed from
+  each grouped trade key.
+- If neither is provided, ROI/return fields are returned as `missing`.
 """
 function performance_metrics(
     positions::Vector{Position},
     pnls::Vector{Union{Missing,Float64}};
     margin_per_trade::Union{Nothing,Float64}=nothing,
+    margin_by_key::Union{Nothing,AbstractDict}=nothing,
     annualization::Int=252,
     key::Function = pos -> (pos.entry_timestamp, pos.trade.expiry)
 )::PerformanceMetrics
@@ -359,7 +391,53 @@ function performance_metrics(
     sharpe = missing
     sortino = missing
 
-    if margin_per_trade !== nothing && margin_per_trade > 0 && trade_count > 0
+    if margin_per_trade !== nothing && margin_by_key !== nothing
+        throw(ArgumentError("Provide either margin_per_trade or margin_by_key, not both"))
+    end
+
+    if margin_by_key !== nothing && trade_count > 0
+        returns = Float64[]
+        pnl_for_returns = 0.0
+        margin_total = 0.0
+
+        for (k, pnl) in pnl_by_key
+            margin = get(margin_by_key, k, nothing)
+            if margin === nothing
+                continue
+            end
+            margin = Float64(margin)
+            if !isfinite(margin) || margin <= 0
+                continue
+            end
+
+            push!(returns, pnl / margin)
+            pnl_for_returns += pnl
+            margin_total += margin
+        end
+
+        if !isempty(returns)
+            avg_return = mean(returns)
+            volatility = std(returns)
+
+            if volatility > 0
+                sharpe = (avg_return / volatility) * sqrt(annualization)
+            end
+
+            semi_dev = sqrt(mean(min.(0, returns) .^ 2))
+            if semi_dev > 0
+                sortino = (avg_return / semi_dev) * sqrt(annualization)
+            end
+
+            total_roi = pnl_for_returns / margin_total
+
+            if duration_years !== missing && duration_years > 0
+                annualized_roi_simple = total_roi / duration_years
+                if 1 + total_roi > 0
+                    annualized_roi_cagr = (1 + total_roi)^(1 / duration_years) - 1
+                end
+            end
+        end
+    elseif margin_per_trade !== nothing && margin_per_trade > 0 && trade_count > 0
         returns = [v / margin_per_trade for v in pnl_values]
         avg_return = mean(returns)
         volatility = std(returns)

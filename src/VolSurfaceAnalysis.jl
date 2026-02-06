@@ -7,7 +7,7 @@ using Statistics: mean, std, median
 using Random
 using Flux
 using BSON
-using ChenSignatures: sig, logsig
+using ChenSignatures: sig, logsig, prepare
 
 # ============================================================================
 # Core Types & Models
@@ -115,7 +115,7 @@ export next_portfolio, entry_schedule, entry_positions
 export BacktestResult, backtest_strategy
 export BacktestMetrics, PerformanceMetrics
 export aggregate_pnl, backtest_metrics, performance_metrics, profit_curve, average_entry_spread
-export condor_group_stats, condor_trade_table
+export condor_group_stats, condor_trade_table, condor_max_loss_by_key
 export settlement_zone_analysis, settlement_zone_summary
 export save_pnl_distribution, save_equity_curve, save_pnl_and_equity_curve, save_profit_curve, save_spot_curve
 

@@ -5,6 +5,15 @@
 # Signature level for path features (level 3 on 2D path gives 14 features)
 const SIGNATURE_LEVEL = 3
 const SIGNATURE_DIM = 14  # For 2D path at level 3: 2 + 4 + 8 = 14
+const _LOGSIG_PATH_DIM = 2
+const _LOGSIG_BASIS_CACHE = Dict{Tuple{Int,Int},Any}()
+
+function _logsig_basis(path_dim::Int, level::Int)
+    key = (path_dim, level)
+    return get!(_LOGSIG_BASIS_CACHE, key) do
+        prepare(path_dim, level)
+    end
+end
 
 """
     SurfaceFeatures
@@ -146,7 +155,7 @@ Log-signature is more numerically stable and has nicer statistical properties.
 - `level::Int`: Truncation level
 
 # Returns
-- Vector of log-signature features
+- Vector of log-signature features padded/truncated to `SIGNATURE_DIM`
 """
 function compute_logsig_features(
     spot_history::Vector{Float64},
@@ -166,7 +175,9 @@ function compute_logsig_features(
     path = hcat(collect(times), cum_log_returns)
 
     try
-        lsig = logsig(path, level)
+        # ChenSignatures.logsig expects a precomputed BasisCache, not just level.
+        basis = _logsig_basis(_LOGSIG_PATH_DIM, level)
+        lsig = logsig(path, basis)
         if length(lsig) >= SIGNATURE_DIM
             return lsig[1:SIGNATURE_DIM]
         else
