@@ -496,6 +496,184 @@ function _delta_condor_strikes(
     return (short_put, short_call, long_put, long_call)
 end
 
+"""
+    _max_loss_condor_wings(ctx, short_put_K, short_call_K, target_max_loss; rate, div_yield, min_delta_gap, prefer_symmetric, debug)
+        -> Union{Nothing, Tuple{Float64, Float64}}
+
+Select wing strikes (long put and long call) to achieve a target maximum loss for an iron condor,
+given fixed short strikes.
+
+For a short iron condor, the maximum loss is calculated as:
+    max_loss = spread_width - net_credit
+
+where:
+- spread_width = max(short_put - long_put, long_call - short_call)
+- net_credit = (short_put_price + short_call_price) - (long_put_price + long_call_price)
+
+# Arguments
+- `ctx`: Strike selection context with surface, tau, recs, etc.
+- `short_put_K::Float64`: Short put strike (inner)
+- `short_call_K::Float64`: Short call strike (inner)
+- `target_max_loss::Float64`: Desired maximum loss per contract (in dollars, e.g., 5.0 for \$500 max loss)
+- `rate::Float64`: Risk-free rate
+- `div_yield::Float64`: Dividend yield
+- `min_delta_gap::Float64`: Minimum delta gap between short and long strikes
+- `prefer_symmetric::Bool`: If true, prefer equal width spreads on both sides
+- `debug::Bool`: Print debug information
+
+# Returns
+- Tuple of (long_put_K, long_call_K) or nothing if no valid wings found
+"""
+function _max_loss_condor_wings(
+    ctx,
+    short_put_K::Float64,
+    short_call_K::Float64,
+    target_max_loss::Float64;
+    rate::Float64=0.0,
+    div_yield::Float64=0.0,
+    min_delta_gap::Float64=0.08,
+    prefer_symmetric::Bool=true,
+    debug::Bool=false
+)::Union{Nothing,Tuple{Float64,Float64}}
+    tau = ctx.tau
+    tau <= 0.0 && return nothing
+
+    # Normalize target max loss by spot price (e.g., $5 with spot=$500 -> 0.01)
+    target_max_loss_normalized = target_max_loss / ctx.surface.spot
+
+    F = ctx.surface.spot * exp((rate - div_yield) * tau)
+    put_recs = filter(r -> r.option_type == Put, ctx.recs)
+    call_recs = filter(r -> r.option_type == Call, ctx.recs)
+
+    # Get short strike records for pricing (we sell at bid)
+    short_put_rec = _find_rec_by_strike(put_recs, short_put_K)
+    short_call_rec = _find_rec_by_strike(call_recs, short_call_K)
+    (short_put_rec === nothing || short_call_rec === nothing) && return nothing
+
+    # For shorts, use bid price (what we receive when selling)
+    short_put_price = if !ismissing(short_put_rec.bid_price)
+        short_put_rec.bid_price
+    elseif !ismissing(short_put_rec.mark_price)
+        short_put_rec.mark_price
+    else
+        return nothing
+    end
+
+    short_call_price = if !ismissing(short_call_rec.bid_price)
+        short_call_rec.bid_price
+    elseif !ismissing(short_call_rec.mark_price)
+        short_call_rec.mark_price
+    else
+        return nothing
+    end
+
+    # Filter candidate wings: must be more OTM than shorts
+    # For longs, we need ask price (what we pay when buying)
+    long_put_candidates = filter(r -> r.strike < short_put_K &&
+                                      (!ismissing(r.ask_price) || !ismissing(r.mark_price)),
+                                 put_recs)
+    long_call_candidates = filter(r -> r.strike > short_call_K &&
+                                       (!ismissing(r.ask_price) || !ismissing(r.mark_price)),
+                                  call_recs)
+
+    isempty(long_put_candidates) && return nothing
+    isempty(long_call_candidates) && return nothing
+
+    # Apply delta gap filter if specified
+    if min_delta_gap > 0.0
+        short_put_delta = _delta_from_record(short_put_rec, F, tau, rate)
+        short_call_delta = _delta_from_record(short_call_rec, F, tau, rate)
+
+        if short_put_delta !== missing && short_call_delta !== missing
+            max_long_put_delta = abs(short_put_delta) - min_delta_gap
+            max_long_call_delta = abs(short_call_delta) - min_delta_gap
+
+            long_put_candidates = [r for r in long_put_candidates
+                                   if (_delta_from_record(r, F, tau, rate) |>
+                                       (d -> d === missing || abs(d) <= max_long_put_delta))]
+            long_call_candidates = [r for r in long_call_candidates
+                                    if (_delta_from_record(r, F, tau, rate) |>
+                                        (d -> d === missing || abs(d) <= max_long_call_delta))]
+        end
+    end
+
+    isempty(long_put_candidates) && return nothing
+    isempty(long_call_candidates) && return nothing
+
+    # Search for best wing combination
+    best_combo = nothing
+    best_diff = Inf
+
+    for long_put_rec in long_put_candidates
+        for long_call_rec in long_call_candidates
+            # For longs, use ask price (what we pay when buying)
+            long_put_price = if !ismissing(long_put_rec.ask_price)
+                long_put_rec.ask_price
+            elseif !ismissing(long_put_rec.mark_price)
+                long_put_rec.mark_price
+            else
+                continue
+            end
+
+            long_call_price = if !ismissing(long_call_rec.ask_price)
+                long_call_rec.ask_price
+            elseif !ismissing(long_call_rec.mark_price)
+                long_call_rec.mark_price
+            else
+                continue
+            end
+
+            # Calculate spreads (normalized by spot)
+            put_spread_width = (short_put_K - long_put_rec.strike) / ctx.surface.spot
+            call_spread_width = (long_call_rec.strike - short_call_K) / ctx.surface.spot
+
+            # Calculate net credit (in normalized units)
+            # We receive: short_put_price + short_call_price (bid prices)
+            # We pay: long_put_price + long_call_price (ask prices)
+            net_credit = (short_put_price + short_call_price) - (long_put_price + long_call_price)
+
+            # Calculate max loss for each side (in normalized units)
+            # Max loss occurs when spot moves beyond the wings
+            put_max_loss = put_spread_width - net_credit
+            call_max_loss = call_spread_width - net_credit
+            max_loss = max(put_max_loss, call_max_loss)
+
+            # If prefer_symmetric, penalize asymmetric spreads
+            width_diff = abs(put_spread_width - call_spread_width)
+            penalty = prefer_symmetric ? width_diff * 0.5 : 0.0
+
+            # Calculate distance from target
+            diff = abs(max_loss - target_max_loss_normalized) + penalty
+
+            if diff < best_diff && max_loss > 0.0  # Ensure positive max loss
+                best_diff = diff
+                best_combo = (long_put_rec.strike, long_call_rec.strike, max_loss, net_credit,
+                             put_spread_width, call_spread_width)
+            end
+        end
+    end
+
+    best_combo === nothing && return nothing
+
+    long_put_K, long_call_K, achieved_max_loss, net_credit, put_width, call_width = best_combo
+
+    # Validate ordering
+    if !(long_put_K < short_put_K < ctx.surface.spot < short_call_K < long_call_K)
+        return nothing
+    end
+
+    if debug
+        println("  Max loss target: $(round(target_max_loss_normalized * 100, digits=2)), " *
+                "achieved: $(round(achieved_max_loss * 100, digits=2))")
+        println("  Net credit: $(round(net_credit * 100, digits=2)), " *
+                "put width: $(round(put_width * 100, digits=2))%, " *
+                "call width: $(round(call_width * 100, digits=2))%")
+        println("  Wings: put=$(round(long_put_K, digits=2)), call=$(round(long_call_K, digits=2))")
+    end
+
+    return (long_put_K, long_call_K)
+end
+
 function _condor_strikes(
     put_strikes::Vector{Float64},
     call_strikes::Vector{Float64},

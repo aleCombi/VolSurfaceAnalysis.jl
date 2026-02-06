@@ -124,11 +124,17 @@ end
 """
     MLCondorStrikeSelector
 
-Callable selector for iron condors that predicts inner deltas and uses fixed wings.
+Callable selector for iron condors that predicts inner deltas and selects wings.
+
+Wing selection modes:
+1. Fixed delta mode (default): Uses `wing_delta_abs` to select wings at fixed deltas
+2. Max loss mode: Uses `target_max_loss` to select wings that achieve a target maximum loss
 
 Fields are similar to MLStrikeSelector with additional:
-- `wing_delta_abs::Float32`: Absolute delta for long wings (fixed)
+- `wing_delta_abs::Union{Nothing,Float32}`: Absolute delta for long wings (fixed delta mode)
+- `target_max_loss::Union{Nothing,Float32}`: Target maximum loss per contract (max loss mode, in dollars)
 - `min_delta_gap::Float32`: Minimum delta gap between short and long legs
+- `prefer_symmetric::Bool`: If true in max loss mode, prefer equal width spreads
 """
 struct MLCondorStrikeSelector
     model::Any
@@ -136,8 +142,10 @@ struct MLCondorStrikeSelector
     feature_stds::Vector{Float32}
     min_delta::Float32
     max_delta::Float32
-    wing_delta_abs::Float32
+    wing_delta_abs::Union{Nothing,Float32}
+    target_max_loss::Union{Nothing,Float32}
     min_delta_gap::Float32
+    prefer_symmetric::Bool
     rate::Float64
     div_yield::Float64
     spot_history::Dict{DateTime,SpotHistory}
@@ -146,14 +154,19 @@ struct MLCondorStrikeSelector
 end
 
 """
-    MLCondorStrikeSelector(model, feature_means, feature_stds; wing_delta_abs, min_delta_gap, min_delta, max_delta, rate, div_yield, return_sizing)
+    MLCondorStrikeSelector(model, feature_means, feature_stds; wing_delta_abs, target_max_loss, min_delta_gap, prefer_symmetric, min_delta, max_delta, rate, div_yield, return_sizing)
+
+Create an MLCondorStrikeSelector. Specify either `wing_delta_abs` for fixed delta wings
+or `target_max_loss` for wings based on maximum loss. If both are provided, `target_max_loss` takes precedence.
 """
 function MLCondorStrikeSelector(
     model,
     feature_means::Vector{Float32},
     feature_stds::Vector{Float32};
-    wing_delta_abs::Float32=0.05f0,
+    wing_delta_abs::Union{Nothing,Float32}=0.05f0,
+    target_max_loss::Union{Nothing,Float32}=nothing,
     min_delta_gap::Float32=0.08f0,
+    prefer_symmetric::Bool=true,
     min_delta::Float32=0.05f0,
     max_delta::Float32=0.35f0,
     rate::Float64=0.045,
@@ -162,6 +175,11 @@ function MLCondorStrikeSelector(
     return_sizing::Bool=true,
     use_logsig::Bool=false
 )
+    # Validate that at least one wing selection mode is specified
+    if wing_delta_abs === nothing && target_max_loss === nothing
+        error("Must specify either wing_delta_abs or target_max_loss")
+    end
+
     return MLCondorStrikeSelector(
         model,
         feature_means,
@@ -169,7 +187,9 @@ function MLCondorStrikeSelector(
         min_delta,
         max_delta,
         wing_delta_abs,
+        target_max_loss,
         min_delta_gap,
+        prefer_symmetric,
         rate,
         div_yield,
         spot_history,
@@ -183,6 +203,7 @@ end
                                                     Tuple{Float64, Float64, Float64, Float64, Float64}}
 
 Returns inner/outer strikes, and optionally a position size.
+Uses either fixed delta wings or max loss wings depending on configuration.
 """
 function (selector::MLCondorStrikeSelector)(ctx)
     surface = ctx.surface
@@ -206,17 +227,66 @@ function (selector::MLCondorStrikeSelector)(ctx)
     put_delta = Float64(deltas[1])
     call_delta = Float64(deltas[2])
 
-    strikes = _delta_condor_strikes(
+    # Determine short strikes using ML predicted deltas
+    short_strikes = _delta_strangle_strikes_asymmetric(
         ctx,
         put_delta,
-        call_delta,
-        Float64(selector.wing_delta_abs),
-        Float64(selector.wing_delta_abs);
+        call_delta;
         rate=selector.rate,
-        div_yield=selector.div_yield,
-        min_delta_gap=Float64(selector.min_delta_gap)
+        div_yield=selector.div_yield
     )
-    strikes === nothing && return nothing
+    short_strikes === nothing && return nothing
+    short_put_K, short_call_K = short_strikes
+
+    # Select wings based on mode
+    wings = if selector.target_max_loss !== nothing
+        # Max loss mode
+        _max_loss_condor_wings(
+            ctx,
+            short_put_K,
+            short_call_K,
+            Float64(selector.target_max_loss);
+            rate=selector.rate,
+            div_yield=selector.div_yield,
+            min_delta_gap=Float64(selector.min_delta_gap),
+            prefer_symmetric=selector.prefer_symmetric,
+            debug=false
+        )
+    else
+        # Fixed delta mode
+        # Find wings at fixed deltas
+        long_put_K = _best_delta_strike(
+            filter(r -> r.option_type == Put && r.strike < short_put_K, ctx.recs),
+            -Float64(selector.wing_delta_abs),
+            ctx.surface.spot,
+            :put,
+            ctx.surface.spot * exp((selector.rate - selector.div_yield) * tau),
+            tau,
+            selector.rate;
+            debug=false
+        )
+        long_call_K = _best_delta_strike(
+            filter(r -> r.option_type == Call && r.strike > short_call_K, ctx.recs),
+            Float64(selector.wing_delta_abs),
+            ctx.surface.spot,
+            :call,
+            ctx.surface.spot * exp((selector.rate - selector.div_yield) * tau),
+            tau,
+            selector.rate;
+            debug=false
+        )
+        (long_put_K === nothing || long_call_K === nothing) ? nothing : (long_put_K, long_call_K)
+    end
+
+    wings === nothing && return nothing
+    long_put_K, long_call_K = wings
+
+    # Validate ordering
+    if !(long_put_K < short_put_K < ctx.surface.spot < short_call_K < long_call_K)
+        return nothing
+    end
+
+    strikes = (short_put_K, short_call_K, long_put_K, long_call_K)
 
     if selector.return_sizing && has_sizing
         position_size = Float64(raw_output[3, 1])

@@ -1,6 +1,6 @@
 # ML Strike Selector Training and Evaluation
 # Trains a neural network to learn optimal strike selection for short strangles
-# Train on 6 months, test on subsequent 6 months
+# Train on 6 months, validate on subsequent period
 
 using Pkg
 Pkg.activate(@__DIR__)
@@ -22,13 +22,13 @@ const STRATEGY = "condor"  # "strangle" or "condor"
 # Data periods
 const TRAIN_START = Date(2024, 1, 29)
 const TRAIN_END = Date(2024, 6, 30)
-const TEST_START = Date(2024, 7, 1)
-const TEST_END = Date(2025, 6, 1)
+const VAL_START = Date(2024, 7, 1)
+const VAL_END = Date(2025, 6, 1)
 
 # Strategy parameters
-# Multiple entry times for training (more data), single time for test (fair comparison)
+# Multiple entry times for training (more data), single time for validation (fair comparison)
 const TRAIN_ENTRY_TIMES_ET = [Time(10, 0), Time(11, 0), Time(12, 0), Time(13, 0), Time(14, 0)]
-const TEST_ENTRY_TIME_ET = Time(10, 0)  # 10:00 AM Eastern Time
+const VAL_ENTRY_TIME_ET = Time(10, 0)  # 10:00 AM Eastern Time
 const EXPIRY_INTERVAL = Day(1)
 const RISK_FREE_RATE = 0.045
 const DIV_YIELD = 0.013
@@ -36,14 +36,16 @@ const QUANTITY = 1.0
 const TAU_TOL = 1e-6
 const MIN_VOLUME = 5
 const SPREAD_LAMBDA = 0.5
-const SPOT_HISTORY_LOOKBACK_DAYS = 30  # set to `nothing` to use all available history
+const SPOT_HISTORY_LOOKBACK_DAYS = 5  # set to `nothing` to use all available history
 const USE_LOGSIG = true
 const SAVE_PLOTS = true
 const SHORT_DELTA_ABS = 0.16
 const WING_DELTA_ABS = 0.10
-const MIN_DELTA_GAP = 0.08
+const MIN_DELTA_GAP = 0.01
 const SHORT_SIGMAS = 0.7
 const LONG_SIGMAS = 1.5
+const TARGET_MAX_LOSS = 10.0  # Target maximum loss per contract in dollars (e.g., 10.0 = $1000 max loss)
+const PREFER_SYMMETRIC_WINGS = false
 
 # Training parameters
 const EPOCHS = 100
@@ -105,7 +107,7 @@ function load_surfaces_and_spots(
     start_date::Date,
     end_date::Date;
     symbol::String=UNDERLYING_SYMBOL,
-    entry_times::Union{Time,Vector{Time}}=TEST_ENTRY_TIME_ET
+    entry_times::Union{Time,Vector{Time}}=VAL_ENTRY_TIME_ET
 )
     println("  Loading dates from $start_date to $end_date...")
     all_dates = available_polygon_dates(DEFAULT_STORE, symbol)
@@ -115,7 +117,7 @@ function load_surfaces_and_spots(
         error("No dates found in range $start_date to $end_date")
     end
     n_times = entry_times isa Vector ? length(entry_times) : 1
-    println("  Found $(length(filtered_dates)) trading days × $(n_times) entry times")
+    println("  Found $(length(filtered_dates)) trading days x $(n_times) entry times")
 
     entry_ts = build_entry_timestamps(filtered_dates, entry_times isa Vector ? entry_times : [entry_times])
 
@@ -253,8 +255,10 @@ function main()
             rate=RISK_FREE_RATE,
             div_yield=DIV_YIELD,
             expiry_interval=EXPIRY_INTERVAL,
-            wing_delta_abs=WING_DELTA_ABS,
+            wing_delta_abs=nothing,
+            target_max_loss=TARGET_MAX_LOSS,
             min_delta_gap=MIN_DELTA_GAP,
+            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             use_logsig=USE_LOGSIG,
             verbose=true
         )
@@ -278,51 +282,53 @@ function main()
     println()
 
     # -------------------------------------------------------------------------
-    # Load Test Data
+    # Load Validation Data
     # -------------------------------------------------------------------------
-    println("PHASE 3: Loading Test Data")
+    println("PHASE 3: Loading Validation Data")
     println("-" ^ 40)
 
-    test_surfaces, test_entry_spots, test_settlement_spots = load_surfaces_and_spots(
-        TEST_START, TEST_END;
-        entry_times=TEST_ENTRY_TIME_ET
+    val_surfaces, val_entry_spots, val_settlement_spots = load_surfaces_and_spots(
+        VAL_START, VAL_END;
+        entry_times=VAL_ENTRY_TIME_ET
     )
 
-    test_timestamps = sort(collect(keys(test_surfaces)))
-    println("  Loading minute spot history for testing...")
-    test_minute_spots = load_minute_spots(
-        TEST_START, TEST_END;
+    val_timestamps = sort(collect(keys(val_surfaces)))
+    println("  Loading minute spot history for validation...")
+    val_minute_spots = load_minute_spots(
+        VAL_START, VAL_END;
         lookback_days=SPOT_HISTORY_LOOKBACK_DAYS
     )
-    println("  Loaded $(length(test_minute_spots)) minute spot points")
-    test_spot_history = build_spot_history_dict(
-        test_timestamps,
-        test_minute_spots;
+    println("  Loaded $(length(val_minute_spots)) minute spot points")
+    val_spot_history = build_spot_history_dict(
+        val_timestamps,
+        val_minute_spots;
         lookback_days=SPOT_HISTORY_LOOKBACK_DAYS
     )
-    println("  Built spot history for $(length(test_spot_history)) timestamps")
+    println("  Built spot history for $(length(val_spot_history)) timestamps")
     println()
 
-    # Generate test labels (for evaluation)
-    println("  Generating test labels...")
-    test_data = if STRATEGY == "condor"
+    # Generate validation labels (for evaluation)
+    println("  Generating validation labels...")
+    val_data = if STRATEGY == "condor"
         generate_condor_training_data(
-            test_surfaces,
-            test_settlement_spots,
-            test_spot_history;
+            val_surfaces,
+            val_settlement_spots,
+            val_spot_history;
             rate=RISK_FREE_RATE,
             div_yield=DIV_YIELD,
             expiry_interval=EXPIRY_INTERVAL,
-            wing_delta_abs=WING_DELTA_ABS,
+            wing_delta_abs=nothing,
+            target_max_loss=TARGET_MAX_LOSS,
             min_delta_gap=MIN_DELTA_GAP,
+            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             use_logsig=USE_LOGSIG,
             verbose=true
         )
     else
         generate_training_data(
-            test_surfaces,
-            test_settlement_spots,
-            test_spot_history;
+            val_surfaces,
+            val_settlement_spots,
+            val_spot_history;
             rate=RISK_FREE_RATE,
             div_yield=DIV_YIELD,
             expiry_interval=EXPIRY_INTERVAL,
@@ -331,7 +337,7 @@ function main()
         )
     end
     println()
-    println("  Test samples: $(length(test_data.timestamps))")
+    println("  Validation samples: $(length(val_data.timestamps))")
     println()
 
     # -------------------------------------------------------------------------
@@ -341,7 +347,7 @@ function main()
     println("-" ^ 40)
 
     X_train_norm, feature_means, feature_stds = normalize_features(train_data.features)
-    X_test_norm = apply_normalization(test_data.features, feature_means, feature_stds)
+    X_val_norm = apply_normalization(val_data.features, feature_means, feature_stds)
 
     # Create normalized training data
     train_data_norm = TrainingDataset(
@@ -352,13 +358,13 @@ function main()
         train_data.size_labels,
         train_data.timestamps
     )
-    test_data_norm = TrainingDataset(
-        X_test_norm,
-        test_data.labels,
-        test_data.raw_deltas,
-        test_data.pnls,
-        test_data.size_labels,
-        test_data.timestamps
+    val_data_norm = TrainingDataset(
+        X_val_norm,
+        val_data.labels,
+        val_data.raw_deltas,
+        val_data.pnls,
+        val_data.size_labels,
+        val_data.timestamps
     )
 
     println("  Feature means: $(round.(feature_means, digits=4))")
@@ -384,7 +390,7 @@ function main()
     model, history = train_model!(
         model,
         train_data_norm;
-        val_data=test_data_norm,
+        val_data=val_data_norm,
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
         learning_rate=LEARNING_RATE,
@@ -405,21 +411,21 @@ function main()
     println("-" ^ 40)
 
     train_eval = evaluate_model(model, train_data_norm)
-    test_eval = evaluate_model(model, test_data_norm)
+    val_eval = evaluate_model(model, val_data_norm)
 
     println("  Training Set:")
     println("    Delta MSE: $(round(train_eval["delta_mse"], digits=6)), MAE: $(round(train_eval["delta_mae"], digits=4))")
     println("    Size  MSE: $(round(train_eval["size_mse"], digits=6)), MAE: $(round(train_eval["size_mae"], digits=4))")
 
-    println("  Test Set:")
-    println("    Delta MSE: $(round(test_eval["delta_mse"], digits=6)), MAE: $(round(test_eval["delta_mae"], digits=4))")
-    println("    Size  MSE: $(round(test_eval["size_mse"], digits=6)), MAE: $(round(test_eval["size_mae"], digits=4))")
+    println("  Validation Set:")
+    println("    Delta MSE: $(round(val_eval["delta_mse"], digits=6)), MAE: $(round(val_eval["delta_mae"], digits=4))")
+    println("    Size  MSE: $(round(val_eval["size_mse"], digits=6)), MAE: $(round(val_eval["size_mae"], digits=4))")
     println()
 
     # -------------------------------------------------------------------------
     # Backtest Comparison
     # -------------------------------------------------------------------------
-    println("PHASE 7: Backtest Comparison (Test Period)")
+    println("PHASE 7: Backtest Comparison (Validation Period)")
     println("-" ^ 40)
 
     # Create ML selector
@@ -428,11 +434,13 @@ function main()
             model, feature_means, feature_stds;
             min_delta=0.05f0,
             max_delta=0.35f0,
-            wing_delta_abs=Float32(WING_DELTA_ABS),
+            wing_delta_abs=nothing,  # Disable fixed delta wings
+            target_max_loss=Float32(TARGET_MAX_LOSS),  # Use max loss wings
             min_delta_gap=Float32(MIN_DELTA_GAP),
+            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             rate=RISK_FREE_RATE,
             div_yield=DIV_YIELD,
-            spot_history=test_spot_history,
+            spot_history=val_spot_history,
             use_logsig=USE_LOGSIG
         )
     else
@@ -442,13 +450,13 @@ function main()
             max_delta=0.35f0,
             rate=RISK_FREE_RATE,
             div_yield=DIV_YIELD,
-            spot_history=test_spot_history,
+            spot_history=val_spot_history,
             use_logsig=USE_LOGSIG
         )
     end
 
     # Create strategies
-    schedule = sort(collect(keys(test_surfaces)))
+    schedule = sort(collect(keys(val_surfaces)))
 
     strategy_ml = if STRATEGY == "condor"
         IronCondorStrategy(
@@ -547,13 +555,13 @@ function main()
 
     # Run backtests
     println("  Running ML strategy backtest...")
-    pos_ml, pnl_ml = backtest_strategy(strategy_ml, test_surfaces, test_settlement_spots)
+    pos_ml, pnl_ml = backtest_strategy(strategy_ml, val_surfaces, val_settlement_spots)
 
     println("  Running baseline (fixed delta) backtest...")
-    pos_baseline, pnl_baseline = backtest_strategy(strategy_baseline, test_surfaces, test_settlement_spots)
+    pos_baseline, pnl_baseline = backtest_strategy(strategy_baseline, val_surfaces, val_settlement_spots)
 
     println("  Running baseline (0.8 sigma) backtest...")
-    pos_sigma, pnl_sigma = backtest_strategy(strategy_sigma, test_surfaces, test_settlement_spots)
+    pos_sigma, pnl_sigma = backtest_strategy(strategy_sigma, val_surfaces, val_settlement_spots)
     println()
 
     # Compute metrics
@@ -569,7 +577,7 @@ function main()
     println("RESULTS SUMMARY")
     println("=" ^ 80)
     println()
-    println("Test Period: $TEST_START to $TEST_END")
+    println("Validation Period: $VAL_START to $VAL_END")
     println("Margin per trade: \$$(Int(margin))")
     println()
 
@@ -666,14 +674,14 @@ function main()
 
     # Save predicted vs actual deltas and sizes for analysis
     predictions_df = DataFrame(
-        Timestamp = test_data.timestamps,
-        TruePutDelta = test_data.raw_deltas[1, :],
-        TrueCallDelta = test_data.raw_deltas[2, :],
-        PredPutDelta = test_eval["pred_deltas"][1, :],
-        PredCallDelta = test_eval["pred_deltas"][2, :],
-        TrueSize = test_data.size_labels,
-        PredSize = test_eval["pred_sizes"],
-        BestPnL = test_data.pnls
+        Timestamp = val_data.timestamps,
+        TruePutDelta = val_data.raw_deltas[1, :],
+        TrueCallDelta = val_data.raw_deltas[2, :],
+        PredPutDelta = val_eval["pred_deltas"][1, :],
+        PredCallDelta = val_eval["pred_deltas"][2, :],
+        TrueSize = val_data.size_labels,
+        PredSize = val_eval["pred_sizes"],
+        BestPnL = val_data.pnls
     )
     predictions_path = joinpath(RUN_DIR, "predictions.csv")
     CSV.write(predictions_path, predictions_df)
@@ -734,10 +742,10 @@ function main()
             )
         end
 
-        if !isempty(test_entry_spots)
+        if !isempty(val_entry_spots)
             plots_dir = joinpath(RUN_DIR, "plots")
             save_spot_curve(
-                test_entry_spots,
+                val_entry_spots,
                 joinpath(plots_dir, "ml_$(STRATEGY)_spot_curve.png");
                 title="Spot Curve $(UNDERLYING_SYMBOL)"
             )

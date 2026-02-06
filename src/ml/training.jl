@@ -160,18 +160,25 @@ function find_optimal_deltas(
 end
 
 """
-    simulate_condor_pnl(surface, settlement_spot, short_put_delta, short_call_delta; wing_delta_abs, min_delta_gap, rate, div_yield, expiry_interval)
+    simulate_condor_pnl(surface, settlement_spot, short_put_delta, short_call_delta;
+        wing_delta_abs, target_max_loss, min_delta_gap, prefer_symmetric, rate, div_yield, expiry_interval)
         -> Union{Float64, Nothing}
 
-Simulate P&L for a short iron condor with fixed wings (long deltas).
+Simulate P&L for a short iron condor. Supports two wing modes:
+1. Fixed-delta wings via `wing_delta_abs`
+2. Target max-loss wings via `target_max_loss`
+
+If both are provided, `target_max_loss` takes precedence to match deployment logic.
 
 # Arguments
 - `surface::VolatilitySurface`: Entry surface
 - `settlement_spot::Float64`: Settlement spot price
 - `short_put_delta::Float64`: Absolute delta for short put
 - `short_call_delta::Float64`: Absolute delta for short call
-- `wing_delta_abs::Float64`: Absolute delta for long wings (fixed)
+- `wing_delta_abs::Union{Nothing,Float64}`: Absolute delta for long wings (fixed mode)
+- `target_max_loss::Union{Nothing,Float64}`: Target maximum loss per contract in dollars (max-loss mode)
 - `min_delta_gap::Float64`: Minimum delta gap between short and long legs
+- `prefer_symmetric::Bool`: Prefer symmetric wing widths in max-loss mode
 - `rate::Float64`: Risk-free rate
 - `div_yield::Float64`: Dividend yield
 - `expiry_interval::Period`: Time to expiry
@@ -184,8 +191,10 @@ function simulate_condor_pnl(
     settlement_spot::Float64,
     short_put_delta::Float64,
     short_call_delta::Float64;
-    wing_delta_abs::Float64=0.05,
+    wing_delta_abs::Union{Nothing,Float64}=0.05,
+    target_max_loss::Union{Nothing,Float64}=nothing,
     min_delta_gap::Float64=0.08,
+    prefer_symmetric::Bool=true,
     rate::Float64=0.045,
     div_yield::Float64=0.013,
     expiry_interval::Period=Day(1)
@@ -218,16 +227,47 @@ function simulate_condor_pnl(
         call_strikes=call_strikes
     )
 
-    strikes = _delta_condor_strikes(
-        ctx,
-        short_put_delta,
-        short_call_delta,
-        wing_delta_abs,
-        wing_delta_abs;
-        rate=rate,
-        div_yield=div_yield,
-        min_delta_gap=min_delta_gap
-    )
+    if wing_delta_abs === nothing && target_max_loss === nothing
+        return nothing
+    end
+
+    strikes = if target_max_loss !== nothing
+        short_strikes = _delta_strangle_strikes_asymmetric(
+            ctx,
+            short_put_delta,
+            short_call_delta;
+            rate=rate,
+            div_yield=div_yield
+        )
+        short_strikes === nothing && return nothing
+        short_put_K, short_call_K = short_strikes
+
+        wings = _max_loss_condor_wings(
+            ctx,
+            short_put_K,
+            short_call_K,
+            target_max_loss;
+            rate=rate,
+            div_yield=div_yield,
+            min_delta_gap=min_delta_gap,
+            prefer_symmetric=prefer_symmetric,
+            debug=false
+        )
+        wings === nothing && return nothing
+        long_put_K, long_call_K = wings
+        (short_put_K, short_call_K, long_put_K, long_call_K)
+    else
+        _delta_condor_strikes(
+            ctx,
+            short_put_delta,
+            short_call_delta,
+            wing_delta_abs,
+            wing_delta_abs;
+            rate=rate,
+            div_yield=div_yield,
+            min_delta_gap=min_delta_gap
+        )
+    end
     strikes === nothing && return nothing
 
     short_put_K, short_call_K, long_put_K, long_call_K = strikes
@@ -263,10 +303,11 @@ function simulate_condor_pnl(
 end
 
 """
-    find_optimal_condor_deltas(surface, settlement_spot; wing_delta_abs, min_delta_gap, rate, div_yield, expiry_interval, delta_grid)
+    find_optimal_condor_deltas(surface, settlement_spot;
+        wing_delta_abs, target_max_loss, min_delta_gap, prefer_symmetric, rate, div_yield, expiry_interval, delta_grid)
         -> Union{Tuple{Float64, Float64, Float64}, Nothing}
 
-Find optimal inner deltas for an iron condor with fixed wings via grid search.
+Find optimal inner deltas for an iron condor via grid search under the configured wing policy.
 
 # Returns
 - Tuple of (best_put_delta, best_call_delta, best_pnl) or nothing
@@ -274,8 +315,10 @@ Find optimal inner deltas for an iron condor with fixed wings via grid search.
 function find_optimal_condor_deltas(
     surface::VolatilitySurface,
     settlement_spot::Float64;
-    wing_delta_abs::Float64=0.05,
+    wing_delta_abs::Union{Nothing,Float64}=0.05,
+    target_max_loss::Union{Nothing,Float64}=nothing,
     min_delta_gap::Float64=0.08,
+    prefer_symmetric::Bool=true,
     rate::Float64=0.045,
     div_yield::Float64=0.013,
     expiry_interval::Period=Day(1),
@@ -291,7 +334,9 @@ function find_optimal_condor_deltas(
             pnl = simulate_condor_pnl(
                 surface, settlement_spot, put_delta, call_delta;
                 wing_delta_abs=wing_delta_abs,
+                target_max_loss=target_max_loss,
                 min_delta_gap=min_delta_gap,
+                prefer_symmetric=prefer_symmetric,
                 rate=rate,
                 div_yield=div_yield,
                 expiry_interval=expiry_interval
@@ -313,11 +358,11 @@ end
 
 """
     generate_condor_training_data(surfaces, settlement_spots, spot_history_dict;
-        rate, div_yield, expiry_interval, wing_delta_abs, min_delta_gap, use_logsig, verbose)
+        rate, div_yield, expiry_interval, wing_delta_abs, target_max_loss, min_delta_gap, prefer_symmetric, use_logsig, verbose)
         -> TrainingDataset
 
 Generate training data for iron condor strike selection by grid searching
-optimal inner deltas with fixed wings.
+optimal inner deltas under the configured wing policy.
 """
 function generate_condor_training_data(
     surfaces::Dict{DateTime,VolatilitySurface},
@@ -326,8 +371,10 @@ function generate_condor_training_data(
     rate::Float64=0.045,
     div_yield::Float64=0.013,
     expiry_interval::Period=Day(1),
-    wing_delta_abs::Float64=0.05,
+    wing_delta_abs::Union{Nothing,Float64}=0.05,
+    target_max_loss::Union{Nothing,Float64}=nothing,
     min_delta_gap::Float64=0.08,
+    prefer_symmetric::Bool=true,
     use_logsig::Bool=false,
     verbose::Bool=true
 )::TrainingDataset
@@ -371,7 +418,9 @@ function generate_condor_training_data(
         result = find_optimal_condor_deltas(
             surface, settlement;
             wing_delta_abs=wing_delta_abs,
+            target_max_loss=target_max_loss,
             min_delta_gap=min_delta_gap,
+            prefer_symmetric=prefer_symmetric,
             rate=rate,
             div_yield=div_yield,
             expiry_interval=expiry_interval
