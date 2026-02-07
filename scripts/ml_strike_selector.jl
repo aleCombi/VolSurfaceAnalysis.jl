@@ -16,15 +16,15 @@ using Printf
 # =============================================================================
 # Configuration
 # =============================================================================
-const UNDERLYING_SYMBOL = "SPY"
+const UNDERLYING_SYMBOL = "NDX"
 const STRATEGY = "condor"  # "strangle" or "condor"
 const MODEL_MODE = :delta   # :delta (current), :score (candidate scoring), :hybrid (score with delta fallback)
 
 # Data periods
-const TRAIN_START = Date(2024, 1, 29)
-const TRAIN_END = Date(2024, 6, 30)
-const VAL_START = Date(2024, 7, 1)
-const VAL_END = Date(2025, 6, 1)
+const TRAIN_START = Date(2024, 2, 7)
+const TRAIN_END = Date(2025, 2, 7)
+const VAL_START = Date(2025, 2, 7)
+const VAL_END = Date(2025, 8, 7)
 
 # Strategy parameters
 # Multiple entry times for training (more data), single time for validation (fair comparison)
@@ -214,7 +214,17 @@ end
 # Main Training and Evaluation
 # =============================================================================
 
+function parse_args()
+    symbol = UNDERLYING_SYMBOL
+    if length(ARGS) >= 1
+        symbol = uppercase(String(ARGS[1]))
+    end
+    return symbol
+end
+
 function main()
+    symbol = parse_args()
+
     if STRATEGY != "condor" && MODEL_MODE != :delta
         error("MODEL_MODE=$(MODEL_MODE) is only supported for STRATEGY=\"condor\"")
     end
@@ -226,6 +236,7 @@ function main()
     strategy_label = STRATEGY == "condor" ? "ML IRON CONDOR SELECTOR" : "ML STRIKE SELECTOR"
     println("$strategy_label - TRAINING AND EVALUATION")
     println("=" ^ 80)
+    println("Underlying: $symbol")
     println("Output directory: $RUN_DIR")
     println("Model mode: $MODEL_MODE")
     if MODEL_MODE != :delta && STRATEGY == "condor"
@@ -241,6 +252,7 @@ function main()
 
     train_surfaces, train_entry_spots, train_settlement_spots = load_surfaces_and_spots(
         TRAIN_START, TRAIN_END;
+        symbol=symbol,
         entry_times=TRAIN_ENTRY_TIMES_ET
     )
 
@@ -249,7 +261,8 @@ function main()
     println("  Loading minute spot history for training...")
     train_minute_spots = load_minute_spots(
         TRAIN_START, TRAIN_END;
-        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS
+        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS,
+        symbol=symbol
     )
     println("  Loaded $(length(train_minute_spots)) minute spot points")
     train_spot_history = build_spot_history_dict(
@@ -340,6 +353,7 @@ function main()
 
     val_surfaces, val_entry_spots, val_settlement_spots = load_surfaces_and_spots(
         VAL_START, VAL_END;
+        symbol=symbol,
         entry_times=VAL_ENTRY_TIME_ET
     )
 
@@ -347,7 +361,8 @@ function main()
     println("  Loading minute spot history for validation...")
     val_minute_spots = load_minute_spots(
         VAL_START, VAL_END;
-        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS
+        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS,
+        symbol=symbol
     )
     println("  Loaded $(length(val_minute_spots)) minute spot points")
     val_spot_history = build_spot_history_dict(
@@ -994,7 +1009,7 @@ function main()
             save_spot_curve(
                 val_entry_spots,
                 joinpath(plots_dir, "ml_$(STRATEGY)_spot_curve.png");
-                title="Spot Curve $(UNDERLYING_SYMBOL)"
+                title="Spot Curve $(symbol)"
             )
         end
     end

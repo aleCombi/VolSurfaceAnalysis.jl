@@ -12,28 +12,29 @@ Excluded dates >= 2025-08-01
 Strategy Parameters:
   Entry time: 10:00:00 ET (DST-aware)
   Expiry: ~1 day from entry
-  Short legs: +/-16.0 delta
-  Long legs: +/-5.0 delta
+  Short legs: 16.0 delta
+  Wing selection: roi (max_loss $5.0-$30.0, min credit $0.1)
   Quantity per leg: 1.0
 
 Results:
-  Scheduled entries: 375
-  Actual condors: 374
-  Total positions: 1496
+  Scheduled entries: 376
+  Actual condors: 361
+  Total positions: 1444
   Missing settlements: 5
 
 P&L (per condor):
-  Total: $-1.63
-  Count: 369
-  Average: $-0.0
-  Min: $-11.76
-  Max: $3.38
-  Winners: 287 / 369 (77.8%)
+  Total: $-11.62
+  Count: 356
+  Average: $-0.03
+  Min: $-11.69
+  Max: $3.0
+  Winners: 275 / 356 (77.2%)
 
-Performance Metrics (margin per trade: $6.9; first condor max loss + 30%):
-  Total ROI: -23.68%
-  Sharpe: -0.04
-  Sortino: -0.05
-  Win Rate: 77.8%
+Performance Metrics (return basis: per-condor max loss):
+  Total ROI: -0.52%
+  Annualized ROI (CAGR): -0.35%
+  Sharpe: -0.49
+  Sortino: -0.53
+  Win Rate: 77.2%
 
 ================================================================================

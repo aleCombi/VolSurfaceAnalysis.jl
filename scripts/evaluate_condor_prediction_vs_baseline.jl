@@ -16,11 +16,11 @@ using BSON
 # =============================================================================
 # Configuration
 # =============================================================================
-const UNDERLYING_SYMBOL = "SPY"
+const UNDERLYING_SYMBOL = "NDX"
 
-# Evaluation period defaults (override with CLI args: start end [model_path])
-const DEFAULT_EVAL_START = Date(2024, 7, 1)
-const DEFAULT_EVAL_END = Date(2025, 6, 1)
+# Evaluation period defaults (override with CLI args: start end [model_path] [model_mode] [symbol])
+const DEFAULT_EVAL_START = Date(2025, 2, 7)
+const DEFAULT_EVAL_END = Date(2025, 8, 7)
 const ENTRY_TIME_ET = Time(10, 0)
 
 # Strategy and data settings
@@ -37,6 +37,14 @@ const TARGET_MAX_LOSS = 10.0
 const MIN_DELTA_GAP = 0.01
 const PREFER_SYMMETRIC_WINGS = false
 const CONSTRAINED_SUPER_MAX_LOSS_TOL = 1.0
+
+# Candidate scoring policy (used when evaluating score-model checkpoints)
+const SCORE_WING_OBJECTIVE = :roi
+const SCORE_MAX_LOSS_MIN = 5.0
+const SCORE_MAX_LOSS_MAX = 30.0
+const SCORE_MIN_CREDIT = 0.10
+const SCORE_DELTA_GRID = collect(0.05:0.015:0.35)
+const SCORE_MAX_CANDIDATES_PER_DAY = 400
 
 # Delta scaling bounds used by the model
 const MIN_DELTA = 0.05f0
@@ -181,6 +189,7 @@ function nearest_expiry_and_tau(surface::VolatilitySurface, ts::DateTime, expiry
 end
 
 safe_mean(v) = isempty(v) ? missing : mean(v)
+safe_diff(a, b) = (ismissing(a) || ismissing(b)) ? missing : (a - b)
 
 function safe_risk_return(
     pnl::Union{Missing,Float64},
@@ -210,7 +219,32 @@ function safe_weighted_roi(
     return total_risk > 0 ? total_pnl / total_risk : missing
 end
 
-function feature_names(; use_logsig::Bool=USE_LOGSIG)
+function condor_candidate_feature_names()::Vector{String}
+    return String[
+        "cand_short_put_delta",
+        "cand_short_call_delta",
+        "cand_short_put_distance",
+        "cand_short_call_distance",
+        "cand_put_width_norm",
+        "cand_call_width_norm",
+        "cand_width_asymmetry",
+        "cand_inner_width_norm",
+        "cand_net_credit_norm",
+        "cand_max_loss_norm",
+        "cand_entry_roi",
+        "cand_short_put_rel_spread",
+        "cand_short_call_rel_spread",
+        "cand_long_put_rel_spread",
+        "cand_long_call_rel_spread",
+        "cand_avg_leg_rel_spread",
+        "cand_put_implied_move_distance",
+        "cand_call_implied_move_distance",
+        "cand_put_delta_gap",
+        "cand_call_delta_gap"
+    ]
+end
+
+function feature_names(; use_logsig::Bool=USE_LOGSIG, include_candidate_features::Bool=false)
     base = String[
         "atm_iv",
         "atm_bid_ask_spread",
@@ -231,19 +265,24 @@ function feature_names(; use_logsig::Bool=USE_LOGSIG)
     path_prefix = use_logsig ? "logsig_" : "sig_"
     n_path = path_feature_dim(; use_logsig=use_logsig)
     path = ["$(path_prefix)$(i)" for i in 1:n_path]
-    return vcat(base, path)
+    names = vcat(base, path)
+    if include_candidate_features
+        names = vcat(names, condor_candidate_feature_names())
+    end
+    return names
 end
 
 function build_feature_stats_df(
     X_raw::Matrix{Float64},
     X_norm::Matrix{Float64};
-    use_logsig::Bool=USE_LOGSIG
+    use_logsig::Bool=USE_LOGSIG,
+    include_candidate_features::Bool=false
 )::DataFrame
     n_features = size(X_raw, 1)
     n_obs = size(X_raw, 2)
     n_obs == size(X_norm, 2) || error("Raw and normalized feature matrices must align by column")
 
-    names = feature_names(; use_logsig=use_logsig)
+    names = feature_names(; use_logsig=use_logsig, include_candidate_features=include_candidate_features)
     n_features == length(names) || error("Feature name count mismatch: $(length(names)) vs $n_features")
 
     raw_mean = Float64[]
@@ -609,6 +648,8 @@ function parse_args()
     eval_start = DEFAULT_EVAL_START
     eval_end = DEFAULT_EVAL_END
     model_path = DEFAULT_MODEL_PATH
+    model_mode_override = nothing
+    symbol = UNDERLYING_SYMBOL
 
     if length(ARGS) >= 1
         eval_start = Date(ARGS[1])
@@ -619,22 +660,38 @@ function parse_args()
     if length(ARGS) >= 3
         model_path = ARGS[3]
     end
+    if length(ARGS) >= 4
+        mode_arg = lowercase(String(ARGS[4]))
+        if mode_arg == "delta"
+            model_mode_override = :delta
+        elseif mode_arg == "score"
+            model_mode_override = :score
+        elseif mode_arg == "auto"
+            model_mode_override = nothing
+        else
+            error("Unknown model mode '$mode_arg'. Use one of: auto, delta, score")
+        end
+    end
+    if length(ARGS) >= 5
+        symbol = uppercase(String(ARGS[5]))
+    end
 
-    return eval_start, eval_end, model_path
+    return eval_start, eval_end, model_path, model_mode_override, symbol
 end
 
 function main()
-    eval_start, eval_end, model_path = parse_args()
+    eval_start, eval_end, model_path, model_mode_override, symbol = parse_args()
     isfile(model_path) || error("Model file not found: $model_path")
     mkpath(RUN_DIR)
 
     println("=" ^ 90)
     println("CONDOR PREDICTION QUALITY VS CONSTANT BASELINE")
     println("=" ^ 90)
-    println("Underlying: $UNDERLYING_SYMBOL")
+    println("Underlying: $symbol")
     println("Eval period: $eval_start to $eval_end")
     println("Model path: $model_path")
     println("Wing policy: target_max_loss=$TARGET_MAX_LOSS, min_delta_gap=$MIN_DELTA_GAP, prefer_symmetric=$PREFER_SYMMETRIC_WINGS")
+    println("Score candidate policy: objective=$SCORE_WING_OBJECTIVE, max_loss=[$SCORE_MAX_LOSS_MIN,$SCORE_MAX_LOSS_MAX], min_credit=$SCORE_MIN_CREDIT, max_candidates/day=$SCORE_MAX_CANDIDATES_PER_DAY")
     println("Constrained super-oracle max-loss tolerance: +/-$CONSTRAINED_SUPER_MAX_LOSS_TOL")
     println("Baseline deltas: put=$BASELINE_PUT_DELTA, call=$BASELINE_CALL_DELTA")
     println("Output directory: $RUN_DIR")
@@ -646,19 +703,41 @@ function main()
     model = model_data[:model]
     feature_means = model_data[:feature_means]
     feature_stds = model_data[:feature_stds]
-    expected_input_dim = n_features(; use_logsig=USE_LOGSIG)
-    if length(feature_means) != expected_input_dim || length(feature_stds) != expected_input_dim
-        error("Model normalization dimension mismatch: model has means/stds length $(length(feature_means))/$(length(feature_stds)), expected $expected_input_dim for use_logsig=$USE_LOGSIG. Retrain the model with current feature settings.")
+    state_input_dim = n_features(; use_logsig=USE_LOGSIG)
+    score_input_dim = n_condor_scoring_features(; use_logsig=USE_LOGSIG)
+    length(feature_means) == length(feature_stds) || error("Model normalization vectors must have equal length")
+
+    detected_model_mode = if length(feature_means) == state_input_dim
+        :delta
+    elseif length(feature_means) == score_input_dim
+        :score
+    else
+        error("Model normalization dimension $(length(feature_means)) not recognized. Expected state dim $state_input_dim or score dim $score_input_dim for use_logsig=$USE_LOGSIG.")
     end
-    println("  Loaded model and normalization stats")
+
+    model_mode = model_mode_override === nothing ? detected_model_mode : model_mode_override
+    if model_mode != detected_model_mode
+        error("Requested model mode $model_mode but checkpoint normalization dimension indicates $detected_model_mode mode.")
+    end
+    println("  Loaded model and normalization stats (mode=$model_mode, input_dim=$(length(feature_means)))")
     println()
 
     println("PHASE 2: Load Evaluation Data")
     println("-" ^ 50)
-    surfaces, _, settlement_spots = load_surfaces_and_spots(eval_start, eval_end; entry_time=ENTRY_TIME_ET)
+    surfaces, _, settlement_spots = load_surfaces_and_spots(
+        eval_start,
+        eval_end;
+        symbol=symbol,
+        entry_time=ENTRY_TIME_ET
+    )
     timestamps = sort(collect(keys(surfaces)))
     println("  Loading minute spot history...")
-    minute_spots = load_minute_spots(eval_start, eval_end; lookback_days=SPOT_HISTORY_LOOKBACK_DAYS)
+    minute_spots = load_minute_spots(
+        eval_start,
+        eval_end;
+        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS,
+        symbol=symbol
+    )
     spot_history = build_spot_history_dict(timestamps, minute_spots; lookback_days=SPOT_HISTORY_LOOKBACK_DAYS)
     println("  Built spot history for $(length(spot_history)) timestamps")
     println()
@@ -693,13 +772,101 @@ function main()
         feats = extract_features(surface, tau; spot_history=hist, use_logsig=USE_LOGSIG)
         feats === nothing && (n_skipped += 1; continue)
 
-        x = features_to_vector(feats)
-        x_norm = (x .- feature_means) ./ feature_stds
-        raw = model(reshape(x_norm, :, 1))
-        pred_deltas = scale_deltas(raw[1:2, :]; min_delta=MIN_DELTA, max_delta=MAX_DELTA)
-        pred_put_delta = Float64(pred_deltas[1])
-        pred_call_delta = Float64(pred_deltas[2])
-        pred_size = size(raw, 1) >= 3 ? Float64(raw[3, 1]) : missing
+        state_x = features_to_vector(feats)
+        x_for_stats = Float64[]
+        x_norm_for_stats = Float64[]
+        pred_put_delta = missing
+        pred_call_delta = missing
+        pred_size = missing
+        pred_score = missing
+        pred_condor = nothing
+
+        if model_mode == :delta
+            x_norm = (state_x .- feature_means) ./ feature_stds
+            raw = model(reshape(x_norm, :, 1))
+            pred_deltas = scale_deltas(raw[1:2, :]; min_delta=MIN_DELTA, max_delta=MAX_DELTA)
+            pred_put_delta = Float64(pred_deltas[1])
+            pred_call_delta = Float64(pred_deltas[2])
+            pred_size = size(raw, 1) >= 3 ? Float64(raw[3, 1]) : missing
+            pred_condor = resolve_target_max_loss_condor(
+                ctx,
+                settlement,
+                pred_put_delta,
+                pred_call_delta;
+                target_max_loss=TARGET_MAX_LOSS,
+                min_delta_gap=MIN_DELTA_GAP,
+                prefer_symmetric=PREFER_SYMMETRIC_WINGS,
+                rate=RISK_FREE_RATE,
+                div_yield=DIV_YIELD
+            )
+            x_for_stats = Float64.(state_x)
+            x_norm_for_stats = Float64.(x_norm)
+        else
+            candidates = enumerate_condor_candidates(
+                ctx;
+                delta_grid=SCORE_DELTA_GRID,
+                max_candidates=SCORE_MAX_CANDIDATES_PER_DAY,
+                wing_delta_abs=nothing,
+                target_max_loss=TARGET_MAX_LOSS,
+                wing_objective=SCORE_WING_OBJECTIVE,
+                max_loss_min=SCORE_MAX_LOSS_MIN,
+                max_loss_max=SCORE_MAX_LOSS_MAX,
+                min_credit=SCORE_MIN_CREDIT,
+                min_delta_gap=MIN_DELTA_GAP,
+                prefer_symmetric=PREFER_SYMMETRIC_WINGS,
+                rate=RISK_FREE_RATE,
+                div_yield=DIV_YIELD
+            )
+            isempty(candidates) && (n_skipped += 1; continue)
+
+            candidate_features = Vector{Float32}[]
+            valid_candidates = NamedTuple[]
+            for candidate in candidates
+                x_candidate = condor_scoring_feature_vector(
+                    state_x,
+                    ctx,
+                    candidate;
+                    rate=RISK_FREE_RATE,
+                    div_yield=DIV_YIELD
+                )
+                x_candidate === nothing && continue
+                push!(candidate_features, x_candidate)
+                push!(valid_candidates, candidate)
+            end
+            isempty(candidate_features) && (n_skipped += 1; continue)
+
+            X_candidates = reduce(hcat, candidate_features)
+            X_candidates_norm = (X_candidates .- feature_means) ./ feature_stds
+            raw_scores = model(X_candidates_norm)
+            scores = vec(raw_scores)
+            isempty(scores) && (n_skipped += 1; continue)
+
+            best_idx = argmax(scores)
+            best_candidate = valid_candidates[best_idx]
+
+            pred_put_delta = best_candidate.short_put_delta
+            pred_call_delta = best_candidate.short_call_delta
+            pred_score = Float64(scores[best_idx])
+            pred_metrics = condor_metrics_from_strikes(
+                ctx,
+                settlement,
+                best_candidate.short_put_K,
+                best_candidate.short_call_K,
+                best_candidate.long_put_K,
+                best_candidate.long_call_K
+            )
+            pred_metrics !== nothing && (pred_condor = (
+                short_put_K=best_candidate.short_put_K,
+                short_call_K=best_candidate.short_call_K,
+                long_put_K=best_candidate.long_put_K,
+                long_call_K=best_candidate.long_call_K,
+                pnl=pred_metrics.pnl,
+                max_loss=pred_metrics.max_loss
+            ))
+
+            x_for_stats = Float64.(X_candidates[:, best_idx])
+            x_norm_for_stats = Float64.(X_candidates_norm[:, best_idx])
+        end
 
         grid_oracle = find_optimal_condor_deltas(
             surface, settlement;
@@ -748,17 +915,6 @@ function main()
         )
         grid_max_loss = grid_condor === nothing ? missing : grid_condor.max_loss
 
-        pred_condor = resolve_target_max_loss_condor(
-            ctx,
-            settlement,
-            pred_put_delta,
-            pred_call_delta;
-            target_max_loss=TARGET_MAX_LOSS,
-            min_delta_gap=MIN_DELTA_GAP,
-            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
-            rate=RISK_FREE_RATE,
-            div_yield=DIV_YIELD
-        )
         pred_pnl = pred_condor === nothing ? missing : pred_condor.pnl
         pred_max_loss = pred_condor === nothing ? missing : pred_condor.max_loss
 
@@ -805,8 +961,8 @@ function main()
         pred_roi = safe_risk_return(pred_pnl, pred_max_loss)
         base_roi = safe_risk_return(base_pnl, base_max_loss)
 
-        push!(feature_vectors_raw, Float64.(x))
-        push!(feature_vectors_norm, Float64.(x_norm))
+        push!(feature_vectors_raw, x_for_stats)
+        push!(feature_vectors_norm, x_norm_for_stats)
 
         push!(rows, (
             Timestamp=ts,
@@ -830,6 +986,7 @@ function main()
             PredPutDelta=pred_put_delta,
             PredCallDelta=pred_call_delta,
             PredSize=pred_size,
+            PredScore=pred_score,
             PredPnL=pred_pnl,
             PredMaxLoss=pred_max_loss,
             PredROI=pred_roi,
@@ -905,7 +1062,12 @@ function main()
     isempty(feature_vectors_raw) && error("No feature vectors captured for feature stats")
     X_raw = reduce(hcat, feature_vectors_raw)
     X_norm = reduce(hcat, feature_vectors_norm)
-    feature_stats_df = build_feature_stats_df(X_raw, X_norm; use_logsig=USE_LOGSIG)
+    feature_stats_df = build_feature_stats_df(
+        X_raw,
+        X_norm;
+        use_logsig=USE_LOGSIG,
+        include_candidate_features=(model_mode == :score)
+    )
     flagged_features = filter(
         row ->
             row.IsConstantRaw ||
@@ -918,11 +1080,18 @@ function main()
 
     delta_abs_err_put = abs.(details_df.PredPutDelta .- details_df.GridBestPutDelta)
     delta_abs_err_call = abs.(details_df.PredCallDelta .- details_df.GridBestCallDelta)
+    delta_mae_put = safe_mean(delta_abs_err_put)
+    delta_mae_call = safe_mean(delta_abs_err_call)
     delta_rmse_put = sqrt(mean((details_df.PredPutDelta .- details_df.GridBestPutDelta).^2))
     delta_rmse_call = sqrt(mean((details_df.PredCallDelta .- details_df.GridBestCallDelta).^2))
+    pred_minus_base_avg_roi = safe_diff(safe_mean(pred_rois), safe_mean(base_rois))
+    pred_minus_base_weighted_roi = safe_diff(pred_weighted_roi, base_weighted_roi)
 
     summary_df = DataFrame(
         Metric = String[
+            "underlying_symbol",
+            "model_mode",
+            "model_input_dim",
             "n_rows",
             "n_with_pred_pnl",
             "n_with_base_pnl",
@@ -942,11 +1111,13 @@ function main()
             "base_avg_pnl",
             "pred_avg_roi",
             "base_avg_roi",
+            "pred_minus_base_avg_roi",
             "grid_oracle_weighted_roi",
             "super_oracle_weighted_roi",
             "constrained_super_oracle_weighted_roi",
             "pred_weighted_roi",
             "base_weighted_roi",
+            "pred_minus_base_weighted_roi",
             "pred_avg_regret_vs_grid_oracle",
             "base_avg_regret_vs_grid_oracle",
             "pred_avg_regret_vs_super_oracle",
@@ -974,6 +1145,9 @@ function main()
             "n_off_unit_norm_std_features"
         ],
         Value = Any[
+            symbol,
+            string(model_mode),
+            length(feature_means),
             nrow(details_df),
             count(valid_pred),
             count(valid_base),
@@ -993,11 +1167,13 @@ function main()
             safe_mean(base_pnls),
             safe_mean(pred_rois),
             safe_mean(base_rois),
+            pred_minus_base_avg_roi,
             grid_weighted_roi,
             super_weighted_roi,
             constrained_super_weighted_roi,
             pred_weighted_roi,
             base_weighted_roi,
+            pred_minus_base_weighted_roi,
             safe_mean(pred_regrets_grid),
             safe_mean(base_regrets_grid),
             safe_mean(pred_regrets_super),
@@ -1013,8 +1189,8 @@ function main()
             safe_mean(beat_flags),
             safe_mean(pred_pnls .> 0),
             safe_mean(base_pnls .> 0),
-            mean(delta_abs_err_put),
-            mean(delta_abs_err_call),
+            delta_mae_put,
+            delta_mae_call,
             delta_rmse_put,
             delta_rmse_call,
             nrow(feature_stats_df),
@@ -1040,6 +1216,7 @@ function main()
     println("=" ^ 90)
     println("RESULT SNAPSHOT")
     println("=" ^ 90)
+    @printf("Model mode: %s\n", string(model_mode))
     @printf("Rows kept: %d\n", nrow(details_df))
     @printf("Rows with both PnLs: %d\n", count(valid_both))
     @printf("Rows with constrained super PnL: %d\n", count(valid_constrained_super))
@@ -1053,9 +1230,11 @@ function main()
     @printf("Pred/Base avg ROI: %.4f / %.4f\n",
         coalesce(safe_mean(pred_rois), NaN),
         coalesce(safe_mean(base_rois), NaN))
+    @printf("Pred - Base avg ROI: %.4f\n", coalesce(pred_minus_base_avg_roi, NaN))
     @printf("Pred/Base weighted ROI: %.4f / %.4f\n",
         coalesce(pred_weighted_roi, NaN),
         coalesce(base_weighted_roi, NaN))
+    @printf("Pred - Base weighted ROI: %.4f\n", coalesce(pred_minus_base_weighted_roi, NaN))
     @printf("Grid oracle regret vs super: %.4f\n", coalesce(safe_mean(grid_regrets_super), NaN))
     @printf("Grid oracle regret vs constrained super: %.4f\n", coalesce(safe_mean(grid_regrets_constrained), NaN))
     @printf("Pred   avg PnL: %.4f\n", coalesce(safe_mean(pred_pnls), NaN))
@@ -1071,8 +1250,8 @@ function main()
         coalesce(safe_mean(super_max_losses), NaN),
         coalesce(safe_mean(constrained_super_max_losses), NaN))
     @printf("Pred beats base rate: %.3f\n", coalesce(safe_mean(beat_flags), NaN))
-    @printf("Put delta MAE vs grid oracle: %.4f\n", mean(delta_abs_err_put))
-    @printf("Call delta MAE vs grid oracle: %.4f\n", mean(delta_abs_err_call))
+    @printf("Put delta MAE vs grid oracle: %.4f\n", coalesce(delta_mae_put, NaN))
+    @printf("Call delta MAE vs grid oracle: %.4f\n", coalesce(delta_mae_call, NaN))
     @printf("Feature flags (constant / near-constant / high-zero / norm-mean-shift / norm-std-off): %d / %d / %d / %d / %d\n",
         count(feature_stats_df.IsConstantRaw),
         count(feature_stats_df.IsNearConstantRaw),

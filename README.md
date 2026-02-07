@@ -2,78 +2,133 @@
 
 [![Build Status](https://github.com/aleCombi/VolSurfaceAnalysis.jl/actions/workflows/CI.yml/badge.svg?branch=master)](https://github.com/aleCombi/VolSurfaceAnalysis.jl/actions/workflows/CI.yml?query=branch%3Amaster)
 
-A Julia package for analyzing cryptocurrency options volatility surfaces using data from [Deribit](https://www.deribit.com/).
+A Julia package for options volatility surface analysis, strategy backtesting, and ML-based strike selection. Supports **Polygon.io** (equities: SPY, QQQ, etc.) and **Deribit** (crypto: BTC, ETH).
 
-## Data Source
+## Features
 
-This package consumes options chain data collected from the **Deribit API** via the companion project [DeribitVols](../DeribitVols/).
+- Volatility surface construction from options chains (ITM-preferred, volume tiebreaker)
+- Black-76 pricing model with full Greeks (delta, gamma, theta, vega) and IV inversion
+- Event-driven backtest engine for scheduled option strategies
+- Iron condor and short strangle strategies with pluggable strike selectors
+- ROI-optimized wing selection for condors (maximize credit/max_loss ratio)
+- ML strike selection via Flux.jl neural networks
+- Path signature features (ChenSignatures.jl) for spot price dynamics
 
-### Deribit API
+## Data Sources
 
-Deribit is a cryptocurrency derivatives exchange offering options and futures on BTC and ETH. The data is fetched from the public endpoint:
+### Polygon.io (Equities)
 
-```
-GET /public/get_book_summary_by_currency
-```
+Options minute bars (OHLC) and spot prices. Since Polygon provides trade data rather than quotes, bid/ask are synthetically approximated from the high/low of each bar. IV is inferred from mark price via Black-76.
 
-**API Documentation:** [docs.deribit.com](https://docs.deribit.com/) | [get_book_summary_by_currency](https://docs.deribit.com/api-reference/market-data/public-get_book_summary_by_currency.md)
+### Deribit (Crypto)
 
-### Data Fields
+Options chain snapshots with native bid/ask quotes and exchange-computed mark IV. Data collected via the companion [DeribitVols](../DeribitVols/) project.
 
-The following fields are extracted from the API response and mapped to the `VolRecord` struct:
+### Local Data Store
 
-| API Field | VolRecord Field | Type | Description |
-|-----------|-----------------|------|-------------|
-| `instrument_name` | `instrument_name` | `String` | Unique identifier, e.g., `BTC-27DEC24-50000-C` |
-| *(parsed)* | `underlying` | `Underlying` | Asset: `BTC` or `ETH` |
-| *(parsed)* | `expiry` | `DateTime` | Option expiration date (UTC) |
-| *(parsed)* | `strike` | `Float64` | Strike price in USD |
-| *(parsed)* | `option_type` | `OptionType` | `Call` or `Put` |
-| `underlying_price` | `underlying_price` | `Float64` | Spot price of BTC/ETH at observation time |
-| `bid_price` | `bid_price` | `Float64?` | Best bid price (`missing` if no bids) |
-| `ask_price` | `ask_price` | `Float64?` | Best ask price (`missing` if no asks) |
-| `last` | `last_price` | `Float64?` | Last traded price (`missing` if no trades) |
-| `mark_price` | `mark_price` | `Float64?` | Theoretical fair value (mid-market) |
-| `mark_iv` | `mark_iv` | `Float64?` | **Implied volatility at mark price** (annualized %) |
-| `open_interest` | `open_interest` | `Float64?` | Total outstanding contracts |
-| `volume` | `volume` | `Float64?` | 24-hour trading volume |
-| `creation_timestamp` | `timestamp` | `DateTime` | Observation timestamp |
-
-### Instrument Name Format
-
-The `instrument_name` follows the pattern:
+Both sources are stored as parquet files in a local data store (see `LocalDataStore` in the code):
 
 ```
-{UNDERLYING}-{DD}{MMM}{YY}-{STRIKE}-{C|P}
+root/
+  massive_flatfiles/
+    minute_aggs/date={yyyy-mm-dd}/underlying={SYM}/data.parquet   # Polygon options
+    spot_1min/date={yyyy-mm-dd}/symbol={SYM}/data.parquet         # Polygon spot
+  deribit_local/
+    history/vols_{yyyymmdd}.parquet                                # Deribit daily
+    delivery_prices/delivery_prices.parquet                        # Settlement prices
 ```
-
-**Example:** `BTC-27DEC24-50000-C`
-- **Underlying:** BTC
-- **Expiry:** December 27, 2024
-- **Strike:** 50,000 USD
-- **Type:** Call
-
-### Key Field: `mark_iv`
-
-The `mark_iv` (mark implied volatility) is the primary field for volatility surface construction. It represents:
-- **Annualized** implied volatility as a percentage
-- Derived from the mark price using Black-Scholes model
-- Provided by Deribit's pricing engine
 
 ## Data Pipeline
 
 ```
-┌─────────────────────┐     ┌──────────────────────┐     ┌─────────────────────────┐
-│    Deribit API      │────▶│     DeribitVols      │────▶│   VolSurfaceAnalysis    │
-│                     │     │    (Python)          │     │       (Julia)           │
-│ /get_book_summary   │     │                      │     │                         │
-│ _by_currency        │     │ • Fetches every 60s  │     │ • Reads parquet files   │
-│                     │     │ • Stores as parquet  │     │ • Builds vol surfaces   │
-│                     │     │ • Cloud sync (S3)    │     │ • Analysis & modeling   │
-└─────────────────────┘     └──────────────────────┘     └─────────────────────────┘
+Polygon.io API ──┐                                   ┌── Volatility surfaces
+                 ├──▶ options-collector (Python) ──▶ Local Parquet Store ──▶ VolSurfaceAnalysis.jl
+Deribit API ─────┘    (stores as parquet)             ├── Strategy backtesting
+                                                      └── ML strike selection
 ```
 
-See [DeribitVols](../DeribitVols/) for data collection configuration and storage options.
+## Quick Start
+
+```bash
+# Run iron condor backtest (canonical strategy script)
+julia --project=scripts scripts/backtest_polygon_iron_condor.jl
+
+# Run ML training pipeline
+julia --project=scripts scripts/ml_strike_selector.jl
+
+# Run tests
+julia --project=. -e "using Pkg; Pkg.test()"
+```
+
+## Core Types
+
+| Type | Description |
+|------|-------------|
+| `OptionRecord` | Unified options chain record (from Polygon or Deribit) |
+| `VolPoint` | Point on vol surface: `(log_moneyness, tau, vol)` |
+| `VolatilitySurface` | Complete surface at a timestamp with `VolPoint` grid |
+| `TermStructure` | 1D slice of surface at fixed moneyness |
+| `Trade` | Option trade specification (strike, expiry, type, direction) |
+| `Position` | Open trade with entry price, spot, and timestamp |
+
+## Backtest Engine
+
+Strategies implement the `ScheduledStrategy` interface:
+
+```julia
+struct MyStrategy <: ScheduledStrategy
+    schedule::Vector{DateTime}
+    # ...
+end
+
+entry_schedule(s::MyStrategy) = s.schedule
+entry_positions(s::MyStrategy, surface::VolatilitySurface) = [...]
+```
+
+Run a backtest and evaluate:
+
+```julia
+positions, pnls = backtest_strategy(strategy, surfaces, settlement_spots)
+metrics = performance_metrics(positions, pnls;
+    margin_by_key=condor_max_loss_by_key(positions))
+
+metrics.total_roi           # Total ROI on margin
+metrics.annualized_roi_cagr # CAGR
+metrics.sharpe              # Annualized Sharpe
+metrics.sortino             # Annualized Sortino
+metrics.win_rate            # Win rate
+```
+
+Built-in strategies: `IronCondorStrategy`, `ShortStrangleStrategy`. Both accept a `strike_selector` function for custom strike logic.
+
+## ML Module
+
+The ML module learns optimal strike selection from historical vol surfaces.
+
+**Feature extraction** (`ml/features.jl`): 15 surface/market features (ATM IV, skew, term slope, realized vol, etc.) plus ~30 path signature features computed from recent spot dynamics via ChenSignatures.jl.
+
+**Models** (`ml/model.jl`): Flux.jl MLPs with two modes:
+- **Delta mode**: Predicts optimal (put_delta, call_delta, position_size) directly
+- **Score mode**: Scores candidate condors by expected utility (ROI)
+
+**Strike selectors** (`ml/strike_selector.jl`): Trained models wrap into callables that plug into the strategy's `strike_selector` parameter:
+- `MLStrikeSelector` -- for strangles
+- `MLCondorStrikeSelector` -- for condors (delta prediction + wing optimization)
+- `MLCondorScoreSelector` -- for condors (candidate scoring)
+
+Note: The ML evaluation script (`evaluate_condor_prediction_vs_baseline.jl`) currently has its own evaluation loop rather than using the backtest engine. This is being migrated.
+
+## Project Structure
+
+```
+src/
+  data/               # Data loading (option_records, deribit, polygon, local_store, duckdb)
+  backtest/           # Engine, portfolio, metrics, plots
+  strategies/         # Iron condor, short strangle, helpers
+  ml/                 # Features, model, training, strike_selector
+scripts/              # Runnable backtest and ML scripts
+test/                 # Unit tests
+```
 
 ## Installation
 
@@ -82,115 +137,8 @@ using Pkg
 Pkg.add(url="https://github.com/aleCombi/VolSurfaceAnalysis.jl")
 ```
 
-## Usage
-
-### Reading Data
-
-```julia
-using VolSurfaceAnalysis
-
-# Read parquet file from DeribitVols output
-records = read_vol_records("path/to/deribit_chain/date=2024-12-27/underlying=BTC/batch_001.parquet")
-
-# Group records by timestamp
-by_time = split_by_timestamp(records)
-
-# Or group by rounded timestamp (e.g., hourly)
-using Dates
-by_hour = split_by_timestamp(records, Hour(1))
-```
-
-### Building Volatility Surfaces
-
-```julia
-# Build surface from records at a single timestamp
-surface = build_surface(records_at_t)
-
-# Access surface data
-surface.spot           # Underlying spot price
-surface.timestamp      # Observation time
-surface.underlying     # BTC or ETH
-surface.points         # Vector{VolPoint}
-
-# Each VolPoint contains:
-# - log_moneyness: log(K/S)
-# - τ: time to expiry in years
-# - vol: implied volatility (decimal, e.g., 0.65 for 65%)
-```
-
-### Surface Construction Logic
-
-When building a surface, for each (strike, expiry) pair:
-1. **ITM preference**: Uses the in-the-money option (Call when S > K, Put when S < K)
-2. **Volume tiebreaker**: If both options qualify, picks the one with higher volume
-3. **Coordinates**: Converts to (log-moneyness, time-to-expiry) space
-
-## Types
-
-### `VolRecord`
-
-Raw option chain record with all fields from Deribit.
-
-### `VolPoint`
-
-A point on the volatility surface:
-- `log_moneyness`: log(K/S) — negative for ITM calls, positive for ITM puts
-- `τ`: time to expiry in years (using 365.25 days/year)
-- `vol`: implied volatility as decimal
-
-### `VolatilitySurface`
-
-Complete surface at a single timestamp:
-- `spot`: underlying price
-- `timestamp`: observation time
-- `underlying`: BTC or ETH
-- `points`: vector of `VolPoint`
-
-### `TermStructure`
-
-A 1D slice of the volatility surface at fixed moneyness (τ → vol):
-- `spot`: underlying price
-- `timestamp`: observation time
-- `underlying`: BTC or ETH
-- `moneyness`: log-moneyness level (0.0 for ATM)
-- `tenors`: vector of times to expiry (years)
-- `vols`: vector of implied volatilities (decimal)
-
-```julia
-# Extract ATM term structure from a surface
-term_struct = atm_term_structure(surface; atm_threshold=0.05)
-
-# Or directly from records
-term_struct = atm_term_structure(records)
-
-# Access data
-term_struct.tenors  # [0.01, 0.08, 0.25, ...]  (years)
-term_struct.vols    # [0.65, 0.58, 0.52, ...]  (decimal)
-```
-
-## Experiments (scratch/)
-
-The `scratch/` folder contains standalone experiments with their own Project.toml that develops the main package:
-
-```bash
-cd scratch
-julia --project=. -e 'using Pkg; Pkg.instantiate()'
-```
-
-### ATM Term Structure Extraction
-
-Extract ATM vol term structures for each snapshot of a day:
-
-```bash
-julia --project=. atm_term_structure_day.jl <data_path> [date] [underlying]
-
-# Examples:
-julia --project=. atm_term_structure_day.jl ../data/deribit_chain 2024-12-27 BTC
-julia --project=. atm_term_structure_day.jl /path/to/snapshot.parquet
-```
-
 ## References
 
 - [Deribit API Documentation](https://docs.deribit.com/)
-- [DVOL - Deribit Implied Volatility Index](https://insights.deribit.com/exchange-updates/dvol-deribit-implied-volatility-index/)
-- [DeribitVols Data Collector](../DeribitVols/) — companion project for data collection
+- [Polygon.io Options API](https://polygon.io/docs/options)
+- [DeribitVols Data Collector](../DeribitVols/) -- companion project for Deribit data collection

@@ -22,7 +22,6 @@ const EXPIRY_INTERVAL = Day(1)
 const SHORT_SIGMAS = 0.7
 const LONG_SIGMAS = 1.5
 const SHORT_DELTA_ABS = 0.16
-const LONG_DELTA_ABS = 0.05
 const MIN_DELTA_GAP = 0.08
 const RISK_FREE_RATE = 0.045
 const DIV_YIELD = 0.013
@@ -30,6 +29,13 @@ const QUANTITY = 1.0
 const TAU_TOL = 1e-6
 const MIN_VOLUME = 5
 const SPREAD_LAMBDA = 0.0
+
+# Wing selection: ROI-optimized (maximize credit / max_loss)
+const WING_OBJECTIVE = :roi          # :roi, :target_max_loss, or :pnl
+const PREFER_SYMMETRIC_WINGS = false
+const CONDOR_MAX_LOSS_MIN = 5.0      # Min acceptable max loss ($)
+const CONDOR_MAX_LOSS_MAX = 30.0     # Max acceptable max loss ($)
+const CONDOR_MIN_CREDIT = 0.10       # Min entry credit ($)
 
 # Output directory (scripts/runs/<script>_<timestamp>)
 const RUN_ID = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
@@ -91,17 +97,37 @@ function run_symbol_backtest(symbol::String)
     end
 
     schedule = sort(collect(keys(surfaces)))
-    strike_selector = ctx -> VolSurfaceAnalysis._delta_condor_strikes(
-        ctx,
-        SHORT_DELTA_ABS,
-        SHORT_DELTA_ABS,
-        LONG_DELTA_ABS,
-        LONG_DELTA_ABS;
-        rate=RISK_FREE_RATE,
-        div_yield=DIV_YIELD,
-        min_delta_gap=MIN_DELTA_GAP,
-        debug=false
-    )
+    strike_selector = ctx -> begin
+        # Short legs: delta-based placement
+        shorts = VolSurfaceAnalysis._delta_strangle_strikes_asymmetric(
+            ctx,
+            SHORT_DELTA_ABS,
+            SHORT_DELTA_ABS;
+            rate=RISK_FREE_RATE,
+            div_yield=DIV_YIELD
+        )
+        shorts === nothing && return nothing
+        short_put_K, short_call_K = shorts
+
+        # Wings: ROI-optimized (maximize credit / max_loss)
+        wings = VolSurfaceAnalysis._condor_wings_by_objective(
+            ctx,
+            short_put_K,
+            short_call_K;
+            objective=WING_OBJECTIVE,
+            max_loss_min=CONDOR_MAX_LOSS_MIN,
+            max_loss_max=CONDOR_MAX_LOSS_MAX,
+            min_credit=CONDOR_MIN_CREDIT,
+            min_delta_gap=MIN_DELTA_GAP,
+            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
+            rate=RISK_FREE_RATE,
+            div_yield=DIV_YIELD,
+            debug=false
+        )
+        wings === nothing && return nothing
+        long_put_K, long_call_K = wings
+        return (short_put_K, short_call_K, long_put_K, long_call_K)
+    end
     strategy = IronCondorStrategy(
         schedule,
         EXPIRY_INTERVAL,
@@ -204,8 +230,8 @@ function run_symbol_backtest(symbol::String)
     push!(lines, "Strategy Parameters:")
     push!(lines, "  Entry time: $(ENTRY_TIME_ET) ET (DST-aware)")
     push!(lines, "  Expiry: ~$EXPIRY_INTERVAL from entry")
-    push!(lines, "  Short legs: +/-$(round(SHORT_DELTA_ABS * 100, digits=0)) delta")
-    push!(lines, "  Long legs: +/-$(round(LONG_DELTA_ABS * 100, digits=0)) delta")
+    push!(lines, "  Short legs: $(round(SHORT_DELTA_ABS * 100, digits=0)) delta")
+    push!(lines, "  Wing selection: $(WING_OBJECTIVE) (max_loss \$$(CONDOR_MAX_LOSS_MIN)-\$$(CONDOR_MAX_LOSS_MAX), min credit \$$(CONDOR_MIN_CREDIT))")
     push!(lines, "  Quantity per leg: $QUANTITY")
     push!(lines, "")
     push!(lines, "Results:")
@@ -231,11 +257,22 @@ function run_symbol_backtest(symbol::String)
     push!(lines, "")
     push!(lines, "Performance Metrics (return basis: per-condor max loss):")
     push!(lines, "  Total ROI: $(metrics.total_roi === missing ? "n/a" : string(round(metrics.total_roi * 100, digits=2)) * "%")")
+    push!(lines, "  Annualized ROI (CAGR): $(metrics.annualized_roi_cagr === missing ? "n/a" : string(round(metrics.annualized_roi_cagr * 100, digits=2)) * "%")")
     push!(lines, "  Sharpe: $(metrics.sharpe === missing ? "n/a" : string(round(metrics.sharpe, digits=2)))")
     push!(lines, "  Sortino: $(metrics.sortino === missing ? "n/a" : string(round(metrics.sortino, digits=2)))")
     push!(lines, "  Win Rate: $(metrics.win_rate === missing ? "n/a" : string(round(metrics.win_rate * 100, digits=1)) * "%")")
     push!(lines, "")
     push!(lines, "=" ^ 80)
+
+    # Print prominent ROI summary to terminal
+    _fmt(v, pct) = v === missing ? "n/a" : pct ? "$(round(v * 100, digits=2))%" : "$(round(v, digits=2))"
+    println()
+    println("  ===== ROI SUMMARY ($symbol) =====")
+    println("  Total ROI:      $(_fmt(metrics.total_roi, true))")
+    println("  CAGR:           $(_fmt(metrics.annualized_roi_cagr, true))")
+    println("  Sharpe/Sortino: $(_fmt(metrics.sharpe, false)) / $(_fmt(metrics.sortino, false))")
+    println("  Win Rate:       $(_fmt(metrics.win_rate, true))")
+    println("  =================================")
 
     results_txt_path = joinpath(RUN_DIR, "results_$(symbol)_results.txt")
     open(results_txt_path, "w") do io
