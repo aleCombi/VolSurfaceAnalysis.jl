@@ -12,11 +12,14 @@ using Statistics
 using Flux
 using Printf
 using BSON
+using Plots
 
 # =============================================================================
 # Configuration
 # =============================================================================
-const UNDERLYING_SYMBOL = "NDX"
+const UNDERLYING_SYMBOL = "SPXW"
+const SPOT_SYMBOL = "SPY"         # Proxy for SPX index spot
+const SPOT_MULTIPLIER = 10.0      # SPX ≈ SPY × 10
 
 # Evaluation period defaults (override with CLI args: start end [model_path] [model_mode] [symbol])
 const DEFAULT_EVAL_START = Date(2025, 2, 7)
@@ -27,22 +30,22 @@ const ENTRY_TIME_ET = Time(10, 0)
 const EXPIRY_INTERVAL = Day(1)
 const RISK_FREE_RATE = 0.045
 const DIV_YIELD = 0.013
-const MIN_VOLUME = 5
-const SPREAD_LAMBDA = 0.5
+const MIN_VOLUME = 0
+const SPREAD_LAMBDA = 0.7
 const SPOT_HISTORY_LOOKBACK_DAYS = 5
 const USE_LOGSIG = true
 
 # Condor policy (kept aligned with deployment)
-const TARGET_MAX_LOSS = 10.0
+const TARGET_MAX_LOSS = nothing  # Not used with :roi objective
 const MIN_DELTA_GAP = 0.01
 const PREFER_SYMMETRIC_WINGS = false
-const CONSTRAINED_SUPER_MAX_LOSS_TOL = 1.0
+const CONSTRAINED_SUPER_MAX_LOSS_TOL = 10.0
 
 # Candidate scoring policy (used when evaluating score-model checkpoints)
 const SCORE_WING_OBJECTIVE = :roi
-const SCORE_MAX_LOSS_MIN = 5.0
-const SCORE_MAX_LOSS_MAX = 30.0
-const SCORE_MIN_CREDIT = 0.10
+const SCORE_MAX_LOSS_MIN = 50.0
+const SCORE_MAX_LOSS_MAX = 300.0
+const SCORE_MIN_CREDIT = 1.0
 const SCORE_DELTA_GRID = collect(0.05:0.015:0.35)
 const SCORE_MAX_CANDIDATES_PER_DAY = 400
 
@@ -77,7 +80,8 @@ function load_minute_spots(
     start_date::Date,
     end_date::Date;
     lookback_days::Union{Nothing,Int}=SPOT_HISTORY_LOOKBACK_DAYS,
-    symbol::String=UNDERLYING_SYMBOL
+    symbol::String=SPOT_SYMBOL,
+    multiplier::Float64=SPOT_MULTIPLIER
 )::Dict{DateTime,Float64}
     all_dates = available_polygon_dates(DEFAULT_STORE, symbol)
     isempty(all_dates) && error("No spot dates found for $symbol")
@@ -92,6 +96,13 @@ function load_minute_spots(
         dict = read_polygon_spot_prices(path; underlying=symbol)
         merge!(spots, dict)
     end
+
+    if multiplier != 1.0
+        for (k, v) in spots
+            spots[k] = v * multiplier
+        end
+    end
+
     return spots
 end
 
@@ -99,6 +110,8 @@ function load_surfaces_and_spots(
     start_date::Date,
     end_date::Date;
     symbol::String=UNDERLYING_SYMBOL,
+    spot_symbol::String=SPOT_SYMBOL,
+    spot_multiplier::Float64=SPOT_MULTIPLIER,
     entry_time::Time=ENTRY_TIME_ET
 )
     println("  Loading dates from $start_date to $end_date...")
@@ -108,13 +121,21 @@ function load_surfaces_and_spots(
     println("  Found $(length(filtered_dates)) trading days")
 
     entry_ts = build_entry_timestamps(filtered_dates, entry_time)
+
+    # Load entry spots (from spot proxy symbol, scaled)
     entry_spots = read_polygon_spot_prices_for_timestamps(
         polygon_spot_root(DEFAULT_STORE),
         entry_ts;
-        symbol=symbol
+        symbol=spot_symbol
     )
-    println("  Loaded $(length(entry_spots)) entry spots")
+    if spot_multiplier != 1.0
+        for (k, v) in entry_spots
+            entry_spots[k] = v * spot_multiplier
+        end
+    end
+    println("  Loaded $(length(entry_spots)) entry spots (via $spot_symbol × $spot_multiplier)")
 
+    # Build surfaces (options from symbol, spots already scaled)
     path_for_ts = ts -> polygon_options_path(DEFAULT_STORE, Date(ts), symbol)
     read_records = (path; where="") -> read_polygon_option_records(
         path,
@@ -131,6 +152,7 @@ function load_surfaces_and_spots(
     )
     println("  Built $(length(surfaces)) surfaces")
 
+    # Load settlement spots (need to compute expiry times first)
     expiry_ts = DateTime[]
     for (ts, surface) in surfaces
         expiries = unique(rec.expiry for rec in surface.records)
@@ -147,9 +169,14 @@ function load_surfaces_and_spots(
     settlement_spots = read_polygon_spot_prices_for_timestamps(
         polygon_spot_root(DEFAULT_STORE),
         expiry_ts;
-        symbol=symbol
+        symbol=spot_symbol
     )
-    println("  Loaded $(length(settlement_spots)) settlement spots")
+    if spot_multiplier != 1.0
+        for (k, v) in settlement_spots
+            settlement_spots[k] = v * spot_multiplier
+        end
+    end
+    println("  Loaded $(length(settlement_spots)) settlement spots (via $spot_symbol × $spot_multiplier)")
 
     return surfaces, entry_spots, settlement_spots
 end
@@ -411,12 +438,16 @@ function condor_metrics_from_strikes(
     )
 end
 
-function resolve_target_max_loss_condor(
+function resolve_condor_from_deltas(
     ctx,
     settlement_spot::Float64,
     put_delta::Float64,
     call_delta::Float64;
-    target_max_loss::Float64=TARGET_MAX_LOSS,
+    target_max_loss::Union{Nothing,Float64}=TARGET_MAX_LOSS,
+    wing_objective::Symbol=SCORE_WING_OBJECTIVE,
+    max_loss_min::Float64=SCORE_MAX_LOSS_MIN,
+    max_loss_max::Float64=SCORE_MAX_LOSS_MAX,
+    min_credit::Float64=SCORE_MIN_CREDIT,
     min_delta_gap::Float64=MIN_DELTA_GAP,
     prefer_symmetric::Bool=PREFER_SYMMETRIC_WINGS,
     rate::Float64=RISK_FREE_RATE,
@@ -432,11 +463,15 @@ function resolve_target_max_loss_condor(
     shorts === nothing && return nothing
     short_put_K, short_call_K = shorts
 
-    wings = VolSurfaceAnalysis._max_loss_condor_wings(
+    wings = VolSurfaceAnalysis._condor_wings_by_objective(
         ctx,
         short_put_K,
-        short_call_K,
-        target_max_loss;
+        short_call_K;
+        objective=wing_objective,
+        target_max_loss=target_max_loss,
+        max_loss_min=max_loss_min,
+        max_loss_max=max_loss_max,
+        min_credit=min_credit,
         rate=rate,
         div_yield=div_yield,
         min_delta_gap=min_delta_gap,
@@ -576,8 +611,12 @@ end
 function find_constrained_super_oracle_condor(
     ctx,
     settlement_spot::Float64;
-    target_max_loss::Float64=TARGET_MAX_LOSS,
+    target_max_loss::Union{Nothing,Float64}=TARGET_MAX_LOSS,
     max_loss_tol::Float64=CONSTRAINED_SUPER_MAX_LOSS_TOL,
+    wing_objective::Symbol=SCORE_WING_OBJECTIVE,
+    max_loss_min::Float64=SCORE_MAX_LOSS_MIN,
+    max_loss_max::Float64=SCORE_MAX_LOSS_MAX,
+    min_credit::Float64=SCORE_MIN_CREDIT,
     min_delta_gap::Float64=MIN_DELTA_GAP,
     prefer_symmetric::Bool=PREFER_SYMMETRIC_WINGS,
     rate::Float64=RISK_FREE_RATE,
@@ -601,11 +640,15 @@ function find_constrained_super_oracle_condor(
 
     for sp in short_put_candidates
         for sc in short_call_candidates
-            wings = VolSurfaceAnalysis._max_loss_condor_wings(
+            wings = VolSurfaceAnalysis._condor_wings_by_objective(
                 ctx,
                 sp.strike,
-                sc.strike,
-                target_max_loss;
+                sc.strike;
+                objective=wing_objective,
+                target_max_loss=target_max_loss,
+                max_loss_min=max_loss_min,
+                max_loss_max=max_loss_max,
+                min_credit=min_credit,
                 rate=rate,
                 div_yield=div_yield,
                 min_delta_gap=min_delta_gap,
@@ -625,7 +668,11 @@ function find_constrained_super_oracle_condor(
             )
             metrics === nothing && continue
 
-            abs(metrics.max_loss - target_max_loss) <= max_loss_tol || continue
+            # For ROI mode, constrain max_loss within tolerance of the range midpoint
+            if max_loss_min > 0.0 && max_loss_max < Inf
+                mid_max_loss = (max_loss_min + max_loss_max) / 2.0
+                abs(metrics.max_loss - mid_max_loss) <= max_loss_tol || continue
+            end
 
             if metrics.pnl > best_pnl
                 best_pnl = metrics.pnl
@@ -687,10 +734,10 @@ function main()
     println("=" ^ 90)
     println("CONDOR PREDICTION QUALITY VS CONSTANT BASELINE")
     println("=" ^ 90)
-    println("Underlying: $symbol")
+    println("Underlying: $symbol (spot via $SPOT_SYMBOL × $SPOT_MULTIPLIER)")
     println("Eval period: $eval_start to $eval_end")
     println("Model path: $model_path")
-    println("Wing policy: target_max_loss=$TARGET_MAX_LOSS, min_delta_gap=$MIN_DELTA_GAP, prefer_symmetric=$PREFER_SYMMETRIC_WINGS")
+    println("Wing policy: objective=$SCORE_WING_OBJECTIVE, max_loss=[$SCORE_MAX_LOSS_MIN,$SCORE_MAX_LOSS_MAX], min_credit=$SCORE_MIN_CREDIT, min_delta_gap=$MIN_DELTA_GAP")
     println("Score candidate policy: objective=$SCORE_WING_OBJECTIVE, max_loss=[$SCORE_MAX_LOSS_MIN,$SCORE_MAX_LOSS_MAX], min_credit=$SCORE_MIN_CREDIT, max_candidates/day=$SCORE_MAX_CANDIDATES_PER_DAY")
     println("Constrained super-oracle max-loss tolerance: +/-$CONSTRAINED_SUPER_MAX_LOSS_TOL")
     println("Baseline deltas: put=$BASELINE_PUT_DELTA, call=$BASELINE_CALL_DELTA")
@@ -735,8 +782,7 @@ function main()
     minute_spots = load_minute_spots(
         eval_start,
         eval_end;
-        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS,
-        symbol=symbol
+        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS
     )
     spot_history = build_spot_history_dict(timestamps, minute_spots; lookback_days=SPOT_HISTORY_LOOKBACK_DAYS)
     println("  Built spot history for $(length(spot_history)) timestamps")
@@ -788,16 +834,11 @@ function main()
             pred_put_delta = Float64(pred_deltas[1])
             pred_call_delta = Float64(pred_deltas[2])
             pred_size = size(raw, 1) >= 3 ? Float64(raw[3, 1]) : missing
-            pred_condor = resolve_target_max_loss_condor(
+            pred_condor = resolve_condor_from_deltas(
                 ctx,
                 settlement,
                 pred_put_delta,
-                pred_call_delta;
-                target_max_loss=TARGET_MAX_LOSS,
-                min_delta_gap=MIN_DELTA_GAP,
-                prefer_symmetric=PREFER_SYMMETRIC_WINGS,
-                rate=RISK_FREE_RATE,
-                div_yield=DIV_YIELD
+                pred_call_delta
             )
             x_for_stats = Float64.(state_x)
             x_norm_for_stats = Float64.(x_norm)
@@ -872,6 +913,10 @@ function main()
             surface, settlement;
             wing_delta_abs=nothing,
             target_max_loss=TARGET_MAX_LOSS,
+            wing_objective=SCORE_WING_OBJECTIVE,
+            max_loss_min=SCORE_MAX_LOSS_MIN,
+            max_loss_max=SCORE_MAX_LOSS_MAX,
+            min_credit=SCORE_MIN_CREDIT,
             min_delta_gap=MIN_DELTA_GAP,
             prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             rate=RISK_FREE_RATE,
@@ -893,41 +938,25 @@ function main()
 
         constrained_super = find_constrained_super_oracle_condor(
             ctx,
-            settlement;
-            target_max_loss=TARGET_MAX_LOSS,
-            max_loss_tol=CONSTRAINED_SUPER_MAX_LOSS_TOL,
-            min_delta_gap=MIN_DELTA_GAP,
-            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
-            rate=RISK_FREE_RATE,
-            div_yield=DIV_YIELD
+            settlement
         )
 
-        grid_condor = resolve_target_max_loss_condor(
+        grid_condor = resolve_condor_from_deltas(
             ctx,
             settlement,
             grid_best_put_delta,
-            grid_best_call_delta;
-            target_max_loss=TARGET_MAX_LOSS,
-            min_delta_gap=MIN_DELTA_GAP,
-            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
-            rate=RISK_FREE_RATE,
-            div_yield=DIV_YIELD
+            grid_best_call_delta
         )
         grid_max_loss = grid_condor === nothing ? missing : grid_condor.max_loss
 
         pred_pnl = pred_condor === nothing ? missing : pred_condor.pnl
         pred_max_loss = pred_condor === nothing ? missing : pred_condor.max_loss
 
-        base_condor = resolve_target_max_loss_condor(
+        base_condor = resolve_condor_from_deltas(
             ctx,
             settlement,
             BASELINE_PUT_DELTA,
-            BASELINE_CALL_DELTA;
-            target_max_loss=TARGET_MAX_LOSS,
-            min_delta_gap=MIN_DELTA_GAP,
-            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
-            rate=RISK_FREE_RATE,
-            div_yield=DIV_YIELD
+            BASELINE_CALL_DELTA
         )
         base_pnl = base_condor === nothing ? missing : base_condor.pnl
         base_max_loss = base_condor === nothing ? missing : base_condor.max_loss
@@ -1259,6 +1288,74 @@ function main()
         count(feature_stats_df.IsShiftedNormMean),
         count(feature_stats_df.IsOffUnitNormStd))
     println("=" ^ 90)
+
+    # --- Cumulative PnL plot: Pred vs Baseline ---
+    plots_dir = joinpath(RUN_DIR, "plots")
+    mkpath(plots_dir)
+
+    trade_dates = Date.(details_df.Timestamp)
+    pred_dates, pred_vals = profit_curve(trade_dates, details_df.PredPnL)
+    base_dates, base_vals = profit_curve(trade_dates, details_df.BasePnL)
+
+    if !isempty(pred_vals) && !isempty(base_vals)
+        pred_cum = cumsum(pred_vals)
+        base_cum = cumsum(base_vals)
+
+        p = plot(
+            pred_dates, pred_cum,
+            label="ML Pred",
+            title="Cumulative P&L — ML vs Baseline",
+            xlabel="Date",
+            ylabel="Cumulative P&L (USD)",
+            linewidth=2,
+            color=:dodgerblue,
+            legend=:topleft,
+            size=(900, 500),
+            margin=5Plots.mm
+        )
+        plot!(p, base_dates, base_cum,
+            label="Baseline (16Δ)",
+            linewidth=2,
+            color=:darkorange
+        )
+        hline!(p, [0], color=:black, linestyle=:dash, label="", linewidth=1)
+
+        cum_path = joinpath(plots_dir, "cumulative_pnl_pred_vs_base.png")
+        savefig(p, cum_path)
+        println("Cumulative PnL plot saved to: $cum_path")
+
+        # Also ROI equity curve (cumulative ROI per trade)
+        pred_roi_dates, pred_roi_vals = profit_curve(trade_dates, details_df.PredROI)
+        base_roi_dates, base_roi_vals = profit_curve(trade_dates, details_df.BaseROI)
+
+        if !isempty(pred_roi_vals) && !isempty(base_roi_vals)
+            pred_roi_cum = cumsum(pred_roi_vals)
+            base_roi_cum = cumsum(base_roi_vals)
+
+            p2 = plot(
+                pred_roi_dates, pred_roi_cum,
+                label="ML Pred",
+                title="Cumulative ROI — ML vs Baseline",
+                xlabel="Date",
+                ylabel="Cumulative ROI",
+                linewidth=2,
+                color=:dodgerblue,
+                legend=:topleft,
+                size=(900, 500),
+                margin=5Plots.mm
+            )
+            plot!(p2, base_roi_dates, base_roi_cum,
+                label="Baseline (16Δ)",
+                linewidth=2,
+                color=:darkorange
+            )
+            hline!(p2, [0], color=:black, linestyle=:dash, label="", linewidth=1)
+
+            roi_path = joinpath(plots_dir, "cumulative_roi_pred_vs_base.png")
+            savefig(p2, roi_path)
+            println("Cumulative ROI plot saved to: $roi_path")
+        end
+    end
 
     isdir(LATEST_DIR) && rm(LATEST_DIR; recursive=true)
     cp(RUN_DIR, LATEST_DIR)
