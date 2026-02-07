@@ -16,7 +16,9 @@ using Printf
 # =============================================================================
 # Configuration
 # =============================================================================
-const UNDERLYING_SYMBOL = "NDX"
+const UNDERLYING_SYMBOL = "SPXW"
+const SPOT_SYMBOL = "SPY"         # Proxy for SPX index spot
+const SPOT_MULTIPLIER = 10.0      # SPX ≈ SPY × 10
 const STRATEGY = "condor"  # "strangle" or "condor"
 const MODEL_MODE = :delta   # :delta (current), :score (candidate scoring), :hybrid (score with delta fallback)
 
@@ -35,7 +37,7 @@ const RISK_FREE_RATE = 0.045
 const DIV_YIELD = 0.013
 const QUANTITY = 1.0
 const TAU_TOL = 1e-6
-const MIN_VOLUME = 5
+const MIN_VOLUME = 0
 const SPREAD_LAMBDA = 0.5
 const SPOT_HISTORY_LOOKBACK_DAYS = 5  # set to `nothing` to use all available history
 const USE_LOGSIG = true
@@ -45,12 +47,12 @@ const WING_DELTA_ABS = 0.10
 const MIN_DELTA_GAP = 0.01
 const SHORT_SIGMAS = 0.7
 const LONG_SIGMAS = 1.5
-const TARGET_MAX_LOSS = 10.0  # Target maximum loss per contract in dollars (e.g., 10.0 = $1000 max loss)
+const TARGET_MAX_LOSS = nothing  # Not used with :roi objective
 const PREFER_SYMMETRIC_WINGS = false
 const CONDOR_WING_OBJECTIVE = :roi  # :target_max_loss, :roi, or :pnl
-const CONDOR_MAX_LOSS_MIN = 5.0
-const CONDOR_MAX_LOSS_MAX = 30.0
-const CONDOR_MIN_CREDIT = 0.10
+const CONDOR_MAX_LOSS_MIN = 50.0
+const CONDOR_MAX_LOSS_MAX = 300.0
+const CONDOR_MIN_CREDIT = 1.0
 
 # Candidate scoring parameters (used when MODEL_MODE == :score or :hybrid)
 const SCORE_UTILITY_OBJECTIVE = :roi
@@ -95,7 +97,8 @@ function load_minute_spots(
     start_date::Date,
     end_date::Date;
     lookback_days::Union{Nothing,Int}=SPOT_HISTORY_LOOKBACK_DAYS,
-    symbol::String=UNDERLYING_SYMBOL
+    symbol::String=SPOT_SYMBOL,
+    multiplier::Float64=SPOT_MULTIPLIER
 )::Dict{DateTime,Float64}
     all_dates = available_polygon_dates(DEFAULT_STORE, symbol)
     isempty(all_dates) && error("No spot dates found for $symbol")
@@ -111,6 +114,12 @@ function load_minute_spots(
         merge!(spots, dict)
     end
 
+    if multiplier != 1.0
+        for (k, v) in spots
+            spots[k] = v * multiplier
+        end
+    end
+
     return spots
 end
 
@@ -118,6 +127,8 @@ function load_surfaces_and_spots(
     start_date::Date,
     end_date::Date;
     symbol::String=UNDERLYING_SYMBOL,
+    spot_symbol::String=SPOT_SYMBOL,
+    spot_multiplier::Float64=SPOT_MULTIPLIER,
     entry_times::Union{Time,Vector{Time}}=VAL_ENTRY_TIME_ET
 )
     println("  Loading dates from $start_date to $end_date...")
@@ -132,15 +143,20 @@ function load_surfaces_and_spots(
 
     entry_ts = build_entry_timestamps(filtered_dates, entry_times isa Vector ? entry_times : [entry_times])
 
-    # Load entry spots
+    # Load entry spots (from spot proxy symbol, scaled)
     entry_spots = read_polygon_spot_prices_for_timestamps(
         polygon_spot_root(DEFAULT_STORE),
         entry_ts;
-        symbol=symbol
+        symbol=spot_symbol
     )
-    println("  Loaded $(length(entry_spots)) entry spots")
+    if spot_multiplier != 1.0
+        for (k, v) in entry_spots
+            entry_spots[k] = v * spot_multiplier
+        end
+    end
+    println("  Loaded $(length(entry_spots)) entry spots (via $spot_symbol × $spot_multiplier)")
 
-    # Build surfaces
+    # Build surfaces (options from symbol, spots already scaled)
     path_for_ts = ts -> polygon_options_path(DEFAULT_STORE, Date(ts), symbol)
     read_records = (path; where="") -> read_polygon_option_records(
         path,
@@ -174,9 +190,14 @@ function load_surfaces_and_spots(
     settlement_spots = read_polygon_spot_prices_for_timestamps(
         polygon_spot_root(DEFAULT_STORE),
         expiry_ts;
-        symbol=symbol
+        symbol=spot_symbol
     )
-    println("  Loaded $(length(settlement_spots)) settlement spots")
+    if spot_multiplier != 1.0
+        for (k, v) in settlement_spots
+            settlement_spots[k] = v * spot_multiplier
+        end
+    end
+    println("  Loaded $(length(settlement_spots)) settlement spots (via $spot_symbol × $spot_multiplier)")
 
     return surfaces, entry_spots, settlement_spots
 end
@@ -261,8 +282,7 @@ function main()
     println("  Loading minute spot history for training...")
     train_minute_spots = load_minute_spots(
         TRAIN_START, TRAIN_END;
-        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS,
-        symbol=symbol
+        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS
     )
     println("  Loaded $(length(train_minute_spots)) minute spot points")
     train_spot_history = build_spot_history_dict(
@@ -361,8 +381,7 @@ function main()
     println("  Loading minute spot history for validation...")
     val_minute_spots = load_minute_spots(
         VAL_START, VAL_END;
-        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS,
-        symbol=symbol
+        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS
     )
     println("  Loaded $(length(val_minute_spots)) minute spot points")
     val_spot_history = build_spot_history_dict(

@@ -174,7 +174,7 @@ function find_optimal_deltas(
     end
 
     # Need at least some valid combinations
-    n_valid < 10 && return nothing
+    n_valid < 1 && return nothing
 
     return (best_put_delta, best_call_delta, best_pnl)
 end
@@ -398,7 +398,7 @@ function find_optimal_condor_deltas(
         end
     end
 
-    n_valid < 10 && return nothing
+    n_valid < 1 && return nothing
     return (best_put_delta, best_call_delta, best_pnl)
 end
 
