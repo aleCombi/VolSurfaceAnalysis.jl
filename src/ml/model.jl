@@ -30,6 +30,33 @@ function mixed_output_activation(x)
 end
 
 """
+    _build_dense_stack(input_dim, hidden_dims, dropout_rate) -> Vector
+
+Build the shared hidden-layer stack (Dense+ReLU+Dropout) used by all models.
+"""
+function _build_dense_stack(
+    input_dim::Int,
+    hidden_dims::Vector{Int},
+    dropout_rate::Float64
+)::Vector{Any}
+    layers = Any[]
+
+    push!(layers, Dense(input_dim => hidden_dims[1], relu))
+    if dropout_rate > 0
+        push!(layers, Dropout(dropout_rate))
+    end
+
+    for i in 1:(length(hidden_dims)-1)
+        push!(layers, Dense(hidden_dims[i] => hidden_dims[i+1], relu))
+        if dropout_rate > 0
+            push!(layers, Dropout(dropout_rate))
+        end
+    end
+
+    return layers
+end
+
+"""
     create_strike_model(; input_dim, hidden_dims, output_dim, dropout_rate) -> Chain
 
 Create a neural network for strike selection and position sizing.
@@ -55,26 +82,9 @@ function create_strike_model(;
     output_dim::Int=3,
     dropout_rate::Float64=0.2
 )::Chain
-    layers = []
-
-    # Input layer
-    push!(layers, Dense(input_dim => hidden_dims[1], relu))
-    if dropout_rate > 0
-        push!(layers, Dropout(dropout_rate))
-    end
-
-    # Hidden layers
-    for i in 1:(length(hidden_dims)-1)
-        push!(layers, Dense(hidden_dims[i] => hidden_dims[i+1], relu))
-        if dropout_rate > 0
-            push!(layers, Dropout(dropout_rate))
-        end
-    end
-
-    # Output layer with mixed activation (sigmoid for deltas, tanh for size)
+    layers = _build_dense_stack(input_dim, hidden_dims, dropout_rate)
     push!(layers, Dense(hidden_dims[end] => output_dim, identity))
     push!(layers, mixed_output_activation)
-
     return Chain(layers...)
 end
 
@@ -89,20 +99,7 @@ function create_scoring_model(;
     hidden_dims::Vector{Int}=[128, 64, 32],
     dropout_rate::Float64=0.2
 )::Chain
-    layers = []
-
-    push!(layers, Dense(input_dim => hidden_dims[1], relu))
-    if dropout_rate > 0
-        push!(layers, Dropout(dropout_rate))
-    end
-
-    for i in 1:(length(hidden_dims)-1)
-        push!(layers, Dense(hidden_dims[i] => hidden_dims[i+1], relu))
-        if dropout_rate > 0
-            push!(layers, Dropout(dropout_rate))
-        end
-    end
-
+    layers = _build_dense_stack(input_dim, hidden_dims, dropout_rate)
     push!(layers, Dense(hidden_dims[end] => 1, identity))
     return Chain(layers...)
 end

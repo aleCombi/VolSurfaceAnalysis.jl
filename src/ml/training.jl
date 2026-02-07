@@ -134,6 +134,38 @@ function simulate_strangle_pnl(
 end
 
 """
+    _grid_search_optimal_deltas(simulate_fn, delta_grid) -> Union{Tuple{Float64,Float64,Float64}, Nothing}
+
+Generic grid search over (put_delta, call_delta) pairs. `simulate_fn(put_delta, call_delta)`
+must return `Union{Float64, Nothing}`.
+"""
+function _grid_search_optimal_deltas(
+    simulate_fn,
+    delta_grid::Vector{Float64}
+)::Union{Tuple{Float64,Float64,Float64},Nothing}
+    best_pnl = -Inf
+    best_put_delta = 0.15
+    best_call_delta = 0.15
+    n_valid = 0
+
+    for put_delta in delta_grid
+        for call_delta in delta_grid
+            pnl = simulate_fn(put_delta, call_delta)
+            pnl === nothing && continue
+            n_valid += 1
+            if pnl > best_pnl
+                best_pnl = pnl
+                best_put_delta = put_delta
+                best_call_delta = call_delta
+            end
+        end
+    end
+
+    n_valid < 1 && return nothing
+    return (best_put_delta, best_call_delta, best_pnl)
+end
+
+"""
     find_optimal_deltas(surface, settlement_spot; rate, div_yield, expiry_interval, delta_grid)
         -> Union{Tuple{Float64, Float64, Float64}, Nothing}
 
@@ -150,33 +182,12 @@ function find_optimal_deltas(
     expiry_interval::Period=Day(1),
     delta_grid::Vector{Float64}=DELTA_GRID
 )::Union{Tuple{Float64,Float64,Float64},Nothing}
-    best_pnl = -Inf
-    best_put_delta = 0.15
-    best_call_delta = 0.15
-
-    n_valid = 0
-
-    for put_delta in delta_grid
-        for call_delta in delta_grid
-            pnl = simulate_strangle_pnl(
-                surface, settlement_spot, put_delta, call_delta;
-                rate=rate, div_yield=div_yield, expiry_interval=expiry_interval
-            )
-            pnl === nothing && continue
-            n_valid += 1
-
-            if pnl > best_pnl
-                best_pnl = pnl
-                best_put_delta = put_delta
-                best_call_delta = call_delta
-            end
-        end
+    return _grid_search_optimal_deltas(delta_grid) do put_delta, call_delta
+        simulate_strangle_pnl(
+            surface, settlement_spot, put_delta, call_delta;
+            rate=rate, div_yield=div_yield, expiry_interval=expiry_interval
+        )
     end
-
-    # Need at least some valid combinations
-    n_valid < 10 && return nothing
-
-    return (best_put_delta, best_call_delta, best_pnl)
 end
 
 """
@@ -366,40 +377,22 @@ function find_optimal_condor_deltas(
     expiry_interval::Period=Day(1),
     delta_grid::Vector{Float64}=DELTA_GRID
 )::Union{Tuple{Float64,Float64,Float64},Nothing}
-    best_pnl = -Inf
-    best_put_delta = 0.15
-    best_call_delta = 0.15
-    n_valid = 0
-
-    for put_delta in delta_grid
-        for call_delta in delta_grid
-            pnl = simulate_condor_pnl(
-                surface, settlement_spot, put_delta, call_delta;
-                wing_delta_abs=wing_delta_abs,
-                target_max_loss=target_max_loss,
-                wing_objective=wing_objective,
-                max_loss_min=max_loss_min,
-                max_loss_max=max_loss_max,
-                min_credit=min_credit,
-                min_delta_gap=min_delta_gap,
-                prefer_symmetric=prefer_symmetric,
-                rate=rate,
-                div_yield=div_yield,
-                expiry_interval=expiry_interval
-            )
-            pnl === nothing && continue
-            n_valid += 1
-
-            if pnl > best_pnl
-                best_pnl = pnl
-                best_put_delta = put_delta
-                best_call_delta = call_delta
-            end
-        end
+    return _grid_search_optimal_deltas(delta_grid) do put_delta, call_delta
+        simulate_condor_pnl(
+            surface, settlement_spot, put_delta, call_delta;
+            wing_delta_abs=wing_delta_abs,
+            target_max_loss=target_max_loss,
+            wing_objective=wing_objective,
+            max_loss_min=max_loss_min,
+            max_loss_max=max_loss_max,
+            min_credit=min_credit,
+            min_delta_gap=min_delta_gap,
+            prefer_symmetric=prefer_symmetric,
+            rate=rate,
+            div_yield=div_yield,
+            expiry_interval=expiry_interval
+        )
     end
-
-    n_valid < 10 && return nothing
-    return (best_put_delta, best_call_delta, best_pnl)
 end
 
 """
@@ -915,29 +908,18 @@ function generate_condor_candidate_training_data(
 end
 
 """
-    generate_condor_training_data(surfaces, settlement_spots, spot_history_dict;
-        rate, div_yield, expiry_interval, wing_delta_abs, target_max_loss, wing_objective,
-        max_loss_min, max_loss_max, min_credit, min_delta_gap, prefer_symmetric, use_logsig, verbose)
-        -> TrainingDataset
+    _generate_delta_training_data(surfaces, settlement_spots, spot_history_dict, find_optimal_fn;
+        expiry_interval, use_logsig, verbose) -> TrainingDataset
 
-Generate training data for iron condor strike selection by grid searching
-optimal inner deltas under the configured wing policy.
+Shared loop for generating delta-prediction training data. `find_optimal_fn(surface, settlement)`
+must return `Union{Tuple{Float64,Float64,Float64}, Nothing}` (put_delta, call_delta, pnl).
 """
-function generate_condor_training_data(
+function _generate_delta_training_data(
     surfaces::Dict{DateTime,VolatilitySurface},
     settlement_spots::Dict{DateTime,Float64},
-    spot_history_dict::Dict{DateTime,SpotHistory};
-    rate::Float64=0.045,
-    div_yield::Float64=0.013,
+    spot_history_dict::Dict{DateTime,SpotHistory},
+    find_optimal_fn;
     expiry_interval::Period=Day(1),
-    wing_delta_abs::Union{Nothing,Float64}=0.05,
-    target_max_loss::Union{Nothing,Float64}=nothing,
-    wing_objective::Symbol=:target_max_loss,
-    max_loss_min::Float64=0.0,
-    max_loss_max::Float64=Inf,
-    min_credit::Float64=0.0,
-    min_delta_gap::Float64=0.08,
-    prefer_symmetric::Bool=true,
     use_logsig::Bool=false,
     verbose::Bool=true
 )::TrainingDataset
@@ -978,20 +960,7 @@ function generate_condor_training_data(
             continue
         end
 
-        result = find_optimal_condor_deltas(
-            surface, settlement;
-            wing_delta_abs=wing_delta_abs,
-            target_max_loss=target_max_loss,
-            wing_objective=wing_objective,
-            max_loss_min=max_loss_min,
-            max_loss_max=max_loss_max,
-            min_credit=min_credit,
-            min_delta_gap=min_delta_gap,
-            prefer_symmetric=prefer_symmetric,
-            rate=rate,
-            div_yield=div_yield,
-            expiry_interval=expiry_interval
-        )
+        result = find_optimal_fn(surface, settlement)
         if result === nothing
             n_skipped += 1
             continue
@@ -1028,6 +997,55 @@ function generate_condor_training_data(
     end
 
     return TrainingDataset(X, Y, raw_Y, pnls, size_labels, timestamps)
+end
+
+"""
+    generate_condor_training_data(surfaces, settlement_spots, spot_history_dict;
+        rate, div_yield, expiry_interval, wing_delta_abs, target_max_loss, wing_objective,
+        max_loss_min, max_loss_max, min_credit, min_delta_gap, prefer_symmetric, use_logsig, verbose)
+        -> TrainingDataset
+
+Generate training data for iron condor strike selection by grid searching
+optimal inner deltas under the configured wing policy.
+"""
+function generate_condor_training_data(
+    surfaces::Dict{DateTime,VolatilitySurface},
+    settlement_spots::Dict{DateTime,Float64},
+    spot_history_dict::Dict{DateTime,SpotHistory};
+    rate::Float64=0.045,
+    div_yield::Float64=0.013,
+    expiry_interval::Period=Day(1),
+    wing_delta_abs::Union{Nothing,Float64}=0.05,
+    target_max_loss::Union{Nothing,Float64}=nothing,
+    wing_objective::Symbol=:target_max_loss,
+    max_loss_min::Float64=0.0,
+    max_loss_max::Float64=Inf,
+    min_credit::Float64=0.0,
+    min_delta_gap::Float64=0.08,
+    prefer_symmetric::Bool=true,
+    use_logsig::Bool=false,
+    verbose::Bool=true
+)::TrainingDataset
+    return _generate_delta_training_data(
+        surfaces, settlement_spots, spot_history_dict,
+        (surface, settlement) -> find_optimal_condor_deltas(
+            surface, settlement;
+            wing_delta_abs=wing_delta_abs,
+            target_max_loss=target_max_loss,
+            wing_objective=wing_objective,
+            max_loss_min=max_loss_min,
+            max_loss_max=max_loss_max,
+            min_credit=min_credit,
+            min_delta_gap=min_delta_gap,
+            prefer_symmetric=prefer_symmetric,
+            rate=rate,
+            div_yield=div_yield,
+            expiry_interval=expiry_interval
+        );
+        expiry_interval=expiry_interval,
+        use_logsig=use_logsig,
+        verbose=verbose
+    )
 end
 
 """
@@ -1105,95 +1123,16 @@ function generate_training_data(
     use_logsig::Bool=false,
     verbose::Bool=true
 )::TrainingDataset
-    features_list = Vector{Float32}[]
-    labels_list = Vector{Float32}[]
-    raw_deltas_list = Vector{Float32}[]
-    pnls = Float32[]
-    timestamps = DateTime[]
-
-    sorted_ts = sort(collect(keys(surfaces)))
-    n_total = length(sorted_ts)
-    n_skipped = 0
-    n_processed = 0
-
-    for (i, ts) in enumerate(sorted_ts)
-        surface = surfaces[ts]
-
-        # Compute expiry time
-        expiry_target = ts + expiry_interval
-        expiries = unique(rec.expiry for rec in surface.records)
-        isempty(expiries) && continue
-
-        taus = [time_to_expiry(e, ts) for e in expiries]
-        tau_target = time_to_expiry(expiry_target, ts)
-        idx = argmin(abs.(taus .- tau_target))
-        expiry = expiries[idx]
-        tau = taus[idx]
-
-        # Get settlement spot
-        settlement = get(settlement_spots, expiry, nothing)
-        if settlement === nothing
-            n_skipped += 1
-            continue
-        end
-
-        # Get spot history for this timestamp
-        spot_history = get(spot_history_dict, ts, nothing)
-
-        # Extract features
-        feats = extract_features(surface, tau; spot_history=spot_history, use_logsig=use_logsig)
-        if feats === nothing
-            n_skipped += 1
-            continue
-        end
-
-        # Find optimal deltas
-        result = find_optimal_deltas(
+    return _generate_delta_training_data(
+        surfaces, settlement_spots, spot_history_dict,
+        (surface, settlement) -> find_optimal_deltas(
             surface, settlement;
             rate=rate, div_yield=div_yield, expiry_interval=expiry_interval
-        )
-        if result === nothing
-            n_skipped += 1
-            continue
-        end
-
-        best_put_delta, best_call_delta, best_pnl = result
-
-        # Store data
-        push!(features_list, features_to_vector(feats))
-        push!(raw_deltas_list, Float32[best_put_delta, best_call_delta])
-        # Scale deltas to [0, 1] for model training
-        scaled = unscale_deltas(Float32[best_put_delta, best_call_delta])
-        push!(labels_list, scaled)
-        push!(pnls, Float32(best_pnl))
-        push!(timestamps, ts)
-
-        n_processed += 1
-
-        if verbose && (i % 20 == 0 || i == n_total)
-            println("  Processed $i / $n_total (valid: $n_processed, skipped: $n_skipped)")
-        end
-    end
-
-    if isempty(features_list)
-        error("No valid training samples generated")
-    end
-
-    # Stack into matrices
-    X = reduce(hcat, features_list)
-    Y = reduce(hcat, labels_list)
-    raw_Y = reduce(hcat, raw_deltas_list)
-
-    # Compute position size labels from P&L distribution
-    size_labels = compute_size_labels(pnls)
-
-    if verbose
-        n_positive = count(p -> p > 0, pnls)
-        avg_size = mean(size_labels)
-        println("  Position sizing: $(n_positive)/$(length(pnls)) profitable, avg_size=$(round(avg_size, digits=3))")
-    end
-
-    return TrainingDataset(X, Y, raw_Y, pnls, size_labels, timestamps)
+        );
+        expiry_interval=expiry_interval,
+        use_logsig=use_logsig,
+        verbose=verbose
+    )
 end
 
 """

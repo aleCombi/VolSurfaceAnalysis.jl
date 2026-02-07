@@ -68,6 +68,31 @@ julia --project=scripts scripts/evaluate_condor_prediction_vs_baseline.jl
 - **Pricing convention**: Prices in `OptionRecord` are fractions of spot (Deribit convention). Multiply by `surface.spot` for USD. The backtest uses bid for sells, ask for buys.
 - **ROI evaluation**: `performance_metrics(positions, pnls; margin_by_key=condor_max_loss_by_key(positions))` computes ROI using per-condor max loss as margin.
 
+### Backtest Engine (Backbone)
+
+The engine is the backbone of the library. All P&L computation should flow through it.
+
+**Current design (what works):**
+- `Strategy` -> `ScheduledStrategy`: clean two-level hierarchy with `entry_schedule()` + `entry_positions()`
+- Two `backtest_strategy` variants: one settles via surfaces at expiry, one via spot dict
+- Pure functional positions: `Position` is immutable, settlement is a function
+- Bid/ask realism: `open_position` prices at bid (shorts) and ask (longs)
+- Composable selectors: `strike_selector` callable plugs ML, delta-based, or ROI-optimized logic into any strategy
+
+**Current limitations:**
+1. No intermediate decisions -- no callback between entry and expiry (no "close at 50% profit")
+2. No `exit_positions()` -- exit is always expiry, baked into `backtest_strategy`
+3. No portfolio-level awareness -- strategy can't see existing open positions
+4. ML eval script bypasses the engine -- reimplements its own loop for oracle comparisons
+5. Training labels bypass the engine -- `simulate_condor_pnl()` computes payoff directly, not via `Position`/`settle`
+
+**Intended direction:**
+- Phase 1: `simulate_strategy_pnl(selector, surfaces, spots)` thin wrapper -- lets ML training/eval reuse the engine. Oracle selectors become just another callable.
+- Phase 2: `MonitoredStrategy` subtype -- called at intermediate timestamps for early exit, rolling, hedging
+- Phase 3: Portfolio-level awareness -- strategies see open positions, capital allocation, exposure limits
+
+**What NOT to do:** No transaction costs until live comparison needed. No tick-by-tick simulation. Don't break immutable Position design.
+
 ### Data Layout
 
 Local data store root: see `DEFAULT_STORE` in `data/local_store.jl`.

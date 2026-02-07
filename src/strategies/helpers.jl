@@ -226,43 +226,14 @@ function _delta_strangle_strikes(
     div_yield::Float64=0.0,
     debug::Bool=false
 )::Union{Nothing,Tuple{Float64,Float64}}
-    tau = ctx.tau
-    tau <= 0.0 && return nothing
-
-    put_recs = filter(r -> r.option_type == Put, ctx.recs)
-    call_recs = filter(r -> r.option_type == Call, ctx.recs)
-    isempty(put_recs) && return nothing
-    isempty(call_recs) && return nothing
-
-    F = ctx.surface.spot * exp((rate - div_yield) * tau)
-    target = abs(target_delta)
-
-    short_put = _best_delta_strike(
-        put_recs,
-        -target,
-        ctx.surface.spot,
-        :put,
-        F,
-        tau,
-        rate;
+    return _delta_strangle_strikes_asymmetric(
+        ctx,
+        abs(target_delta),
+        abs(target_delta);
+        rate=rate,
+        div_yield=div_yield,
         debug=debug
     )
-    short_call = _best_delta_strike(
-        call_recs,
-        target,
-        ctx.surface.spot,
-        :call,
-        F,
-        tau,
-        rate;
-        debug=debug
-    )
-
-    if short_put === nothing || short_call === nothing
-        return nothing
-    end
-
-    return (short_put, short_call)
 end
 
 """
