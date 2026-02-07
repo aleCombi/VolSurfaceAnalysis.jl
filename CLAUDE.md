@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Julia package for options volatility surface analysis, strategy backtesting, and ML-based strike selection. Supports Polygon.io (equities: SPY, QQQ, etc.) and Deribit (crypto: BTC, ETH). The core pipeline: load options data from parquet files, build volatility surfaces, run option-selling strategies through a backtest engine, and evaluate with ROI/Sharpe/Sortino metrics. An ML module learns to select optimal strikes using neural networks trained on surface features and path signatures.
+Julia package for options volatility surface analysis, strategy backtesting, and ML-based strike selection. Supports Polygon.io (equities: SPY, QQQ, SPXW, etc.) and Deribit (crypto: BTC, ETH). The core pipeline: load options data from parquet files, build volatility surfaces, run option-selling strategies through a backtest engine, and evaluate with ROI/Sharpe/Sortino metrics. An ML module learns to select optimal strikes using neural networks trained on surface features and path signatures.
 
 ## IMPORTANT: Keep This File Updated
 
@@ -56,7 +56,7 @@ julia --project=scripts scripts/evaluate_condor_prediction_vs_baseline.jl
   - `strategies/short_strangle.jl` -- `ShortStrangleStrategy`
 
 - **ML module**
-  - `ml/features.jl` -- `extract_features`, `SurfaceFeatures`, path signatures via ChenSignatures
+  - `ml/features.jl` -- `extract_features`, `SurfaceFeatures`, path signatures via ChenSignatures; `prev_surface` kwarg for surface dynamics; `LOGSIG_DEAD_INDICES`, `pruned_logsig_dim()` for dead feature pruning
   - `ml/model.jl` -- `create_strike_model`, `create_scoring_model` (Flux MLP)
   - `ml/training.jl` -- training data generation, training loops, evaluation
   - `ml/strike_selector.jl` -- `MLStrikeSelector`, `MLCondorStrikeSelector`, `MLCondorScoreSelector`
@@ -117,6 +117,40 @@ Scripts use `scripts/Project.toml` via `Pkg.activate(@__DIR__)`.
 - `evaluate_condor_prediction_vs_baseline.jl` reimplements backtest logic inline (strike resolution, PnL computation, feature extraction) instead of using `backtest_strategy()`
 - `training.jl` has its own `condor_metrics_from_strikes()` instead of using `Position`/`settle`
 - **Long-term goal**: route all evaluation through the backtest engine
+
+## SPXW Evaluation Results (Feb-Aug 2025, 123 trading days)
+
+### Setup
+- Underlying: SPXW options, spot proxied via SPY × 10
+- Strategy: 1DTE iron condors, entry at 10:00 ET, ROI-optimized wing selection
+- Model: delta-prediction MLP, 59 input features (36 base + 23 pruned logsig)
+- Baseline: fixed 16-delta symmetric condor
+
+### Spread Lambda Sweep (friction sensitivity)
+
+| Lambda | Pred Avg ROI | Base Avg ROI | ML Edge | Pred Beats Base |
+|--------|-------------|-------------|---------|-----------------|
+| 0.0 (worst-case) | 6.1% | 2.4% | +3.6% | 65.9% |
+| 0.7 (canonical) | 8.0% | 3.4% | +4.6% | 63.4% |
+| 1.0 (no spread) | 8.7% | 4.0% | +4.7% | 64.2% |
+
+- `spread_lambda` controls synthetic bid/ask: 0.0 = bid=low/ask=high (widest), 1.0 = midpoint (no spread)
+- **Key finding**: ML edge is friction-robust. The model's ~2x ROI advantage over baseline holds across all lambda values. The alpha comes from genuine strike selection, not spread-gaming.
+- Baseline profitability at all lambda levels reflects the SPX variance risk premium (short-dated options are structurally overpriced due to hedging demand).
+
+### Feature Evolution
+- Original model: 45 features (15 base + 30 logsig), 7 near-constant features
+- Current model: 59 features (36 base + 23 pruned logsig), 0 constant/near-constant at lambda=0.7
+- New feature groups: richer smile (10), spread by moneyness (6), surface dynamics (3), volume (3)
+- Dead logsig indices pruned via `LOGSIG_DEAD_INDICES`
+- `prev_surface` support added for day-over-day surface change features (`delta_atm_iv_1d`, `delta_skew_1d`, `delta_term_slope_1d`)
+
+### Caveats / Open Questions
+- Train/eval overlap not yet verified -- need clean out-of-sample holdout period
+- SPY × 10 proxy for SPX settlement introduces small tracking error
+- No commissions, slippage, or pin risk modeled beyond synthetic spread
+- Only tested on SPXW Feb-Aug 2025 -- needs different underlyings, periods, vol regimes
+- Fixed 16-delta baseline is naive; an adaptive-delta rule might close some of the gap
 
 ## Conventions
 

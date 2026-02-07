@@ -799,6 +799,7 @@ function generate_condor_candidate_training_data(
     min_delta_gap::Float64=0.08,
     prefer_symmetric::Bool=true,
     use_logsig::Bool=false,
+    prev_surfaces::Union{Nothing,Dict{DateTime,VolatilitySurface}}=nothing,
     verbose::Bool=true
 )::CondorScoringDataset
     utility_objective in (:roi, :pnl, :risk_adjusted) || error("utility_objective must be one of :roi, :pnl, :risk_adjusted")
@@ -833,7 +834,8 @@ function generate_condor_candidate_training_data(
         end
 
         spot_history = get(spot_history_dict, ts, nothing)
-        feats = extract_features(surface, tau; spot_history=spot_history, use_logsig=use_logsig)
+        prev_surface = prev_surfaces !== nothing ? get(prev_surfaces, ts, nothing) : nothing
+        feats = extract_features(surface, tau; spot_history=spot_history, use_logsig=use_logsig, prev_surface=prev_surface)
         if feats === nothing
             n_skipped_days += 1
             continue
@@ -939,6 +941,7 @@ function generate_condor_training_data(
     min_delta_gap::Float64=0.08,
     prefer_symmetric::Bool=true,
     use_logsig::Bool=false,
+    prev_surfaces::Union{Nothing,Dict{DateTime,VolatilitySurface}}=nothing,
     verbose::Bool=true
 )::TrainingDataset
     features_list = Vector{Float32}[]
@@ -972,7 +975,8 @@ function generate_condor_training_data(
         end
 
         spot_history = get(spot_history_dict, ts, nothing)
-        feats = extract_features(surface, tau; spot_history=spot_history, use_logsig=use_logsig)
+        prev_surface = prev_surfaces !== nothing ? get(prev_surfaces, ts, nothing) : nothing
+        feats = extract_features(surface, tau; spot_history=spot_history, use_logsig=use_logsig, prev_surface=prev_surface)
         if feats === nothing
             n_skipped += 1
             continue
@@ -1103,6 +1107,7 @@ function generate_training_data(
     div_yield::Float64=0.013,
     expiry_interval::Period=Day(1),
     use_logsig::Bool=false,
+    prev_surfaces::Union{Nothing,Dict{DateTime,VolatilitySurface}}=nothing,
     verbose::Bool=true
 )::TrainingDataset
     features_list = Vector{Float32}[]
@@ -1139,9 +1144,10 @@ function generate_training_data(
 
         # Get spot history for this timestamp
         spot_history = get(spot_history_dict, ts, nothing)
+        prev_surface = prev_surfaces !== nothing ? get(prev_surfaces, ts, nothing) : nothing
 
         # Extract features
-        feats = extract_features(surface, tau; spot_history=spot_history, use_logsig=use_logsig)
+        feats = extract_features(surface, tau; spot_history=spot_history, use_logsig=use_logsig, prev_surface=prev_surface)
         if feats === nothing
             n_skipped += 1
             continue

@@ -30,7 +30,7 @@ const EXPIRY_INTERVAL = Day(1)
 const RISK_FREE_RATE = 0.045
 const DIV_YIELD = 0.013
 const MIN_VOLUME = 0
-const SPREAD_LAMBDA = 0.5
+const SPREAD_LAMBDA = 0.0
 const SPOT_HISTORY_LOOKBACK_DAYS = 5
 const USE_LOGSIG = true
 
@@ -204,6 +204,31 @@ function build_spot_history_dict(
     return history_dict
 end
 
+function build_prev_surfaces_dict(
+    surfaces::Dict{DateTime,VolatilitySurface};
+    symbol::String=UNDERLYING_SYMBOL
+)::Dict{DateTime,VolatilitySurface}
+    all_option_dates = sort(available_polygon_dates(DEFAULT_STORE, symbol))
+    by_date = Dict{Date,DateTime}()
+    for ts in keys(surfaces)
+        d = Date(ts)
+        if !haskey(by_date, d) || ts < by_date[d]
+            by_date[d] = ts
+        end
+    end
+    prev_dict = Dict{DateTime,VolatilitySurface}()
+    for ts in keys(surfaces)
+        d = Date(ts)
+        idx = searchsortedlast(all_option_dates, d - Day(1))
+        idx < 1 && continue
+        prev_date = all_option_dates[idx]
+        if haskey(by_date, prev_date)
+            prev_dict[ts] = surfaces[by_date[prev_date]]
+        end
+    end
+    return prev_dict
+end
+
 function nearest_expiry_and_tau(surface::VolatilitySurface, ts::DateTime, expiry_interval::Period)
     expiries = unique(rec.expiry for rec in surface.records)
     isempty(expiries) && return nothing
@@ -272,25 +297,34 @@ end
 
 function feature_names(; use_logsig::Bool=USE_LOGSIG, include_candidate_features::Bool=false)
     base = String[
-        "atm_iv",
-        "atm_bid_ask_spread",
-        "term_slope",
-        "put_skew_25d",
-        "call_skew_25d",
-        "skew_asymmetry",
-        "smile_curvature",
-        "spot_scaled",
-        "spot_return_1d",
-        "spot_return_5d",
-        "tau",
-        "realized_vol_5d",
-        "iv_rv_ratio",
-        "avg_bid_ask_spread",
-        "n_strikes_scaled"
+        # Vol surface (6)
+        "atm_iv", "atm_bid_ask_spread", "term_slope",
+        "put_skew_25d", "call_skew_25d", "skew_asymmetry",
+        # Richer smile (10)
+        "put_skew_10d", "call_skew_10d", "put_skew_40d", "call_skew_40d",
+        "risk_reversal_25d", "butterfly_25d",
+        "smile_slope_put", "smile_slope_call",
+        "wing_convexity_put", "wing_convexity_call",
+        # Spread by moneyness (6)
+        "spread_10d_put", "spread_25d_put", "spread_40d_put",
+        "spread_10d_call", "spread_25d_call", "spread_40d_call",
+        # Surface dynamics (3)
+        "delta_atm_iv_1d", "delta_skew_1d", "delta_term_slope_1d",
+        # Volume (3)
+        "atm_volume_scaled", "total_volume_scaled", "volume_weighted_spread",
+        # Market context (8)
+        "spot_scaled", "spot_return_1d", "spot_return_5d", "tau",
+        "realized_vol_5d", "iv_rv_ratio", "avg_bid_ask_spread", "n_strikes_scaled"
     ]
-    path_prefix = use_logsig ? "logsig_" : "sig_"
-    n_path = path_feature_dim(; use_logsig=use_logsig)
-    path = ["$(path_prefix)$(i)" for i in 1:n_path]
+    # Use pruned logsig dimension (dead features removed)
+    if use_logsig
+        n_path = pruned_logsig_dim()
+        all_indices = setdiff(1:path_feature_dim(; use_logsig=true), LOGSIG_DEAD_INDICES)
+        path = ["logsig_$(i)" for i in all_indices]
+    else
+        n_path = path_feature_dim(; use_logsig=false)
+        path = ["sig_$(i)" for i in 1:n_path]
+    end
     names = vcat(base, path)
     if include_candidate_features
         names = vcat(names, condor_candidate_feature_names())
@@ -785,6 +819,9 @@ function main()
     )
     spot_history = build_spot_history_dict(timestamps, minute_spots; lookback_days=SPOT_HISTORY_LOOKBACK_DAYS)
     println("  Built spot history for $(length(spot_history)) timestamps")
+
+    prev_surfaces = build_prev_surfaces_dict(surfaces; symbol=symbol)
+    println("  Built prev-day surface map for $(length(prev_surfaces))/$(length(surfaces)) timestamps")
     println()
 
     println("PHASE 3: Score ML vs Grid Oracle vs Super Oracle vs Constrained Super Oracle vs Baseline")
@@ -814,7 +851,8 @@ function main()
         settlement === nothing && (n_skipped += 1; continue)
 
         hist = get(spot_history, ts, nothing)
-        feats = extract_features(surface, tau; spot_history=hist, use_logsig=USE_LOGSIG)
+        prev_surf = get(prev_surfaces, ts, nothing)
+        feats = extract_features(surface, tau; spot_history=hist, use_logsig=USE_LOGSIG, prev_surface=prev_surf)
         feats === nothing && (n_skipped += 1; continue)
 
         state_x = features_to_vector(feats)

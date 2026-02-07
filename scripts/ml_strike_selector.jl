@@ -231,6 +231,31 @@ function build_spot_history_dict(
     return history_dict
 end
 
+function build_prev_surfaces_dict(
+    surfaces::Dict{DateTime,VolatilitySurface};
+    symbol::String=UNDERLYING_SYMBOL
+)::Dict{DateTime,VolatilitySurface}
+    all_option_dates = sort(available_polygon_dates(DEFAULT_STORE, symbol))
+    by_date = Dict{Date,DateTime}()
+    for ts in keys(surfaces)
+        d = Date(ts)
+        if !haskey(by_date, d) || ts < by_date[d]
+            by_date[d] = ts
+        end
+    end
+    prev_dict = Dict{DateTime,VolatilitySurface}()
+    for ts in keys(surfaces)
+        d = Date(ts)
+        idx = searchsortedlast(all_option_dates, d - Day(1))
+        idx < 1 && continue
+        prev_date = all_option_dates[idx]
+        if haskey(by_date, prev_date)
+            prev_dict[ts] = surfaces[by_date[prev_date]]
+        end
+    end
+    return prev_dict
+end
+
 # =============================================================================
 # Main Training and Evaluation
 # =============================================================================
@@ -291,6 +316,10 @@ function main()
         lookback_days=SPOT_HISTORY_LOOKBACK_DAYS
     )
     println("  Built spot history for $(length(train_spot_history)) timestamps")
+
+    println("  Building prev-day surface mappings...")
+    train_prev_surfaces = build_prev_surfaces_dict(train_surfaces; symbol=symbol)
+    println("  Prev-day surfaces: $(length(train_prev_surfaces))/$(length(train_surfaces))")
     println()
 
     # -------------------------------------------------------------------------
@@ -320,6 +349,7 @@ function main()
             min_delta_gap=MIN_DELTA_GAP,
             prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             use_logsig=USE_LOGSIG,
+            prev_surfaces=train_prev_surfaces,
             verbose=true
         )
     elseif STRATEGY == "condor"
@@ -339,6 +369,7 @@ function main()
             min_delta_gap=MIN_DELTA_GAP,
             prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             use_logsig=USE_LOGSIG,
+            prev_surfaces=train_prev_surfaces,
             verbose=true
         )
     else
@@ -350,6 +381,7 @@ function main()
             div_yield=DIV_YIELD,
             expiry_interval=EXPIRY_INTERVAL,
             use_logsig=USE_LOGSIG,
+            prev_surfaces=train_prev_surfaces,
             verbose=true
         )
     end
@@ -390,6 +422,9 @@ function main()
         lookback_days=SPOT_HISTORY_LOOKBACK_DAYS
     )
     println("  Built spot history for $(length(val_spot_history)) timestamps")
+
+    val_prev_surfaces = build_prev_surfaces_dict(val_surfaces; symbol=symbol)
+    println("  Built prev-day surface map for $(length(val_prev_surfaces))/$(length(val_surfaces)) timestamps")
     println()
 
     # Generate validation labels (for evaluation)
@@ -414,6 +449,7 @@ function main()
             min_delta_gap=MIN_DELTA_GAP,
             prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             use_logsig=USE_LOGSIG,
+            prev_surfaces=val_prev_surfaces,
             verbose=true
         )
     elseif STRATEGY == "condor"
@@ -433,6 +469,7 @@ function main()
             min_delta_gap=MIN_DELTA_GAP,
             prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             use_logsig=USE_LOGSIG,
+            prev_surfaces=val_prev_surfaces,
             verbose=true
         )
     else
@@ -444,6 +481,7 @@ function main()
             div_yield=DIV_YIELD,
             expiry_interval=EXPIRY_INTERVAL,
             use_logsig=USE_LOGSIG,
+            prev_surfaces=val_prev_surfaces,
             verbose=true
         )
     end

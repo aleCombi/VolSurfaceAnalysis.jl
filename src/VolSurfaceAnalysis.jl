@@ -127,8 +127,9 @@ export ShortStrangleStrategy
 # Exports: Machine Learning
 # ============================================================================
 # Feature extraction
-export SurfaceFeatures, SpotHistory, N_FEATURES, SIGNATURE_LEVEL, SIGNATURE_DIM, LOGSIGNATURE_DIM
-export path_feature_dim, n_features, N_CONDOR_CANDIDATE_FEATURES, n_condor_scoring_features
+export SurfaceFeatures, SpotHistory, N_FEATURES, N_BASE_FEATURES, SIGNATURE_LEVEL, SIGNATURE_DIM, LOGSIGNATURE_DIM
+export LOGSIG_DEAD_INDICES
+export path_feature_dim, pruned_logsig_dim, n_features, N_CONDOR_CANDIDATE_FEATURES, n_condor_scoring_features
 export extract_features, features_to_vector
 export compute_path_signature, compute_logsig_features
 export normalize_features, apply_normalization
