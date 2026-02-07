@@ -336,6 +336,156 @@ function (selector::MLCondorStrikeSelector)(ctx)
 end
 
 """
+    MLCondorScoreSelector
+
+Callable selector that scores candidate condor actions `(x, K)` and selects the
+highest-scoring candidate.
+"""
+struct MLCondorScoreSelector
+    model::Any
+    feature_means::Vector{Float32}
+    feature_stds::Vector{Float32}
+    candidate_delta_grid::Vector{Float64}
+    max_candidates::Int
+    wing_delta_abs::Union{Nothing,Float32}
+    target_max_loss::Union{Nothing,Float32}
+    wing_objective::Symbol
+    max_loss_min::Float32
+    max_loss_max::Float32
+    min_credit::Float32
+    min_delta_gap::Float32
+    prefer_symmetric::Bool
+    rate::Float64
+    div_yield::Float64
+    spot_history::Dict{DateTime,SpotHistory}
+    use_logsig::Bool
+    fallback_selector::Any
+end
+
+"""
+    MLCondorScoreSelector(model, feature_means, feature_stds; ...)
+
+Create a candidate-scoring condor selector.
+"""
+function MLCondorScoreSelector(
+    model,
+    feature_means::Vector{Float32},
+    feature_stds::Vector{Float32};
+    candidate_delta_grid::Vector{Float64}=collect(0.05:0.015:0.35),
+    max_candidates::Int=400,
+    wing_delta_abs::Union{Nothing,Float32}=nothing,
+    target_max_loss::Union{Nothing,Float32}=nothing,
+    wing_objective::Symbol=:roi,
+    max_loss_min::Float32=0.0f0,
+    max_loss_max::Float32=Float32(Inf),
+    min_credit::Float32=0.0f0,
+    min_delta_gap::Float32=0.08f0,
+    prefer_symmetric::Bool=true,
+    rate::Float64=0.045,
+    div_yield::Float64=0.013,
+    spot_history::Dict{DateTime,SpotHistory}=Dict{DateTime,SpotHistory}(),
+    use_logsig::Bool=false,
+    fallback_selector=nothing
+)
+    if !(wing_objective in (:target_max_loss, :roi, :pnl))
+        error("wing_objective must be one of :target_max_loss, :roi, :pnl")
+    end
+    if max_loss_max < max_loss_min
+        error("max_loss_max must be >= max_loss_min")
+    end
+
+    return MLCondorScoreSelector(
+        model,
+        feature_means,
+        feature_stds,
+        candidate_delta_grid,
+        max_candidates,
+        wing_delta_abs,
+        target_max_loss,
+        wing_objective,
+        max_loss_min,
+        max_loss_max,
+        min_credit,
+        min_delta_gap,
+        prefer_symmetric,
+        rate,
+        div_yield,
+        spot_history,
+        use_logsig,
+        fallback_selector
+    )
+end
+
+function _fallback_or_nothing(fallback_selector, ctx)
+    fallback_selector === nothing && return nothing
+    return fallback_selector(ctx)
+end
+
+"""
+    (selector::MLCondorScoreSelector)(ctx)
+        -> Union{Nothing, Tuple{Float64, Float64, Float64, Float64}}
+
+Scores candidate condors and returns strikes for the best predicted utility.
+"""
+function (selector::MLCondorScoreSelector)(ctx)
+    surface = ctx.surface
+    tau = ctx.tau
+
+    spot_history = get(selector.spot_history, surface.timestamp, nothing)
+    feats = extract_features(surface, tau; spot_history=spot_history, use_logsig=selector.use_logsig)
+    feats === nothing && return _fallback_or_nothing(selector.fallback_selector, ctx)
+
+    state_features = features_to_vector(feats)
+    candidates = enumerate_condor_candidates(
+        ctx;
+        delta_grid=selector.candidate_delta_grid,
+        max_candidates=selector.max_candidates,
+        wing_delta_abs=(selector.wing_delta_abs === nothing ? nothing : Float64(selector.wing_delta_abs)),
+        target_max_loss=(selector.target_max_loss === nothing ? nothing : Float64(selector.target_max_loss)),
+        wing_objective=selector.wing_objective,
+        max_loss_min=Float64(selector.max_loss_min),
+        max_loss_max=Float64(selector.max_loss_max),
+        min_credit=Float64(selector.min_credit),
+        min_delta_gap=Float64(selector.min_delta_gap),
+        prefer_symmetric=selector.prefer_symmetric,
+        rate=selector.rate,
+        div_yield=selector.div_yield
+    )
+    isempty(candidates) && return _fallback_or_nothing(selector.fallback_selector, ctx)
+
+    x_rows = Vector{Float32}[]
+    valid_candidates = NamedTuple[]
+    for candidate in candidates
+        x = condor_scoring_feature_vector(
+            state_features,
+            ctx,
+            candidate;
+            rate=selector.rate,
+            div_yield=selector.div_yield
+        )
+        x === nothing && continue
+        push!(x_rows, x)
+        push!(valid_candidates, candidate)
+    end
+    isempty(x_rows) && return _fallback_or_nothing(selector.fallback_selector, ctx)
+
+    X = reduce(hcat, x_rows)
+    if size(X, 1) != length(selector.feature_means) || size(X, 1) != length(selector.feature_stds)
+        return _fallback_or_nothing(selector.fallback_selector, ctx)
+    end
+
+    X_norm = (X .- selector.feature_means) ./ selector.feature_stds
+    Flux.testmode!(selector.model)
+    raw_scores = selector.model(X_norm)
+    scores = vec(raw_scores)
+    isempty(scores) && return _fallback_or_nothing(selector.fallback_selector, ctx)
+
+    best_idx = argmax(scores)
+    best = valid_candidates[best_idx]
+    return (best.short_put_K, best.short_call_K, best.long_put_K, best.long_call_K)
+end
+
+"""
     save_ml_selector(path, model, feature_means, feature_stds; min_delta, max_delta)
 
 Save a trained ML selector to a BSON file.

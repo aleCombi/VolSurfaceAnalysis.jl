@@ -7,7 +7,7 @@ using Statistics: mean, std, median
 using Random
 using Flux
 using BSON
-using ChenSignatures: sig, logsig, prepare
+using ChenSignatures: sig, logsig, prepare, sig_leadlag, logsig_leadlag
 
 # ============================================================================
 # Core Types & Models
@@ -127,26 +127,34 @@ export ShortStrangleStrategy
 # Exports: Machine Learning
 # ============================================================================
 # Feature extraction
-export SurfaceFeatures, SpotHistory, N_FEATURES, SIGNATURE_LEVEL, SIGNATURE_DIM
+export SurfaceFeatures, SpotHistory, N_FEATURES, SIGNATURE_LEVEL, SIGNATURE_DIM, LOGSIGNATURE_DIM
+export path_feature_dim, n_features, N_CONDOR_CANDIDATE_FEATURES, n_condor_scoring_features
 export extract_features, features_to_vector
 export compute_path_signature, compute_logsig_features
 export normalize_features, apply_normalization
 
 # Model
 export create_strike_model, scale_deltas, unscale_deltas
+export create_scoring_model
 export delta_loss, predict_deltas
 export predict_with_sizing, combined_loss
 
 # Training
 export TrainingDataset, DELTA_GRID
+export CondorScoringDataset
 export simulate_strangle_pnl, find_optimal_deltas
 export generate_training_data, train_model!, evaluate_model
 export compute_size_labels
 export simulate_condor_pnl, find_optimal_condor_deltas, generate_condor_training_data
+export build_condor_ctx, condor_entry_metrics_from_strikes, condor_metrics_from_strikes
+export enumerate_condor_candidates, condor_scoring_feature_vector
+export condor_realized_utility, generate_condor_candidate_training_data
+export train_scoring_model!, evaluate_scoring_model
 
 # Strike selector
 export MLStrikeSelector
 export MLCondorStrikeSelector
+export MLCondorScoreSelector
 export save_ml_selector, load_ml_selector
 
 # Asymmetric delta helper (also used internally)

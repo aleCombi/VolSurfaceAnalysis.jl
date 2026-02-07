@@ -25,6 +25,26 @@ struct TrainingDataset
     timestamps::Vector{DateTime}
 end
 
+"""
+    CondorScoringDataset
+
+Dataset for candidate-scoring models (state-action utility regression).
+
+# Fields
+- `features::Matrix{Float32}`: Combined state+candidate feature matrix
+- `utilities::Vector{Float32}`: Training utility target (e.g., realized ROI)
+- `pnls::Vector{Float32}`: Realized PnL per candidate
+- `max_losses::Vector{Float32}`: Max loss per candidate
+- `timestamps::Vector{DateTime}`: Entry timestamps (repeated across candidates)
+"""
+struct CondorScoringDataset
+    features::Matrix{Float32}
+    utilities::Vector{Float32}
+    pnls::Vector{Float32}
+    max_losses::Vector{Float32}
+    timestamps::Vector{DateTime}
+end
+
 # Delta grid for searching optimal strikes
 const DELTA_GRID = collect(0.05:0.025:0.35)
 
@@ -380,6 +400,518 @@ function find_optimal_condor_deltas(
 
     n_valid < 10 && return nothing
     return (best_put_delta, best_call_delta, best_pnl)
+end
+
+"""
+    build_condor_ctx(surface; expiry_interval=Day(1))
+        -> Union{Nothing, NamedTuple}
+
+Build a strike-selection context for the expiry closest to `surface.timestamp + expiry_interval`.
+"""
+function build_condor_ctx(
+    surface::VolatilitySurface;
+    expiry_interval::Period=Day(1)
+)::Union{Nothing,NamedTuple}
+    expiry_result = _select_expiry(expiry_interval, surface)
+    expiry_result === nothing && return nothing
+
+    expiry, _, tau = expiry_result
+    tau <= 0.0 && return nothing
+
+    recs = filter(r -> r.expiry == expiry, surface.records)
+    isempty(recs) && return nothing
+
+    put_strikes = sort(unique(r.strike for r in recs if r.option_type == Put))
+    call_strikes = sort(unique(r.strike for r in recs if r.option_type == Call))
+    (isempty(put_strikes) || isempty(call_strikes)) && return nothing
+
+    ctx = (
+        surface=surface,
+        expiry=expiry,
+        tau=tau,
+        recs=recs,
+        put_strikes=put_strikes,
+        call_strikes=call_strikes
+    )
+    return (ctx=ctx, expiry=expiry, tau=tau)
+end
+
+function _leg_relative_spread(rec::OptionRecord)::Float64
+    if ismissing(rec.bid_price) || ismissing(rec.ask_price)
+        return 0.0
+    end
+    mid = (rec.bid_price + rec.ask_price) / 2
+    mid <= 0.0 && return 0.0
+    return (rec.ask_price - rec.bid_price) / mid
+end
+
+"""
+    condor_entry_metrics_from_strikes(ctx, short_put_K, short_call_K, long_put_K, long_call_K; rate, div_yield)
+        -> Union{Nothing, NamedTuple}
+
+Compute entry-side condor metrics (credit, max loss, widths, per-leg spreads, and leg deltas).
+"""
+function condor_entry_metrics_from_strikes(
+    ctx,
+    short_put_K::Float64,
+    short_call_K::Float64,
+    long_put_K::Float64,
+    long_call_K::Float64;
+    rate::Float64=0.045,
+    div_yield::Float64=0.013
+)::Union{Nothing,NamedTuple}
+    put_recs = filter(r -> r.option_type == Put, ctx.recs)
+    call_recs = filter(r -> r.option_type == Call, ctx.recs)
+
+    sp = _find_rec_by_strike(put_recs, short_put_K)
+    sc = _find_rec_by_strike(call_recs, short_call_K)
+    lp = _find_rec_by_strike(put_recs, long_put_K)
+    lc = _find_rec_by_strike(call_recs, long_call_K)
+    (sp === nothing || sc === nothing || lp === nothing || lc === nothing) && return nothing
+
+    if ismissing(sp.bid_price) || ismissing(sc.bid_price) || ismissing(lp.ask_price) || ismissing(lc.ask_price)
+        return nothing
+    end
+
+    spot = ctx.surface.spot
+    net_credit = (sp.bid_price + sc.bid_price - lp.ask_price - lc.ask_price) * spot
+    width_put = short_put_K - long_put_K
+    width_call = long_call_K - short_call_K
+    max_loss = max(width_put, width_call) - net_credit
+    max_loss <= 0.0 && return nothing
+
+    tau = ctx.tau
+    tau <= 0.0 && return nothing
+    F = spot * exp((rate - div_yield) * tau)
+
+    to_f64_or_zero(x) = x === missing ? 0.0 : Float64(x)
+    short_put_delta = to_f64_or_zero(_delta_from_record(sp, F, tau, rate))
+    short_call_delta = to_f64_or_zero(_delta_from_record(sc, F, tau, rate))
+    long_put_delta = to_f64_or_zero(_delta_from_record(lp, F, tau, rate))
+    long_call_delta = to_f64_or_zero(_delta_from_record(lc, F, tau, rate))
+
+    entry_roi = net_credit / max_loss
+    avg_leg_spread = (
+        _leg_relative_spread(sp) +
+        _leg_relative_spread(sc) +
+        _leg_relative_spread(lp) +
+        _leg_relative_spread(lc)
+    ) / 4
+
+    return (
+        net_credit=net_credit,
+        max_loss=max_loss,
+        entry_roi=entry_roi,
+        width_put=width_put,
+        width_call=width_call,
+        short_put_rel_spread=_leg_relative_spread(sp),
+        short_call_rel_spread=_leg_relative_spread(sc),
+        long_put_rel_spread=_leg_relative_spread(lp),
+        long_call_rel_spread=_leg_relative_spread(lc),
+        avg_leg_rel_spread=avg_leg_spread,
+        short_put_delta=short_put_delta,
+        short_call_delta=short_call_delta,
+        long_put_delta=long_put_delta,
+        long_call_delta=long_call_delta
+    )
+end
+
+"""
+    condor_metrics_from_strikes(ctx, settlement_spot, short_put_K, short_call_K, long_put_K, long_call_K; rate, div_yield)
+        -> Union{Nothing, NamedTuple}
+
+Compute realized PnL/ROI for a specific condor, net of bid-ask execution.
+"""
+function condor_metrics_from_strikes(
+    ctx,
+    settlement_spot::Float64,
+    short_put_K::Float64,
+    short_call_K::Float64,
+    long_put_K::Float64,
+    long_call_K::Float64;
+    rate::Float64=0.045,
+    div_yield::Float64=0.013
+)::Union{Nothing,NamedTuple}
+    entry = condor_entry_metrics_from_strikes(
+        ctx,
+        short_put_K,
+        short_call_K,
+        long_put_K,
+        long_call_K;
+        rate=rate,
+        div_yield=div_yield
+    )
+    entry === nothing && return nothing
+
+    put_payoff = -max(short_put_K - settlement_spot, 0.0) + max(long_put_K - settlement_spot, 0.0)
+    call_payoff = -max(settlement_spot - short_call_K, 0.0) + max(settlement_spot - long_call_K, 0.0)
+    pnl = put_payoff + call_payoff + entry.net_credit
+    roi = pnl / entry.max_loss
+
+    return (
+        pnl=pnl,
+        roi=roi,
+        max_loss=entry.max_loss,
+        net_credit=entry.net_credit,
+        entry_roi=entry.entry_roi,
+        width_put=entry.width_put,
+        width_call=entry.width_call,
+        short_put_rel_spread=entry.short_put_rel_spread,
+        short_call_rel_spread=entry.short_call_rel_spread,
+        long_put_rel_spread=entry.long_put_rel_spread,
+        long_call_rel_spread=entry.long_call_rel_spread,
+        avg_leg_rel_spread=entry.avg_leg_rel_spread,
+        short_put_delta=entry.short_put_delta,
+        short_call_delta=entry.short_call_delta,
+        long_put_delta=entry.long_put_delta,
+        long_call_delta=entry.long_call_delta
+    )
+end
+
+"""
+    enumerate_condor_candidates(ctx; ...) -> Vector{NamedTuple}
+
+Enumerate candidate condor structures for one state by scanning short-delta pairs
+and resolving wings under the configured policy.
+"""
+function enumerate_condor_candidates(
+    ctx;
+    delta_grid::Vector{Float64}=collect(0.05:0.015:0.35),
+    max_candidates::Int=400,
+    wing_delta_abs::Union{Nothing,Float64}=nothing,
+    target_max_loss::Union{Nothing,Float64}=nothing,
+    wing_objective::Symbol=:roi,
+    max_loss_min::Float64=0.0,
+    max_loss_max::Float64=Inf,
+    min_credit::Float64=0.0,
+    min_delta_gap::Float64=0.08,
+    prefer_symmetric::Bool=true,
+    rate::Float64=0.045,
+    div_yield::Float64=0.013
+)::Vector{NamedTuple}
+    if !(wing_objective in (:target_max_loss, :roi, :pnl))
+        error("wing_objective must be one of :target_max_loss, :roi, :pnl")
+    end
+
+    candidates = NamedTuple[]
+    seen = Set{NTuple{4,Float64}}()
+
+    use_fixed_delta_wings = (
+        wing_objective == :target_max_loss &&
+        target_max_loss === nothing &&
+        wing_delta_abs !== nothing
+    )
+
+    for put_delta in delta_grid
+        for call_delta in delta_grid
+            strikes = if use_fixed_delta_wings
+                _delta_condor_strikes(
+                    ctx,
+                    put_delta,
+                    call_delta,
+                    wing_delta_abs,
+                    wing_delta_abs;
+                    rate=rate,
+                    div_yield=div_yield,
+                    min_delta_gap=min_delta_gap
+                )
+            else
+                shorts = _delta_strangle_strikes_asymmetric(
+                    ctx,
+                    put_delta,
+                    call_delta;
+                    rate=rate,
+                    div_yield=div_yield
+                )
+                shorts === nothing && continue
+                short_put_K, short_call_K = shorts
+
+                wings = _condor_wings_by_objective(
+                    ctx,
+                    short_put_K,
+                    short_call_K;
+                    objective=wing_objective,
+                    target_max_loss=target_max_loss,
+                    max_loss_min=max_loss_min,
+                    max_loss_max=max_loss_max,
+                    min_credit=min_credit,
+                    rate=rate,
+                    div_yield=div_yield,
+                    min_delta_gap=min_delta_gap,
+                    prefer_symmetric=prefer_symmetric,
+                    debug=false
+                )
+                wings === nothing && continue
+                long_put_K, long_call_K = wings
+                (short_put_K, short_call_K, long_put_K, long_call_K)
+            end
+            strikes === nothing && continue
+
+            short_put_K, short_call_K, long_put_K, long_call_K = strikes
+            key = (short_put_K, short_call_K, long_put_K, long_call_K)
+            key in seen && continue
+            push!(seen, key)
+
+            push!(candidates, (
+                short_put_K=short_put_K,
+                short_call_K=short_call_K,
+                long_put_K=long_put_K,
+                long_call_K=long_call_K,
+                short_put_delta=put_delta,
+                short_call_delta=call_delta
+            ))
+        end
+    end
+
+    if max_candidates > 0 && length(candidates) > max_candidates
+        raw_idx = collect(round.(Int, range(1, length(candidates), length=max_candidates)))
+        idx = unique(clamp.(raw_idx, 1, length(candidates)))
+        candidates = candidates[idx]
+    end
+
+    return candidates
+end
+
+"""
+    condor_scoring_feature_vector(state_features, ctx, candidate; rate, div_yield, implied_move_floor)
+        -> Union{Nothing, Vector{Float32}}
+
+Build combined state-action features for one condor candidate.
+"""
+function condor_scoring_feature_vector(
+    state_features::Vector{Float32},
+    ctx,
+    candidate;
+    rate::Float64=0.045,
+    div_yield::Float64=0.013,
+    implied_move_floor::Float64=1e-6
+)::Union{Nothing,Vector{Float32}}
+    entry = condor_entry_metrics_from_strikes(
+        ctx,
+        candidate.short_put_K,
+        candidate.short_call_K,
+        candidate.long_put_K,
+        candidate.long_call_K;
+        rate=rate,
+        div_yield=div_yield
+    )
+    entry === nothing && return nothing
+
+    spot = ctx.surface.spot
+    spot <= 0.0 && return nothing
+
+    atm_iv = _atm_iv_from_records(
+        ctx.recs,
+        spot,
+        ctx.tau,
+        rate,
+        div_yield;
+        debug=false,
+        timestamp=nothing
+    )
+    implied_move = (atm_iv === nothing || !isfinite(atm_iv)) ? implied_move_floor : max(atm_iv * sqrt(ctx.tau), implied_move_floor)
+
+    short_put_distance = (spot - candidate.short_put_K) / spot
+    short_call_distance = (candidate.short_call_K - spot) / spot
+    put_width_norm = entry.width_put / spot
+    call_width_norm = entry.width_call / spot
+    width_asymmetry = abs(put_width_norm - call_width_norm)
+    inner_width_norm = (candidate.short_call_K - candidate.short_put_K) / spot
+    net_credit_norm = entry.net_credit / spot
+    max_loss_norm = entry.max_loss / spot
+
+    put_implied_move_distance = short_put_distance / implied_move
+    call_implied_move_distance = short_call_distance / implied_move
+    put_delta_gap = abs(abs(entry.short_put_delta) - abs(entry.long_put_delta))
+    call_delta_gap = abs(abs(entry.short_call_delta) - abs(entry.long_call_delta))
+
+    candidate_features = Float32[
+        candidate.short_put_delta,
+        candidate.short_call_delta,
+        short_put_distance,
+        short_call_distance,
+        put_width_norm,
+        call_width_norm,
+        width_asymmetry,
+        inner_width_norm,
+        net_credit_norm,
+        max_loss_norm,
+        entry.entry_roi,
+        entry.short_put_rel_spread,
+        entry.short_call_rel_spread,
+        entry.long_put_rel_spread,
+        entry.long_call_rel_spread,
+        entry.avg_leg_rel_spread,
+        put_implied_move_distance,
+        call_implied_move_distance,
+        put_delta_gap,
+        call_delta_gap
+    ]
+
+    length(candidate_features) == N_CONDOR_CANDIDATE_FEATURES || return nothing
+    return vcat(state_features, candidate_features)
+end
+
+"""
+    condor_realized_utility(pnl, max_loss; objective=:roi) -> Float64
+
+Utility target for candidate-scoring models.
+"""
+function condor_realized_utility(
+    pnl::Float64,
+    max_loss::Float64;
+    objective::Symbol=:roi
+)::Float64
+    eps = 1e-6
+    if objective == :roi
+        return pnl / max(max_loss, eps)
+    elseif objective == :pnl
+        return pnl
+    elseif objective == :risk_adjusted
+        return pnl / sqrt(max(max_loss, eps))
+    else
+        error("Unknown utility objective: $objective (expected :roi, :pnl, or :risk_adjusted)")
+    end
+end
+
+"""
+    generate_condor_candidate_training_data(surfaces, settlement_spots, spot_history_dict; ...)
+        -> CondorScoringDataset
+
+Generate candidate-level training data for condor action scoring.
+"""
+function generate_condor_candidate_training_data(
+    surfaces::Dict{DateTime,VolatilitySurface},
+    settlement_spots::Dict{DateTime,Float64},
+    spot_history_dict::Dict{DateTime,SpotHistory};
+    rate::Float64=0.045,
+    div_yield::Float64=0.013,
+    expiry_interval::Period=Day(1),
+    utility_objective::Symbol=:roi,
+    candidate_delta_grid::Vector{Float64}=collect(0.05:0.015:0.35),
+    max_candidates_per_day::Int=400,
+    wing_delta_abs::Union{Nothing,Float64}=nothing,
+    target_max_loss::Union{Nothing,Float64}=nothing,
+    wing_objective::Symbol=:roi,
+    max_loss_min::Float64=0.0,
+    max_loss_max::Float64=Inf,
+    min_credit::Float64=0.0,
+    min_delta_gap::Float64=0.08,
+    prefer_symmetric::Bool=true,
+    use_logsig::Bool=false,
+    verbose::Bool=true
+)::CondorScoringDataset
+    utility_objective in (:roi, :pnl, :risk_adjusted) || error("utility_objective must be one of :roi, :pnl, :risk_adjusted")
+
+    feature_rows = Vector{Float32}[]
+    utilities = Float32[]
+    pnls = Float32[]
+    max_losses = Float32[]
+    timestamps = DateTime[]
+
+    sorted_ts = sort(collect(keys(surfaces)))
+    n_total_days = length(sorted_ts)
+    n_skipped_days = 0
+    n_valid_days = 0
+    n_valid_candidates = 0
+
+    for (i, ts) in enumerate(sorted_ts)
+        surface = surfaces[ts]
+        ctx_info = build_condor_ctx(surface; expiry_interval=expiry_interval)
+        if ctx_info === nothing
+            n_skipped_days += 1
+            continue
+        end
+        ctx = ctx_info.ctx
+        expiry = ctx_info.expiry
+        tau = ctx_info.tau
+
+        settlement = get(settlement_spots, expiry, nothing)
+        if settlement === nothing
+            n_skipped_days += 1
+            continue
+        end
+
+        spot_history = get(spot_history_dict, ts, nothing)
+        feats = extract_features(surface, tau; spot_history=spot_history, use_logsig=use_logsig)
+        if feats === nothing
+            n_skipped_days += 1
+            continue
+        end
+        state_features = features_to_vector(feats)
+
+        candidates = enumerate_condor_candidates(
+            ctx;
+            delta_grid=candidate_delta_grid,
+            max_candidates=max_candidates_per_day,
+            wing_delta_abs=wing_delta_abs,
+            target_max_loss=target_max_loss,
+            wing_objective=wing_objective,
+            max_loss_min=max_loss_min,
+            max_loss_max=max_loss_max,
+            min_credit=min_credit,
+            min_delta_gap=min_delta_gap,
+            prefer_symmetric=prefer_symmetric,
+            rate=rate,
+            div_yield=div_yield
+        )
+
+        if isempty(candidates)
+            n_skipped_days += 1
+            continue
+        end
+
+        n_day_candidates = 0
+        for candidate in candidates
+            x = condor_scoring_feature_vector(
+                state_features,
+                ctx,
+                candidate;
+                rate=rate,
+                div_yield=div_yield
+            )
+            x === nothing && continue
+
+            metrics = condor_metrics_from_strikes(
+                ctx,
+                settlement,
+                candidate.short_put_K,
+                candidate.short_call_K,
+                candidate.long_put_K,
+                candidate.long_call_K;
+                rate=rate,
+                div_yield=div_yield
+            )
+            metrics === nothing && continue
+
+            utility = condor_realized_utility(metrics.pnl, metrics.max_loss; objective=utility_objective)
+            isfinite(utility) || continue
+
+            push!(feature_rows, x)
+            push!(utilities, Float32(utility))
+            push!(pnls, Float32(metrics.pnl))
+            push!(max_losses, Float32(metrics.max_loss))
+            push!(timestamps, ts)
+            n_day_candidates += 1
+        end
+
+        if n_day_candidates > 0
+            n_valid_days += 1
+            n_valid_candidates += n_day_candidates
+        else
+            n_skipped_days += 1
+        end
+
+        if verbose && (i % 20 == 0 || i == n_total_days)
+            avg_candidates = n_valid_days == 0 ? 0.0 : n_valid_candidates / n_valid_days
+            println("  Processed $i / $n_total_days days (valid_days: $n_valid_days, skipped_days: $n_skipped_days, avg_candidates/day: $(round(avg_candidates, digits=1)))")
+        end
+    end
+
+    isempty(feature_rows) && error("No valid candidate-level training samples generated")
+
+    X = reduce(hcat, feature_rows)
+    return CondorScoringDataset(X, utilities, pnls, max_losses, timestamps)
 end
 
 """
@@ -844,5 +1376,119 @@ function evaluate_model(
         "true_deltas" => true_deltas,
         "pred_sizes" => pred_sizes,
         "true_sizes" => true_sizes
+    )
+end
+
+"""
+    train_scoring_model!(model, train_data; val_data, epochs, batch_size, learning_rate, patience, verbose)
+        -> (model, history)
+
+Train a scalar regression model for candidate utility prediction.
+"""
+function train_scoring_model!(
+    model,
+    train_data::CondorScoringDataset;
+    val_data::Union{Nothing,CondorScoringDataset}=nothing,
+    epochs::Int=100,
+    batch_size::Int=256,
+    learning_rate::Float64=1e-3,
+    patience::Int=10,
+    verbose::Bool=true
+)
+    opt_state = Flux.setup(Adam(learning_rate), model)
+
+    n_samples = size(train_data.features, 2)
+    best_val_loss = Inf
+    patience_counter = 0
+    best_model_state = nothing
+
+    history = Dict{String,Vector{Float64}}(
+        "train_loss" => Float64[],
+        "val_loss" => Float64[]
+    )
+
+    for epoch in 1:epochs
+        perm = randperm(n_samples)
+        epoch_loss = 0.0
+        n_batches = 0
+
+        Flux.trainmode!(model)
+
+        for batch_start in 1:batch_size:n_samples
+            batch_end = min(batch_start + batch_size - 1, n_samples)
+            batch_idx = perm[batch_start:batch_end]
+
+            x_batch = train_data.features[:, batch_idx]
+            y_batch = train_data.utilities[batch_idx]
+
+            loss, grads = Flux.withgradient(model) do m
+                preds = vec(m(x_batch))
+                mse(preds, y_batch)
+            end
+            Flux.update!(opt_state, model, grads[1])
+
+            epoch_loss += loss
+            n_batches += 1
+        end
+
+        avg_train_loss = epoch_loss / n_batches
+        push!(history["train_loss"], Float64(avg_train_loss))
+
+        val_loss = if val_data === nothing
+            avg_train_loss
+        else
+            Flux.testmode!(model)
+            preds = vec(model(val_data.features))
+            mse(preds, val_data.utilities)
+        end
+        push!(history["val_loss"], Float64(val_loss))
+
+        if val_loss < best_val_loss
+            best_val_loss = val_loss
+            patience_counter = 0
+            best_model_state = Flux.state(model)
+        else
+            patience_counter += 1
+        end
+
+        if verbose && (epoch % 10 == 0 || epoch == 1 || patience_counter >= patience)
+            val_str = val_data !== nothing ? ", val=$(round(val_loss, digits=6))" : ""
+            println("  Epoch $epoch: train=$(round(avg_train_loss, digits=6))$val_str")
+        end
+
+        if patience_counter >= patience
+            verbose && println("  Early stopping at epoch $epoch")
+            break
+        end
+    end
+
+    if best_model_state !== nothing && val_data !== nothing
+        Flux.loadmodel!(model, best_model_state)
+    end
+
+    return model, history
+end
+
+"""
+    evaluate_scoring_model(model, data) -> Dict
+
+Evaluate a trained candidate-scoring model.
+"""
+function evaluate_scoring_model(
+    model,
+    data::CondorScoringDataset
+)::Dict
+    Flux.testmode!(model)
+    preds = vec(model(data.features))
+    y = data.utilities
+
+    mse_val = mean((preds .- y).^2)
+    mae_val = mean(abs.(preds .- y))
+
+    return Dict(
+        "utility_mse" => mse_val,
+        "utility_mae" => mae_val,
+        "pred_utilities" => preds,
+        "true_utilities" => y
     )
 end

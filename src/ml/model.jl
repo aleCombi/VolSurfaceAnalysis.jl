@@ -79,6 +79,35 @@ function create_strike_model(;
 end
 
 """
+    create_scoring_model(; input_dim, hidden_dims, dropout_rate) -> Chain
+
+Create a scalar-regression neural network for candidate scoring.
+The model outputs one value per candidate (predicted utility).
+"""
+function create_scoring_model(;
+    input_dim::Int=N_FEATURES,
+    hidden_dims::Vector{Int}=[128, 64, 32],
+    dropout_rate::Float64=0.2
+)::Chain
+    layers = []
+
+    push!(layers, Dense(input_dim => hidden_dims[1], relu))
+    if dropout_rate > 0
+        push!(layers, Dropout(dropout_rate))
+    end
+
+    for i in 1:(length(hidden_dims)-1)
+        push!(layers, Dense(hidden_dims[i] => hidden_dims[i+1], relu))
+        if dropout_rate > 0
+            push!(layers, Dropout(dropout_rate))
+        end
+    end
+
+    push!(layers, Dense(hidden_dims[end] => 1, identity))
+    return Chain(layers...)
+end
+
+"""
     scale_deltas(raw_output; min_delta, max_delta) -> Vector{Float32}
 
 Scale sigmoid output [0, 1] to valid delta range [min_delta, max_delta].

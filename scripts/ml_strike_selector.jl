@@ -18,6 +18,7 @@ using Printf
 # =============================================================================
 const UNDERLYING_SYMBOL = "SPY"
 const STRATEGY = "condor"  # "strangle" or "condor"
+const MODEL_MODE = :delta   # :delta (current), :score (candidate scoring), :hybrid (score with delta fallback)
 
 # Data periods
 const TRAIN_START = Date(2024, 1, 29)
@@ -50,6 +51,12 @@ const CONDOR_WING_OBJECTIVE = :roi  # :target_max_loss, :roi, or :pnl
 const CONDOR_MAX_LOSS_MIN = 5.0
 const CONDOR_MAX_LOSS_MAX = 30.0
 const CONDOR_MIN_CREDIT = 0.10
+
+# Candidate scoring parameters (used when MODEL_MODE == :score or :hybrid)
+const SCORE_UTILITY_OBJECTIVE = :roi
+const SCORE_DELTA_GRID = collect(0.05:0.015:0.35)
+const SCORE_MAX_CANDIDATES_PER_DAY = 400
+const SCORE_HIDDEN_DIMS = [128, 64, 32]
 
 # Training parameters
 const EPOCHS = 100
@@ -208,6 +215,11 @@ end
 # =============================================================================
 
 function main()
+    if STRATEGY != "condor" && MODEL_MODE != :delta
+        error("MODEL_MODE=$(MODEL_MODE) is only supported for STRATEGY=\"condor\"")
+    end
+    MODEL_MODE in (:delta, :score, :hybrid) || error("MODEL_MODE must be one of :delta, :score, :hybrid")
+
     mkpath(RUN_DIR)
 
     println("=" ^ 80)
@@ -215,6 +227,10 @@ function main()
     println("$strategy_label - TRAINING AND EVALUATION")
     println("=" ^ 80)
     println("Output directory: $RUN_DIR")
+    println("Model mode: $MODEL_MODE")
+    if MODEL_MODE != :delta && STRATEGY == "condor"
+        println("Scoring objective: $SCORE_UTILITY_OBJECTIVE, max candidates/day: $SCORE_MAX_CANDIDATES_PER_DAY")
+    end
     println()
 
     # -------------------------------------------------------------------------
@@ -251,7 +267,29 @@ function main()
     println("-" ^ 40)
     println("  This may take a while...")
 
-    train_data = if STRATEGY == "condor"
+    train_data = if STRATEGY == "condor" && MODEL_MODE != :delta
+        generate_condor_candidate_training_data(
+            train_surfaces,
+            train_settlement_spots,
+            train_spot_history;
+            rate=RISK_FREE_RATE,
+            div_yield=DIV_YIELD,
+            expiry_interval=EXPIRY_INTERVAL,
+            utility_objective=SCORE_UTILITY_OBJECTIVE,
+            candidate_delta_grid=SCORE_DELTA_GRID,
+            max_candidates_per_day=SCORE_MAX_CANDIDATES_PER_DAY,
+            wing_delta_abs=nothing,
+            target_max_loss=(CONDOR_WING_OBJECTIVE == :target_max_loss ? TARGET_MAX_LOSS : nothing),
+            wing_objective=CONDOR_WING_OBJECTIVE,
+            max_loss_min=CONDOR_MAX_LOSS_MIN,
+            max_loss_max=CONDOR_MAX_LOSS_MAX,
+            min_credit=CONDOR_MIN_CREDIT,
+            min_delta_gap=MIN_DELTA_GAP,
+            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
+            use_logsig=USE_LOGSIG,
+            verbose=true
+        )
+    elseif STRATEGY == "condor"
         generate_condor_training_data(
             train_surfaces,
             train_settlement_spots,
@@ -285,8 +323,13 @@ function main()
     println()
     println("  Training samples: $(length(train_data.timestamps))")
     println("  Feature matrix: $(size(train_data.features))")
-    println("  Label range: put_delta=[$(minimum(train_data.raw_deltas[1,:])), $(maximum(train_data.raw_deltas[1,:]))]")
-    println("              call_delta=[$(minimum(train_data.raw_deltas[2,:])), $(maximum(train_data.raw_deltas[2,:]))]")
+    if STRATEGY == "condor" && MODEL_MODE != :delta
+        println("  Utility range: [$(minimum(train_data.utilities)), $(maximum(train_data.utilities))]")
+        println("  Candidate PnL range: [$(minimum(train_data.pnls)), $(maximum(train_data.pnls))]")
+    else
+        println("  Label range: put_delta=[$(minimum(train_data.raw_deltas[1,:])), $(maximum(train_data.raw_deltas[1,:]))]")
+        println("              call_delta=[$(minimum(train_data.raw_deltas[2,:])), $(maximum(train_data.raw_deltas[2,:]))]")
+    end
     println()
 
     # -------------------------------------------------------------------------
@@ -317,7 +360,29 @@ function main()
 
     # Generate validation labels (for evaluation)
     println("  Generating validation labels...")
-    val_data = if STRATEGY == "condor"
+    val_data = if STRATEGY == "condor" && MODEL_MODE != :delta
+        generate_condor_candidate_training_data(
+            val_surfaces,
+            val_settlement_spots,
+            val_spot_history;
+            rate=RISK_FREE_RATE,
+            div_yield=DIV_YIELD,
+            expiry_interval=EXPIRY_INTERVAL,
+            utility_objective=SCORE_UTILITY_OBJECTIVE,
+            candidate_delta_grid=SCORE_DELTA_GRID,
+            max_candidates_per_day=SCORE_MAX_CANDIDATES_PER_DAY,
+            wing_delta_abs=nothing,
+            target_max_loss=(CONDOR_WING_OBJECTIVE == :target_max_loss ? TARGET_MAX_LOSS : nothing),
+            wing_objective=CONDOR_WING_OBJECTIVE,
+            max_loss_min=CONDOR_MAX_LOSS_MIN,
+            max_loss_max=CONDOR_MAX_LOSS_MAX,
+            min_credit=CONDOR_MIN_CREDIT,
+            min_delta_gap=MIN_DELTA_GAP,
+            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
+            use_logsig=USE_LOGSIG,
+            verbose=true
+        )
+    elseif STRATEGY == "condor"
         generate_condor_training_data(
             val_surfaces,
             val_settlement_spots,
@@ -361,23 +426,42 @@ function main()
     X_train_norm, feature_means, feature_stds = normalize_features(train_data.features)
     X_val_norm = apply_normalization(val_data.features, feature_means, feature_stds)
 
-    # Create normalized training data
-    train_data_norm = TrainingDataset(
-        X_train_norm,
-        train_data.labels,
-        train_data.raw_deltas,
-        train_data.pnls,
-        train_data.size_labels,
-        train_data.timestamps
-    )
-    val_data_norm = TrainingDataset(
-        X_val_norm,
-        val_data.labels,
-        val_data.raw_deltas,
-        val_data.pnls,
-        val_data.size_labels,
-        val_data.timestamps
-    )
+    train_data_norm = if STRATEGY == "condor" && MODEL_MODE != :delta
+        CondorScoringDataset(
+            X_train_norm,
+            train_data.utilities,
+            train_data.pnls,
+            train_data.max_losses,
+            train_data.timestamps
+        )
+    else
+        TrainingDataset(
+            X_train_norm,
+            train_data.labels,
+            train_data.raw_deltas,
+            train_data.pnls,
+            train_data.size_labels,
+            train_data.timestamps
+        )
+    end
+    val_data_norm = if STRATEGY == "condor" && MODEL_MODE != :delta
+        CondorScoringDataset(
+            X_val_norm,
+            val_data.utilities,
+            val_data.pnls,
+            val_data.max_losses,
+            val_data.timestamps
+        )
+    else
+        TrainingDataset(
+            X_val_norm,
+            val_data.labels,
+            val_data.raw_deltas,
+            val_data.pnls,
+            val_data.size_labels,
+            val_data.timestamps
+        )
+    end
 
     println("  Feature means: $(round.(feature_means, digits=4))")
     println("  Feature stds:  $(round.(feature_stds, digits=4))")
@@ -388,27 +472,55 @@ function main()
     # -------------------------------------------------------------------------
     println("PHASE 5: Training Neural Network")
     println("-" ^ 40)
-    println("  Architecture: $(N_FEATURES) -> $(HIDDEN_DIMS) -> 3 (deltas + sizing)")
+    input_dim = (STRATEGY == "condor" && MODEL_MODE != :delta) ?
+        n_condor_scoring_features(; use_logsig=USE_LOGSIG) :
+        n_features(; use_logsig=USE_LOGSIG)
+    if size(train_data.features, 1) != input_dim
+        error("Feature dimension mismatch: training matrix has $(size(train_data.features, 1)) rows, expected $input_dim")
+    end
+
+    if STRATEGY == "condor" && MODEL_MODE != :delta
+        println("  Architecture: $(input_dim) -> $(SCORE_HIDDEN_DIMS) -> 1 (utility score)")
+    else
+        println("  Architecture: $(input_dim) -> $(HIDDEN_DIMS) -> 3 (deltas + sizing)")
+    end
     println("  Epochs: $EPOCHS, Batch size: $BATCH_SIZE, LR: $LEARNING_RATE")
     println()
 
-    model = create_strike_model(
-        input_dim=N_FEATURES,
-        hidden_dims=HIDDEN_DIMS,
-        output_dim=3,  # put_delta, call_delta, position_size
-        dropout_rate=DROPOUT_RATE
-    )
-
-    model, history = train_model!(
-        model,
-        train_data_norm;
-        val_data=val_data_norm,
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
-        learning_rate=LEARNING_RATE,
-        patience=PATIENCE,
-        verbose=true
-    )
+    model, history = if STRATEGY == "condor" && MODEL_MODE != :delta
+        scoring_model = create_scoring_model(
+            input_dim=input_dim,
+            hidden_dims=SCORE_HIDDEN_DIMS,
+            dropout_rate=DROPOUT_RATE
+        )
+        train_scoring_model!(
+            scoring_model,
+            train_data_norm;
+            val_data=val_data_norm,
+            epochs=EPOCHS,
+            batch_size=BATCH_SIZE,
+            learning_rate=LEARNING_RATE,
+            patience=PATIENCE,
+            verbose=true
+        )
+    else
+        strike_model = create_strike_model(
+            input_dim=input_dim,
+            hidden_dims=HIDDEN_DIMS,
+            output_dim=3,  # put_delta, call_delta, position_size
+            dropout_rate=DROPOUT_RATE
+        )
+        train_model!(
+            strike_model,
+            train_data_norm;
+            val_data=val_data_norm,
+            epochs=EPOCHS,
+            batch_size=BATCH_SIZE,
+            learning_rate=LEARNING_RATE,
+            patience=PATIENCE,
+            verbose=true
+        )
+    end
     println()
 
     # Save model
@@ -422,16 +534,26 @@ function main()
     println("PHASE 6: Evaluating Model")
     println("-" ^ 40)
 
-    train_eval = evaluate_model(model, train_data_norm)
-    val_eval = evaluate_model(model, val_data_norm)
+    train_eval, val_eval = if STRATEGY == "condor" && MODEL_MODE != :delta
+        evaluate_scoring_model(model, train_data_norm), evaluate_scoring_model(model, val_data_norm)
+    else
+        evaluate_model(model, train_data_norm), evaluate_model(model, val_data_norm)
+    end
 
-    println("  Training Set:")
-    println("    Delta MSE: $(round(train_eval["delta_mse"], digits=6)), MAE: $(round(train_eval["delta_mae"], digits=4))")
-    println("    Size  MSE: $(round(train_eval["size_mse"], digits=6)), MAE: $(round(train_eval["size_mae"], digits=4))")
+    if STRATEGY == "condor" && MODEL_MODE != :delta
+        println("  Training Set:")
+        println("    Utility MSE: $(round(train_eval["utility_mse"], digits=6)), MAE: $(round(train_eval["utility_mae"], digits=4))")
+        println("  Validation Set:")
+        println("    Utility MSE: $(round(val_eval["utility_mse"], digits=6)), MAE: $(round(val_eval["utility_mae"], digits=4))")
+    else
+        println("  Training Set:")
+        println("    Delta MSE: $(round(train_eval["delta_mse"], digits=6)), MAE: $(round(train_eval["delta_mae"], digits=4))")
+        println("    Size  MSE: $(round(train_eval["size_mse"], digits=6)), MAE: $(round(train_eval["size_mae"], digits=4))")
 
-    println("  Validation Set:")
-    println("    Delta MSE: $(round(val_eval["delta_mse"], digits=6)), MAE: $(round(val_eval["delta_mae"], digits=4))")
-    println("    Size  MSE: $(round(val_eval["size_mse"], digits=6)), MAE: $(round(val_eval["size_mae"], digits=4))")
+        println("  Validation Set:")
+        println("    Delta MSE: $(round(val_eval["delta_mse"], digits=6)), MAE: $(round(val_eval["delta_mae"], digits=4))")
+        println("    Size  MSE: $(round(val_eval["size_mse"], digits=6)), MAE: $(round(val_eval["size_mae"], digits=4))")
+    end
     println()
 
     # -------------------------------------------------------------------------
@@ -441,7 +563,61 @@ function main()
     println("-" ^ 40)
 
     # Create ML selector
-    ml_selector = if STRATEGY == "condor"
+    ml_selector = if STRATEGY == "condor" && MODEL_MODE != :delta
+        fallback_selector = if MODEL_MODE == :hybrid
+            ctx -> begin
+                shorts = VolSurfaceAnalysis._delta_strangle_strikes_asymmetric(
+                    ctx,
+                    SHORT_DELTA_ABS,
+                    SHORT_DELTA_ABS;
+                    rate=RISK_FREE_RATE,
+                    div_yield=DIV_YIELD
+                )
+                shorts === nothing && return nothing
+                short_put_K, short_call_K = shorts
+
+                wings = VolSurfaceAnalysis._condor_wings_by_objective(
+                    ctx,
+                    short_put_K,
+                    short_call_K;
+                    objective=CONDOR_WING_OBJECTIVE,
+                    target_max_loss=(CONDOR_WING_OBJECTIVE == :target_max_loss ? TARGET_MAX_LOSS : nothing),
+                    max_loss_min=CONDOR_MAX_LOSS_MIN,
+                    max_loss_max=CONDOR_MAX_LOSS_MAX,
+                    min_credit=CONDOR_MIN_CREDIT,
+                    rate=RISK_FREE_RATE,
+                    div_yield=DIV_YIELD,
+                    min_delta_gap=MIN_DELTA_GAP,
+                    prefer_symmetric=PREFER_SYMMETRIC_WINGS,
+                    debug=false
+                )
+                wings === nothing && return nothing
+                long_put_K, long_call_K = wings
+                return (short_put_K, short_call_K, long_put_K, long_call_K)
+            end
+        else
+            nothing
+        end
+
+        MLCondorScoreSelector(
+            model, feature_means, feature_stds;
+            candidate_delta_grid=SCORE_DELTA_GRID,
+            max_candidates=SCORE_MAX_CANDIDATES_PER_DAY,
+            wing_delta_abs=nothing,
+            target_max_loss=(CONDOR_WING_OBJECTIVE == :target_max_loss ? Float32(TARGET_MAX_LOSS) : nothing),
+            wing_objective=CONDOR_WING_OBJECTIVE,
+            max_loss_min=Float32(CONDOR_MAX_LOSS_MIN),
+            max_loss_max=Float32(CONDOR_MAX_LOSS_MAX),
+            min_credit=Float32(CONDOR_MIN_CREDIT),
+            min_delta_gap=Float32(MIN_DELTA_GAP),
+            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
+            rate=RISK_FREE_RATE,
+            div_yield=DIV_YIELD,
+            spot_history=val_spot_history,
+            use_logsig=USE_LOGSIG,
+            fallback_selector=fallback_selector
+        )
+    elseif STRATEGY == "condor"
         MLCondorStrikeSelector(
             model, feature_means, feature_stds;
             min_delta=0.05f0,
@@ -643,7 +819,15 @@ function main()
         ismissing(v) ? "n/a" : @sprintf("\$%.2f", v)
     end
 
-    ml_label = STRATEGY == "condor" ? "ML Condor" : "ML Selector"
+    ml_label = if STRATEGY == "condor" && MODEL_MODE == :score
+        "ML Condor Score"
+    elseif STRATEGY == "condor" && MODEL_MODE == :hybrid
+        "ML Condor Hybrid"
+    elseif STRATEGY == "condor"
+        "ML Condor"
+    else
+        "ML Selector"
+    end
     base_label = STRATEGY == "condor" ? "Fixed Delta Condor" : "Fixed 15-Delta"
     sigma_label = STRATEGY == "condor" ? "Sigma Condor" : "0.8 Sigma"
     println("$(rpad(ml_label, 20)) | $(rpad(fmt_pnl(metrics_ml.total_pnl), 10)) | $(rpad(fmt_sharpe(metrics_ml.sharpe), 8)) | $(rpad(fmt_winrate(metrics_ml.win_rate), 8)) | $(fmt_avgpnl(metrics_ml.avg_pnl))")
@@ -706,28 +890,46 @@ function main()
     end
 
     # Save training history
-    history_df = DataFrame(
-        Epoch = 1:length(history["train_loss"]),
-        TrainLoss = history["train_loss"],
-        ValLoss = history["val_loss"],
-        TrainDeltaLoss = history["train_delta_loss"],
-        TrainSizeLoss = history["train_size_loss"]
-    )
+    history_df = if haskey(history, "train_delta_loss")
+        DataFrame(
+            Epoch = 1:length(history["train_loss"]),
+            TrainLoss = history["train_loss"],
+            ValLoss = history["val_loss"],
+            TrainDeltaLoss = history["train_delta_loss"],
+            TrainSizeLoss = history["train_size_loss"]
+        )
+    else
+        DataFrame(
+            Epoch = 1:length(history["train_loss"]),
+            TrainLoss = history["train_loss"],
+            ValLoss = history["val_loss"]
+        )
+    end
     history_path = joinpath(RUN_DIR, "training_history.csv")
     CSV.write(history_path, history_df)
     println("Training history saved to: $history_path")
 
     # Save predicted vs actual deltas and sizes for analysis
-    predictions_df = DataFrame(
-        Timestamp = val_data.timestamps,
-        TruePutDelta = val_data.raw_deltas[1, :],
-        TrueCallDelta = val_data.raw_deltas[2, :],
-        PredPutDelta = val_eval["pred_deltas"][1, :],
-        PredCallDelta = val_eval["pred_deltas"][2, :],
-        TrueSize = val_data.size_labels,
-        PredSize = val_eval["pred_sizes"],
-        BestPnL = val_data.pnls
-    )
+    predictions_df = if STRATEGY == "condor" && MODEL_MODE != :delta
+        DataFrame(
+            Timestamp = val_data.timestamps,
+            TrueUtility = val_data.utilities,
+            PredUtility = val_eval["pred_utilities"],
+            CandidatePnL = val_data.pnls,
+            CandidateMaxLoss = val_data.max_losses
+        )
+    else
+        DataFrame(
+            Timestamp = val_data.timestamps,
+            TruePutDelta = val_data.raw_deltas[1, :],
+            TrueCallDelta = val_data.raw_deltas[2, :],
+            PredPutDelta = val_eval["pred_deltas"][1, :],
+            PredCallDelta = val_eval["pred_deltas"][2, :],
+            TrueSize = val_data.size_labels,
+            PredSize = val_eval["pred_sizes"],
+            BestPnL = val_data.pnls
+        )
+    end
     predictions_path = joinpath(RUN_DIR, "predictions.csv")
     CSV.write(predictions_path, predictions_df)
     println("Predictions saved to: $predictions_path")

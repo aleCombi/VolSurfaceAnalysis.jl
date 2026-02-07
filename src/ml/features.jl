@@ -2,10 +2,12 @@
 # Extracts features for ML-based strike selection
 # Includes path signature features from recent spot behavior
 
-# Signature level for path features (level 3 on 2D path gives 14 features)
+# Signature level and path construction settings.
+# We build a 2D base path (normalized time, cumulative log-return) and apply
+# a lead-lag transform before computing signatures.
 const SIGNATURE_LEVEL = 3
-const SIGNATURE_DIM = 14  # For 2D path at level 3: 2 + 4 + 8 = 14
-const _LOGSIG_PATH_DIM = 2
+const _BASE_PATH_DIM = 2
+const _LEADLAG_PATH_DIM = 2 * _BASE_PATH_DIM
 const _LOGSIG_BASIS_CACHE = Dict{Tuple{Int,Int},Any}()
 
 function _logsig_basis(path_dim::Int, level::Int)
@@ -13,6 +15,46 @@ function _logsig_basis(path_dim::Int, level::Int)
     return get!(_LOGSIG_BASIS_CACHE, key) do
         prepare(path_dim, level)
     end
+end
+
+_sig_feature_dim(path_dim::Int, level::Int) = sum(path_dim^k for k in 1:level)
+_logsig_feature_dim(path_dim::Int, level::Int) = length(_logsig_basis(path_dim, level).lynds)
+
+# Signature dims for lead-lag transformed base path.
+const SIGNATURE_DIM = _sig_feature_dim(_LEADLAG_PATH_DIM, SIGNATURE_LEVEL)
+const LOGSIGNATURE_DIM = _logsig_feature_dim(_LEADLAG_PATH_DIM, SIGNATURE_LEVEL)
+
+"""
+    path_feature_dim(; use_logsig=true, level=SIGNATURE_LEVEL) -> Int
+
+Number of path-derived features produced by the configured signature transform.
+"""
+function path_feature_dim(; use_logsig::Bool=true, level::Int=SIGNATURE_LEVEL)::Int
+    return use_logsig ?
+        _logsig_feature_dim(_LEADLAG_PATH_DIM, level) :
+        _sig_feature_dim(_LEADLAG_PATH_DIM, level)
+end
+
+"""
+    n_features(; use_logsig=true, level=SIGNATURE_LEVEL) -> Int
+
+Total input feature count: 15 base features + path-derived features.
+"""
+function n_features(; use_logsig::Bool=true, level::Int=SIGNATURE_LEVEL)::Int
+    return 15 + path_feature_dim(; use_logsig=use_logsig, level=level)
+end
+
+# Candidate-specific condor features appended to state features in scoring mode.
+const N_CONDOR_CANDIDATE_FEATURES = 20
+
+"""
+    n_condor_scoring_features(; use_logsig=true, level=SIGNATURE_LEVEL) -> Int
+
+Total feature count for condor candidate scoring:
+state features + candidate-specific condor features.
+"""
+function n_condor_scoring_features(; use_logsig::Bool=true, level::Int=SIGNATURE_LEVEL)::Int
+    return n_features(; use_logsig=use_logsig, level=level) + N_CONDOR_CANDIDATE_FEATURES
 end
 
 """
@@ -61,7 +103,7 @@ struct SurfaceFeatures
     iv_rv_ratio::Float64
     avg_bid_ask_spread::Float64
     n_strikes::Float64
-    # Path signature (14 for level 3 on 2D)
+    # Path signature (dimension depends on transform + level)
     path_signature::Vector{Float64}
 end
 
@@ -75,14 +117,22 @@ struct SpotHistory
     prices::Vector{Float64}
 end
 
-# 15 base features + 14 signature features = 29 total
-const N_FEATURES = 15 + SIGNATURE_DIM
+# Default feature count uses log-signature path features.
+const N_FEATURES = n_features()
+
+function _build_time_logreturn_path(prices::Vector{Float64})::Matrix{Float64}
+    log_returns = diff(log.(prices))
+    cum_log_returns = cumsum(log_returns)
+    times = range(0.0, 1.0, length=length(cum_log_returns))
+    return hcat(collect(times), cum_log_returns)
+end
 
 """
     compute_path_signature(spot_history::Vector{Float64}, current_spot::Float64; level=SIGNATURE_LEVEL)
         -> Vector{Float64}
 
-Compute the path signature of the recent spot price path.
+Compute the path signature of the recent spot price path after lead-lag
+augmentation.
 
 Uses a 2D path representation: (normalized_time, log_return)
 - Time is normalized to [0, 1]
@@ -94,51 +144,34 @@ Uses a 2D path representation: (normalized_time, log_return)
 - `level::Int`: Truncation level for signature (default: 3)
 
 # Returns
-- Vector of signature features (14 for level 3 on 2D path)
+- Vector of signature features
 """
 function compute_path_signature(
     spot_history::Vector{Float64},
     current_spot::Float64;
     level::Int=SIGNATURE_LEVEL
 )::Vector{Float64}
+    expected_dim = path_feature_dim(; use_logsig=false, level=level)
+
     # Build full price path including current spot
     prices = vcat(spot_history, current_spot)
     n = length(prices)
 
     if n < 3
         # Not enough data for meaningful signature
-        return zeros(Float64, SIGNATURE_DIM)
+        return zeros(Float64, expected_dim)
     end
 
-    # Create 2D path: (normalized_time, cumulative_log_return)
-    # Using cumulative log returns captures both direction and volatility
-    log_returns = diff(log.(prices))
-    cum_log_returns = cumsum(log_returns)
-
-    # Normalize time to [0, 1]
-    times = collect(0.0:(1.0/(n-2)):(1.0))
-
-    # Ensure same length
-    if length(times) != length(cum_log_returns)
-        times = range(0.0, 1.0, length=length(cum_log_returns))
-    end
-
-    # Build path matrix: rows are time points, columns are dimensions
-    path = hcat(collect(times), cum_log_returns)
+    # Build base path from (normalized_time, cumulative_log_return), then apply
+    # lead-lag in ChenSignatures.
+    path = _build_time_logreturn_path(prices)
 
     # Compute signature
     try
-        signature = sig(path, level)
-        # Ensure we have exactly SIGNATURE_DIM features
-        if length(signature) >= SIGNATURE_DIM
-            return signature[1:SIGNATURE_DIM]
-        else
-            # Pad with zeros if needed
-            return vcat(signature, zeros(Float64, SIGNATURE_DIM - length(signature)))
-        end
+        return sig_leadlag(path, level)
     catch e
         # Return zeros on error
-        return zeros(Float64, SIGNATURE_DIM)
+        return zeros(Float64, expected_dim)
     end
 end
 
@@ -146,7 +179,8 @@ end
     compute_logsig_features(spot_history::Vector{Float64}, current_spot::Float64; level=SIGNATURE_LEVEL)
         -> Vector{Float64}
 
-Compute the log-signature of the recent spot price path.
+Compute the log-signature of the recent spot price path after lead-lag
+augmentation.
 Log-signature is more numerically stable and has nicer statistical properties.
 
 # Arguments
@@ -155,36 +189,31 @@ Log-signature is more numerically stable and has nicer statistical properties.
 - `level::Int`: Truncation level
 
 # Returns
-- Vector of log-signature features padded/truncated to `SIGNATURE_DIM`
+- Vector of log-signature features
 """
 function compute_logsig_features(
     spot_history::Vector{Float64},
     current_spot::Float64;
     level::Int=SIGNATURE_LEVEL
 )::Vector{Float64}
+    expected_dim = path_feature_dim(; use_logsig=true, level=level)
+
     prices = vcat(spot_history, current_spot)
     n = length(prices)
 
     if n < 3
-        return zeros(Float64, SIGNATURE_DIM)
+        return zeros(Float64, expected_dim)
     end
 
-    log_returns = diff(log.(prices))
-    cum_log_returns = cumsum(log_returns)
-    times = range(0.0, 1.0, length=length(cum_log_returns))
-    path = hcat(collect(times), cum_log_returns)
+    path = _build_time_logreturn_path(prices)
 
     try
-        # ChenSignatures.logsig expects a precomputed BasisCache, not just level.
-        basis = _logsig_basis(_LOGSIG_PATH_DIM, level)
-        lsig = logsig(path, basis)
-        if length(lsig) >= SIGNATURE_DIM
-            return lsig[1:SIGNATURE_DIM]
-        else
-            return vcat(lsig, zeros(Float64, SIGNATURE_DIM - length(lsig)))
-        end
+        # ChenSignatures.logsig_leadlag expects a basis prepared for the
+        # lead-lag path dimension.
+        basis = _logsig_basis(_LEADLAG_PATH_DIM, level)
+        return logsig_leadlag(path, basis)
     catch e
-        return zeros(Float64, SIGNATURE_DIM)
+        return zeros(Float64, expected_dim)
     end
 end
 
@@ -277,7 +306,7 @@ function extract_features(
     spot_return_1d = 0.0
     spot_return_5d = 0.0
     realized_vol_5d = 0.0
-    path_signature = zeros(Float64, SIGNATURE_DIM)
+    path_signature = zeros(Float64, path_feature_dim(; use_logsig=use_logsig))
 
     if spot_history !== nothing && length(spot_history.prices) >= 2
         times = spot_history.timestamps

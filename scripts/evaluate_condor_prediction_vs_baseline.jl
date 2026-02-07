@@ -229,7 +229,8 @@ function feature_names(; use_logsig::Bool=USE_LOGSIG)
         "n_strikes_scaled"
     ]
     path_prefix = use_logsig ? "logsig_" : "sig_"
-    path = ["$(path_prefix)$(i)" for i in 1:SIGNATURE_DIM]
+    n_path = path_feature_dim(; use_logsig=use_logsig)
+    path = ["$(path_prefix)$(i)" for i in 1:n_path]
     return vcat(base, path)
 end
 
@@ -645,6 +646,10 @@ function main()
     model = model_data[:model]
     feature_means = model_data[:feature_means]
     feature_stds = model_data[:feature_stds]
+    expected_input_dim = n_features(; use_logsig=USE_LOGSIG)
+    if length(feature_means) != expected_input_dim || length(feature_stds) != expected_input_dim
+        error("Model normalization dimension mismatch: model has means/stds length $(length(feature_means))/$(length(feature_stds)), expected $expected_input_dim for use_logsig=$USE_LOGSIG. Retrain the model with current feature settings.")
+    end
     println("  Loaded model and normalization stats")
     println()
 
