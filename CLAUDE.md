@@ -144,11 +144,22 @@ Scripts use `scripts/Project.toml` via `Pkg.activate(@__DIR__)`.
 - `prev_surface` support added for day-over-day surface change features (`delta_atm_iv_1d`, `delta_skew_1d`, `delta_term_slope_1d`)
 
 ### Caveats / Open Questions
-- Train/eval overlap not yet verified -- need clean out-of-sample holdout period
+- Validation set used for both early stopping and final evaluation -- true OOS holdout (Aug 2025-Feb 2026) preserved for future one-shot test
 - SPY × 10 proxy for SPX settlement introduces small tracking error
 - No commissions, slippage, or pin risk modeled beyond synthetic spread
-- Only tested on SPXW Feb-Aug 2025 -- needs different underlyings, periods, vol regimes
 - Fixed 16-delta baseline is naive; an adaptive-delta rule might close some of the gap
+
+## Multi-Symbol Lambda Sweep (2026-02-08)
+
+Full experiment write-up: [`experiments/multi_symbol_lambda_sweep/experiment.md`](experiments/multi_symbol_lambda_sweep/experiment.md)
+
+18 independent runs: 6 underlyings (SPXW, SPY, QQQ, IWM, GLD, TLT) x 3 lambda values (0.0, 0.5, 0.7). Per-symbol TOML configs in [`scripts/configs/`](scripts/configs/).
+
+**Key findings:**
+- ML edge generalizes to equity options: SPXW (+3.2%), SPY (+1.9%), IWM (+1.2%) weighted avg ROI over baseline
+- QQQ marginal (+0.6%), GLD/TLT unprofitable -- no structural variance risk premium to exploit
+- Variance risk premium hierarchy: IWM > SPXW > SPY > QQQ > TLT > GLD
+- Edge is friction-robust across all lambda values
 
 ## Conventions
 

@@ -13,12 +13,12 @@ using BSON
 using Flux
 using Printf
 
+include(joinpath(@__DIR__, "configurations.jl"))
+
 # =============================================================================
 # Configuration
 # =============================================================================
 const UNDERLYING_SYMBOL = "SPXW"
-const SPOT_SYMBOL = "SPY"         # Proxy for SPX index spot
-const SPOT_MULTIPLIER = 10.0      # SPX ≈ SPY × 10
 const STRATEGY = "condor"  # "strangle" or "condor"
 const MODEL_MODE = :delta   # :delta (current), :score (candidate scoring), :hybrid (score with delta fallback)
 
@@ -33,12 +33,10 @@ const VAL_END = Date(2025, 8, 7)
 const TRAIN_ENTRY_TIMES_ET = [Time(10, 0), Time(11, 0), Time(12, 0), Time(13, 0), Time(14, 0)]
 const VAL_ENTRY_TIME_ET = Time(10, 0)  # 10:00 AM Eastern Time
 const EXPIRY_INTERVAL = Day(1)
-const RISK_FREE_RATE = 0.045
-const DIV_YIELD = 0.013
 const QUANTITY = 1.0
 const TAU_TOL = 1e-6
 const MIN_VOLUME = 0
-const SPREAD_LAMBDA = 0.0
+const DEFAULT_SPREAD_LAMBDA = 0.0  # overridable via ARGS[2]
 const SPOT_HISTORY_LOOKBACK_DAYS = 5  # set to `nothing` to use all available history
 const USE_LOGSIG = true
 const SAVE_PLOTS = true
@@ -50,9 +48,6 @@ const LONG_SIGMAS = 1.5
 const TARGET_MAX_LOSS = nothing  # Not used with :roi objective
 const PREFER_SYMMETRIC_WINGS = false
 const CONDOR_WING_OBJECTIVE = :roi  # :target_max_loss, :roi, or :pnl
-const CONDOR_MAX_LOSS_MIN = 50.0
-const CONDOR_MAX_LOSS_MAX = 300.0
-const CONDOR_MIN_CREDIT = 1.0
 
 # Candidate scoring parameters (used when MODEL_MODE == :score or :hybrid)
 const SCORE_UTILITY_OBJECTIVE = :roi
@@ -68,11 +63,7 @@ const PATIENCE = 15
 const HIDDEN_DIMS = [64, 32, 16]
 const DROPOUT_RATE = 0.2
 
-# Output paths
-const RUN_ID = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
-const RUN_DIR    = joinpath(@__DIR__, "runs", "ml_strike_selector_$(RUN_ID)")
-const LATEST_DIR = joinpath(@__DIR__, "latest_runs", "ml_strike_selector")
-const MODEL_PATH = joinpath(RUN_DIR, "strike_selector.bson")
+# Output paths (set in main() after symbol is known)
 
 # =============================================================================
 # Main Training and Evaluation
@@ -83,11 +74,32 @@ function parse_args()
     if length(ARGS) >= 1
         symbol = uppercase(String(ARGS[1]))
     end
-    return symbol
+    spread_lambda = DEFAULT_SPREAD_LAMBDA
+    if length(ARGS) >= 2
+        spread_lambda = parse(Float64, ARGS[2])
+    end
+    cfg = load_symbol_config(symbol)
+    return symbol, spread_lambda, cfg
 end
 
 function main()
-    symbol = parse_args()
+    symbol, SPREAD_LAMBDA, cfg = parse_args()
+
+    # Output paths (include symbol + lambda so parallel runs don't collide)
+    lambda_tag = @sprintf("lambda%.1f", SPREAD_LAMBDA)
+    RUN_ID = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
+    RUN_DIR    = joinpath(@__DIR__, "runs", "ml_strike_selector_$(symbol)_$(lambda_tag)_$(RUN_ID)")
+    LATEST_DIR = joinpath(@__DIR__, "latest_runs", "ml_strike_selector_$(symbol)_$(lambda_tag)")
+    MODEL_PATH = joinpath(RUN_DIR, "strike_selector.bson")
+
+    # Unpack per-symbol config
+    SPOT_SYMBOL = cfg.spot_symbol
+    SPOT_MULTIPLIER = cfg.spot_multiplier
+    DIV_YIELD = cfg.div_yield
+    RISK_FREE_RATE = cfg.risk_free_rate
+    CONDOR_MAX_LOSS_MIN = cfg.condor_max_loss_min
+    CONDOR_MAX_LOSS_MAX = cfg.condor_max_loss_max
+    CONDOR_MIN_CREDIT = cfg.condor_min_credit
 
     if STRATEGY != "condor" && MODEL_MODE != :delta
         error("MODEL_MODE=$(MODEL_MODE) is only supported for STRATEGY=\"condor\"")
@@ -706,9 +718,9 @@ function main()
     end
     println()
 
-    println("-" ^ 70)
-    println("Strategy             | Total P&L  |  Sharpe  | Win Rate |   Avg P&L")
-    println("-" ^ 70)
+    println("-" ^ 90)
+    println("Strategy             | Trades | Total P&L  | Avg ROI  |  Sharpe  | Win Rate |   Avg P&L")
+    println("-" ^ 90)
 
     ml_label = if STRATEGY == "condor" && MODEL_MODE == :score
         "ML Condor Score"
@@ -721,21 +733,27 @@ function main()
     end
     base_label = STRATEGY == "condor" ? "Fixed Delta Condor" : "Fixed 15-Delta"
     sigma_label = STRATEGY == "condor" ? "Sigma Condor" : "0.8 Sigma"
-    println("$(rpad(ml_label, 20)) | $(rpad(fmt_pnl(metrics_ml.total_pnl), 10)) | $(rpad(fmt_ratio(metrics_ml.sharpe), 8)) | $(rpad(fmt_pct(metrics_ml.win_rate), 8)) | $(fmt_currency(metrics_ml.avg_pnl))")
-    println("$(rpad(base_label, 20)) | $(rpad(fmt_pnl(metrics_baseline.total_pnl), 10)) | $(rpad(fmt_ratio(metrics_baseline.sharpe), 8)) | $(rpad(fmt_pct(metrics_baseline.win_rate), 8)) | $(fmt_currency(metrics_baseline.avg_pnl))")
-    println("$(rpad(sigma_label, 20)) | $(rpad(fmt_pnl(metrics_sigma.total_pnl), 10)) | $(rpad(fmt_ratio(metrics_sigma.sharpe), 8)) | $(rpad(fmt_pct(metrics_sigma.win_rate), 8)) | $(fmt_currency(metrics_sigma.avg_pnl))")
-    println("-" ^ 70)
+
+    function _fmt_row(label, m)
+        roi_str = ismissing(m.avg_return) ? "   N/A  " : @sprintf("%7.1f%%", m.avg_return * 100)
+        "$(rpad(label, 20)) | $(lpad(string(m.count), 6)) | $(rpad(fmt_pnl(m.total_pnl), 10)) | $(roi_str) | $(rpad(fmt_ratio(m.sharpe), 8)) | $(rpad(fmt_pct(m.win_rate), 8)) | $(fmt_currency(m.avg_pnl))"
+    end
+    println(_fmt_row(ml_label, metrics_ml))
+    println(_fmt_row(base_label, metrics_baseline))
+    println(_fmt_row(sigma_label, metrics_sigma))
+    println("-" ^ 90)
     println()
 
     # Save results
     results_df = DataFrame(
         Strategy = [ml_label, base_label, sigma_label],
+        Count = [metrics_ml.count, metrics_baseline.count, metrics_sigma.count],
         TotalPnL = [metrics_ml.total_pnl, metrics_baseline.total_pnl, metrics_sigma.total_pnl],
         AvgPnL = [metrics_ml.avg_pnl, metrics_baseline.avg_pnl, metrics_sigma.avg_pnl],
+        AvgROI = [metrics_ml.avg_return, metrics_baseline.avg_return, metrics_sigma.avg_return],
         WinRate = [metrics_ml.win_rate, metrics_baseline.win_rate, metrics_sigma.win_rate],
         Sharpe = [metrics_ml.sharpe, metrics_baseline.sharpe, metrics_sigma.sharpe],
-        Sortino = [metrics_ml.sortino, metrics_baseline.sortino, metrics_sigma.sortino],
-        Count = [metrics_ml.count, metrics_baseline.count, metrics_sigma.count]
+        Sortino = [metrics_ml.sortino, metrics_baseline.sortino, metrics_sigma.sortino]
     )
     results_path = joinpath(RUN_DIR, "comparison_results.csv")
     CSV.write(results_path, results_df)

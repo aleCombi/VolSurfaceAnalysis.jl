@@ -1,0 +1,5 @@
+spot_symbol = "QQQ"
+div_yield = 0.006
+condor_max_loss_min = 5.0
+condor_max_loss_max = 30.0
+condor_min_credit = 0.10

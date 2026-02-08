@@ -13,12 +13,12 @@ using Flux
 using Printf
 using BSON
 
+include(joinpath(@__DIR__, "configurations.jl"))
+
 # =============================================================================
 # Configuration
 # =============================================================================
 const UNDERLYING_SYMBOL = "SPXW"
-const SPOT_SYMBOL = "SPY"         # Proxy for SPX index spot
-const SPOT_MULTIPLIER = 10.0      # SPX ≈ SPY × 10
 
 # Evaluation period defaults (override with CLI args: start end [model_path] [model_mode] [symbol])
 const DEFAULT_EVAL_START = Date(2025, 2, 7)
@@ -27,8 +27,6 @@ const ENTRY_TIME_ET = Time(10, 0)
 
 # Strategy and data settings
 const EXPIRY_INTERVAL = Day(1)
-const RISK_FREE_RATE = 0.045
-const DIV_YIELD = 0.013
 const MIN_VOLUME = 0
 const SPREAD_LAMBDA = 0.0
 const SPOT_HISTORY_LOOKBACK_DAYS = 5
@@ -38,13 +36,9 @@ const USE_LOGSIG = true
 const TARGET_MAX_LOSS = nothing  # Not used with :roi objective
 const MIN_DELTA_GAP = 0.01
 const PREFER_SYMMETRIC_WINGS = false
-const CONSTRAINED_SUPER_MAX_LOSS_TOL = 10.0
 
 # Candidate scoring policy (used when evaluating score-model checkpoints)
 const SCORE_WING_OBJECTIVE = :roi
-const SCORE_MAX_LOSS_MIN = 50.0
-const SCORE_MAX_LOSS_MAX = 300.0
-const SCORE_MIN_CREDIT = 1.0
 const SCORE_DELTA_GRID = collect(0.05:0.015:0.35)
 const SCORE_MAX_CANDIDATES_PER_DAY = 400
 
@@ -488,11 +482,23 @@ function parse_args()
         symbol = uppercase(String(ARGS[5]))
     end
 
-    return eval_start, eval_end, model_path, model_mode_override, symbol
+    cfg = load_symbol_config(symbol)
+    return eval_start, eval_end, model_path, model_mode_override, symbol, cfg
 end
 
 function main()
-    eval_start, eval_end, model_path, model_mode_override, symbol = parse_args()
+    eval_start, eval_end, model_path, model_mode_override, symbol, cfg = parse_args()
+
+    # Unpack per-symbol config
+    SPOT_SYMBOL = cfg.spot_symbol
+    SPOT_MULTIPLIER = cfg.spot_multiplier
+    DIV_YIELD = cfg.div_yield
+    RISK_FREE_RATE = cfg.risk_free_rate
+    SCORE_MAX_LOSS_MIN = cfg.condor_max_loss_min
+    SCORE_MAX_LOSS_MAX = cfg.condor_max_loss_max
+    SCORE_MIN_CREDIT = cfg.condor_min_credit
+    CONSTRAINED_SUPER_MAX_LOSS_TOL = cfg.constrained_super_max_loss_tol
+
     isfile(model_path) || error("Model file not found: $model_path")
     mkpath(RUN_DIR)
 
