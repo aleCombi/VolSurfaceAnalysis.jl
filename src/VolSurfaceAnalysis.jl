@@ -125,6 +125,9 @@ export BacktestMetrics, PerformanceMetrics
 export aggregate_pnl, backtest_metrics, performance_metrics, profit_curve, average_entry_spread
 export condor_group_stats, condor_trade_table, condor_max_loss_by_key
 export settlement_zone_analysis, settlement_zone_summary
+export fmt_pnl, fmt_ratio, fmt_pct, fmt_currency, fmt_metric
+export metrics_to_dataframe, pnl_results_dataframe
+export format_backtest_report
 export save_pnl_distribution, save_equity_curve, save_pnl_and_equity_curve, save_profit_curve, save_spot_curve
 
 # Strategies
@@ -156,6 +159,7 @@ export generate_training_data, train_model!, evaluate_model
 export compute_size_labels
 export simulate_condor_pnl, find_optimal_condor_deltas, generate_condor_training_data
 export build_condor_ctx, condor_entry_metrics_from_strikes, condor_metrics_from_strikes
+export resolve_condor_from_deltas
 export enumerate_condor_candidates, condor_scoring_feature_vector
 export condor_realized_utility, generate_condor_candidate_training_data
 export train_scoring_model!, evaluate_scoring_model

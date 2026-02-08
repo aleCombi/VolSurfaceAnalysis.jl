@@ -160,9 +160,7 @@ function run_symbol_backtest(symbol::String)
 
     metrics = performance_metrics(positions, pnls; margin_by_key=condor_max_loss_by_key(positions))
 
-    attempted = Set{Tuple{DateTime, DateTime}}()
-    pnl_by_key = Dict{Tuple{DateTime, DateTime}, Float64}()
-
+    # Build per-leg trades CSV (script-specific detail)
     trades_csv = DataFrame(
         EntryTime = DateTime[],
         Expiry = DateTime[],
@@ -171,17 +169,8 @@ function run_symbol_backtest(symbol::String)
         Direction = Int[],
         PnL = Float64[]
     )
-
     for (pos, pnl) in zip(positions, pnls)
-        key = (pos.entry_timestamp, pos.trade.expiry)
-        push!(attempted, key)
-
-        if ismissing(pnl)
-            continue
-        end
-
-        pnl_by_key[key] = get(pnl_by_key, key, 0.0) + pnl
-
+        ismissing(pnl) && continue
         push!(trades_csv, (
             pos.entry_timestamp,
             pos.trade.expiry,
@@ -192,78 +181,46 @@ function run_symbol_backtest(symbol::String)
         ))
     end
 
-    realized_keys = sort(collect(keys(pnl_by_key)); by=k -> k[1])
-    realized = [pnl_by_key[k] for k in realized_keys]
+    # Aggregate PnL and build results
+    pnl_by_key, missing_n = aggregate_pnl(positions, pnls)
+    realized = [pnl_by_key[k] for k in sort(collect(keys(pnl_by_key)); by=k -> k[1])]
+    n_attempted = length(pnl_by_key) + missing_n
+    results_csv = pnl_results_dataframe(positions, pnls)
 
-    missing_n = length(attempted) - length(realized_keys)
     total_pnl = isempty(realized) ? 0.0 : sum(realized)
-
-    results_csv = DataFrame(EntryDate=Date[], PnL=Float64[], Result=String[])
-    for key in realized_keys
-        pnl_val = pnl_by_key[key]
-        push!(results_csv, (Date(key[1]), pnl_val, pnl_val > 0 ? "Win" : "Loss"))
-    end
-
     println("  Total P&L: \$$(round(total_pnl, digits=2))")
     println("  Missing settlements: $missing_n")
 
-    lines = String[]
-    push!(lines, "=" ^ 80)
-    push!(lines, "POLYGON IRON CONDOR BACKTEST RESULTS")
-    push!(lines, "=" ^ 80)
-    push!(lines, "")
-    push!(lines, "WARNING: SYNTHETIC BID/ASK SPREADS (CONSERVATIVE)")
-    push!(lines, "  bid = low, ask = high from minute bars")
-    push!(lines, "")
-    push!(lines, "Underlying: $symbol")
-    push!(lines, "Data range: $(first(filtered_dates)) to $(last(filtered_dates))")
-    push!(lines, "Excluded dates >= $END_DATE_CUTOFF")
-    push!(lines, "")
-    push!(lines, "Strategy Parameters:")
-    push!(lines, "  Entry time: $(ENTRY_TIME_ET) ET (DST-aware)")
-    push!(lines, "  Expiry: ~$EXPIRY_INTERVAL from entry")
-    push!(lines, "  Short legs: $(round(SHORT_DELTA_ABS * 100, digits=0)) delta")
-    push!(lines, "  Wing selection: $(WING_OBJECTIVE) (max_loss \$$(CONDOR_MAX_LOSS_MIN)-\$$(CONDOR_MAX_LOSS_MAX), min credit \$$(CONDOR_MIN_CREDIT))")
-    push!(lines, "  Quantity per leg: $QUANTITY")
-    push!(lines, "")
-    push!(lines, "Results:")
-    push!(lines, "  Scheduled entries: $(length(schedule))")
-    push!(lines, "  Actual condors: $(length(attempted))")
-    push!(lines, "  Total positions: $(length(positions))")
-    push!(lines, "  Missing settlements: $missing_n")
-    push!(lines, "")
-    push!(lines, "P&L (per condor):")
-    push!(lines, "  Total: \$$(round(total_pnl, digits=2))")
-    push!(lines, "  Count: $(length(realized))")
-
-    if !isempty(realized)
-        avg_pnl = total_pnl / length(realized)
-        push!(lines, "  Average: \$$(round(avg_pnl, digits=2))")
-        push!(lines, "  Min: \$$(round(minimum(realized), digits=2))")
-        push!(lines, "  Max: \$$(round(maximum(realized), digits=2))")
-        winners = count(x -> x > 0, realized)
-        win_rate = winners / length(realized) * 100
-        push!(lines, "  Winners: $winners / $(length(realized)) ($(round(win_rate, digits=1))%)")
-    end
-
-    push!(lines, "")
-    push!(lines, "Performance Metrics (return basis: per-condor max loss):")
-    push!(lines, "  Total ROI: $(metrics.total_roi === missing ? "n/a" : string(round(metrics.total_roi * 100, digits=2)) * "%")")
-    push!(lines, "  Annualized ROI (CAGR): $(metrics.annualized_roi_cagr === missing ? "n/a" : string(round(metrics.annualized_roi_cagr * 100, digits=2)) * "%")")
-    push!(lines, "  Sharpe: $(metrics.sharpe === missing ? "n/a" : string(round(metrics.sharpe, digits=2)))")
-    push!(lines, "  Sortino: $(metrics.sortino === missing ? "n/a" : string(round(metrics.sortino, digits=2)))")
-    push!(lines, "  Win Rate: $(metrics.win_rate === missing ? "n/a" : string(round(metrics.win_rate * 100, digits=1)) * "%")")
-    push!(lines, "")
-    push!(lines, "=" ^ 80)
+    # Generate text report
+    lines = format_backtest_report(
+        metrics;
+        title="POLYGON IRON CONDOR BACKTEST RESULTS",
+        subtitle="WARNING: SYNTHETIC BID/ASK SPREADS (CONSERVATIVE)\n  bid = low, ask = high from minute bars",
+        params=[
+            "Underlying" => "$symbol",
+            "Data range" => "$(first(filtered_dates)) to $(last(filtered_dates))",
+            "Excluded dates" => ">= $END_DATE_CUTOFF",
+            "Entry time" => "$(ENTRY_TIME_ET) ET (DST-aware)",
+            "Expiry" => "~$EXPIRY_INTERVAL from entry",
+            "Short legs" => "$(round(SHORT_DELTA_ABS * 100, digits=0)) delta",
+            "Wing selection" => "$(WING_OBJECTIVE) (max_loss \$$(CONDOR_MAX_LOSS_MIN)-\$$(CONDOR_MAX_LOSS_MAX), min credit \$$(CONDOR_MIN_CREDIT))",
+            "Quantity per leg" => "$QUANTITY"
+        ],
+        realized_pnls=realized,
+        n_scheduled=length(schedule),
+        n_attempted=n_attempted,
+        n_positions=length(positions),
+        n_missing=missing_n,
+        margin_description="per-condor max loss"
+    )
 
     # Print prominent ROI summary to terminal
-    _fmt(v, pct) = v === missing ? "n/a" : pct ? "$(round(v * 100, digits=2))%" : "$(round(v, digits=2))"
     println()
     println("  ===== ROI SUMMARY ($symbol) =====")
-    println("  Total ROI:      $(_fmt(metrics.total_roi, true))")
-    println("  CAGR:           $(_fmt(metrics.annualized_roi_cagr, true))")
-    println("  Sharpe/Sortino: $(_fmt(metrics.sharpe, false)) / $(_fmt(metrics.sortino, false))")
-    println("  Win Rate:       $(_fmt(metrics.win_rate, true))")
+    println("  Total ROI:      $(fmt_metric(metrics.total_roi; pct=true))")
+    println("  CAGR:           $(fmt_metric(metrics.annualized_roi_cagr; pct=true))")
+    println("  Sharpe/Sortino: $(fmt_metric(metrics.sharpe)) / $(fmt_metric(metrics.sortino))")
+    println("  Win Rate:       $(fmt_metric(metrics.win_rate; pct=true))")
     println("  =================================")
 
     results_txt_path = joinpath(RUN_DIR, "results_$(symbol)_results.txt")
@@ -282,34 +239,7 @@ function run_symbol_backtest(symbol::String)
     println("  Saved results to $pnl_path")
 
     metrics_csv_path = joinpath(RUN_DIR, "results_$(symbol)_metrics.csv")
-    metrics_df = DataFrame(
-        Metric = [
-            "count", "missing", "total_pnl", "avg_pnl", "min_pnl", "max_pnl", "win_rate",
-            "avg_bid_ask_spread_rel",
-            "total_roi", "annualized_roi_simple", "annualized_roi_cagr",
-            "avg_return", "volatility", "sharpe", "sortino",
-            "duration_days", "duration_years"
-        ],
-        Value = [
-            metrics.count,
-            metrics.missing,
-            metrics.total_pnl,
-            metrics.avg_pnl,
-            metrics.min_pnl,
-            metrics.max_pnl,
-            metrics.win_rate,
-            metrics.avg_bid_ask_spread_rel,
-            metrics.total_roi,
-            metrics.annualized_roi_simple,
-            metrics.annualized_roi_cagr,
-            metrics.avg_return,
-            metrics.volatility,
-            metrics.sharpe,
-            metrics.sortino,
-            metrics.duration_days,
-            metrics.duration_years
-        ]
-    )
+    metrics_df = metrics_to_dataframe(metrics)
     CSV.write(metrics_csv_path, metrics_df)
     println("  Metrics saved to $metrics_csv_path")
 

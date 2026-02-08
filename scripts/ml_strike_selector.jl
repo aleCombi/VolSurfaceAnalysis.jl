@@ -710,19 +710,6 @@ function main()
     println("Strategy             | Total P&L  |  Sharpe  | Win Rate |   Avg P&L")
     println("-" ^ 70)
 
-    function fmt_pnl(v)
-        ismissing(v) ? "n/a" : @sprintf("\$%.0f", v)
-    end
-    function fmt_sharpe(v)
-        ismissing(v) ? "n/a" : @sprintf("%.2f", v)
-    end
-    function fmt_winrate(v)
-        ismissing(v) ? "n/a" : @sprintf("%.1f%%", v * 100)
-    end
-    function fmt_avgpnl(v)
-        ismissing(v) ? "n/a" : @sprintf("\$%.2f", v)
-    end
-
     ml_label = if STRATEGY == "condor" && MODEL_MODE == :score
         "ML Condor Score"
     elseif STRATEGY == "condor" && MODEL_MODE == :hybrid
@@ -734,9 +721,9 @@ function main()
     end
     base_label = STRATEGY == "condor" ? "Fixed Delta Condor" : "Fixed 15-Delta"
     sigma_label = STRATEGY == "condor" ? "Sigma Condor" : "0.8 Sigma"
-    println("$(rpad(ml_label, 20)) | $(rpad(fmt_pnl(metrics_ml.total_pnl), 10)) | $(rpad(fmt_sharpe(metrics_ml.sharpe), 8)) | $(rpad(fmt_winrate(metrics_ml.win_rate), 8)) | $(fmt_avgpnl(metrics_ml.avg_pnl))")
-    println("$(rpad(base_label, 20)) | $(rpad(fmt_pnl(metrics_baseline.total_pnl), 10)) | $(rpad(fmt_sharpe(metrics_baseline.sharpe), 8)) | $(rpad(fmt_winrate(metrics_baseline.win_rate), 8)) | $(fmt_avgpnl(metrics_baseline.avg_pnl))")
-    println("$(rpad(sigma_label, 20)) | $(rpad(fmt_pnl(metrics_sigma.total_pnl), 10)) | $(rpad(fmt_sharpe(metrics_sigma.sharpe), 8)) | $(rpad(fmt_winrate(metrics_sigma.win_rate), 8)) | $(fmt_avgpnl(metrics_sigma.avg_pnl))")
+    println("$(rpad(ml_label, 20)) | $(rpad(fmt_pnl(metrics_ml.total_pnl), 10)) | $(rpad(fmt_ratio(metrics_ml.sharpe), 8)) | $(rpad(fmt_pct(metrics_ml.win_rate), 8)) | $(fmt_currency(metrics_ml.avg_pnl))")
+    println("$(rpad(base_label, 20)) | $(rpad(fmt_pnl(metrics_baseline.total_pnl), 10)) | $(rpad(fmt_ratio(metrics_baseline.sharpe), 8)) | $(rpad(fmt_pct(metrics_baseline.win_rate), 8)) | $(fmt_currency(metrics_baseline.avg_pnl))")
+    println("$(rpad(sigma_label, 20)) | $(rpad(fmt_pnl(metrics_sigma.total_pnl), 10)) | $(rpad(fmt_ratio(metrics_sigma.sharpe), 8)) | $(rpad(fmt_pct(metrics_sigma.win_rate), 8)) | $(fmt_currency(metrics_sigma.avg_pnl))")
     println("-" ^ 70)
     println()
 

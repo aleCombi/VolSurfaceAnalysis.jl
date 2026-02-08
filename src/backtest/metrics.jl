@@ -4,6 +4,7 @@
 using Dates
 using Statistics
 using DataFrames
+using Printf
 
 """
     BacktestMetrics
@@ -661,4 +662,152 @@ function settlement_zone_summary(zone_df::DataFrame)::DataFrame
     sort!(zone_counts, :zone, by=z -> findfirst(==(z), zone_order))
 
     return zone_counts
+end
+
+# =============================================================================
+# Formatting helpers
+# =============================================================================
+
+"""Format a P&L value for display (e.g., "\$1234")."""
+fmt_pnl(v) = ismissing(v) ? "n/a" : @sprintf("\$%.0f", v)
+
+"""Format a ratio (Sharpe, Sortino) for display (e.g., "1.23")."""
+fmt_ratio(v) = ismissing(v) ? "n/a" : @sprintf("%.2f", v)
+
+"""Format a fraction as a percentage for display (e.g., "65.0%")."""
+fmt_pct(v) = ismissing(v) ? "n/a" : @sprintf("%.1f%%", v * 100)
+
+"""Format a currency value with cents for display (e.g., "\$1.23")."""
+fmt_currency(v) = ismissing(v) ? "n/a" : @sprintf("\$%.2f", v)
+
+"""Format a metric value, optionally as percentage (e.g., "12.34%" or "1.23")."""
+fmt_metric(v; pct::Bool=false) = ismissing(v) ? "n/a" : pct ? "$(round(v * 100, digits=2))%" : "$(round(v, digits=2))"
+
+# =============================================================================
+# DataFrame serialization
+# =============================================================================
+
+"""
+    metrics_to_dataframe(m::PerformanceMetrics) -> DataFrame
+
+Serialize a PerformanceMetrics struct into a two-column DataFrame
+with columns `Metric::String` and `Value::Any`. Suitable for CSV export.
+"""
+function metrics_to_dataframe(m::PerformanceMetrics)::DataFrame
+    return DataFrame(
+        Metric = [
+            "count", "missing", "total_pnl", "avg_pnl", "min_pnl", "max_pnl", "win_rate",
+            "avg_bid_ask_spread_rel",
+            "total_roi", "annualized_roi_simple", "annualized_roi_cagr",
+            "avg_return", "volatility", "sharpe", "sortino",
+            "duration_days", "duration_years"
+        ],
+        Value = Any[
+            m.count, m.missing, m.total_pnl, m.avg_pnl, m.min_pnl, m.max_pnl, m.win_rate,
+            m.avg_bid_ask_spread_rel,
+            m.total_roi, m.annualized_roi_simple, m.annualized_roi_cagr,
+            m.avg_return, m.volatility, m.sharpe, m.sortino,
+            m.duration_days, m.duration_years
+        ]
+    )
+end
+
+"""
+    pnl_results_dataframe(positions, pnls; key=default_key) -> DataFrame
+
+Aggregate per-position P&L into grouped trades using `aggregate_pnl`,
+then return a DataFrame with columns `EntryDate`, `PnL`, `Result` ("Win"/"Loss")
+sorted by entry date.
+"""
+function pnl_results_dataframe(
+    positions::Vector{Position},
+    pnls::Vector{Union{Missing,Float64}};
+    key::Function = pos -> (pos.entry_timestamp, pos.trade.expiry)
+)::DataFrame
+    pnl_by_key, _ = aggregate_pnl(positions, pnls; key=key)
+    realized_keys = sort(collect(keys(pnl_by_key)); by=k -> k[1])
+
+    results = DataFrame(EntryDate=Date[], PnL=Float64[], Result=String[])
+    for k in realized_keys
+        pnl_val = pnl_by_key[k]
+        push!(results, (Date(k[1]), pnl_val, pnl_val > 0 ? "Win" : "Loss"))
+    end
+    return results
+end
+
+# =============================================================================
+# Report generation
+# =============================================================================
+
+"""
+    format_backtest_report(metrics; title, ...) -> Vector{String}
+
+Generate a standardized text report from backtest results. Returns a vector of
+lines. Strategy-specific parameters are passed as `params` key-value pairs.
+"""
+function format_backtest_report(
+    metrics::PerformanceMetrics;
+    title::String,
+    subtitle::String="",
+    params::Vector{Pair{String,String}}=Pair{String,String}[],
+    realized_pnls::Vector{Float64}=Float64[],
+    n_scheduled::Int=0,
+    n_attempted::Int=0,
+    n_positions::Int=0,
+    n_missing::Int=0,
+    margin_description::String="per-condor max loss"
+)::Vector{String}
+    lines = String[]
+    push!(lines, "=" ^ 80)
+    push!(lines, title)
+    push!(lines, "=" ^ 80)
+    push!(lines, "")
+
+    if !isempty(subtitle)
+        for sub_line in split(subtitle, "\n")
+            push!(lines, sub_line)
+        end
+        push!(lines, "")
+    end
+
+    if !isempty(params)
+        for (k, v) in params
+            push!(lines, "  $k: $v")
+        end
+        push!(lines, "")
+    end
+
+    push!(lines, "Results:")
+    n_scheduled > 0 && push!(lines, "  Scheduled entries: $n_scheduled")
+    n_attempted > 0 && push!(lines, "  Actual trades: $n_attempted")
+    n_positions > 0 && push!(lines, "  Total positions: $n_positions")
+    n_missing > 0 && push!(lines, "  Missing settlements: $n_missing")
+    push!(lines, "")
+
+    total_pnl = isempty(realized_pnls) ? 0.0 : sum(realized_pnls)
+    push!(lines, "P&L:")
+    push!(lines, "  Total: \$$(round(total_pnl, digits=2))")
+    push!(lines, "  Count: $(length(realized_pnls))")
+
+    if !isempty(realized_pnls)
+        avg_pnl = total_pnl / length(realized_pnls)
+        push!(lines, "  Average: \$$(round(avg_pnl, digits=2))")
+        push!(lines, "  Min: \$$(round(minimum(realized_pnls), digits=2))")
+        push!(lines, "  Max: \$$(round(maximum(realized_pnls), digits=2))")
+        winners = count(x -> x > 0, realized_pnls)
+        win_rate = winners / length(realized_pnls) * 100
+        push!(lines, "  Winners: $winners / $(length(realized_pnls)) ($(round(win_rate, digits=1))%)")
+    end
+
+    push!(lines, "")
+    push!(lines, "Performance Metrics (return basis: $margin_description):")
+    push!(lines, "  Total ROI: $(fmt_metric(metrics.total_roi; pct=true))")
+    push!(lines, "  Annualized ROI (CAGR): $(fmt_metric(metrics.annualized_roi_cagr; pct=true))")
+    push!(lines, "  Sharpe: $(fmt_ratio(metrics.sharpe))")
+    push!(lines, "  Sortino: $(fmt_ratio(metrics.sortino))")
+    push!(lines, "  Win Rate: $(fmt_pct(metrics.win_rate))")
+    push!(lines, "")
+    push!(lines, "=" ^ 80)
+
+    return lines
 end

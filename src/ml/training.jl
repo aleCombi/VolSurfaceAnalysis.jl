@@ -394,6 +394,27 @@ function build_condor_ctx(
     return (ctx=env.ctx, expiry=env.expiry, tau=env.tau)
 end
 
+"""
+    build_condor_ctx(surface, expiry, tau) -> Union{Nothing, NamedTuple}
+
+Build a condor context from an explicit expiry and tau (no search needed).
+Returns a NamedTuple with `(surface, expiry, tau, recs, put_strikes, call_strikes)`
+or `nothing` if insufficient data.
+"""
+function build_condor_ctx(
+    surface::VolatilitySurface,
+    expiry::DateTime,
+    tau::Float64
+)::Union{Nothing,NamedTuple}
+    recs = filter(r -> r.expiry == expiry, surface.records)
+    isempty(recs) && return nothing
+    put_strikes = sort(unique(r.strike for r in recs if r.option_type == Put))
+    call_strikes = sort(unique(r.strike for r in recs if r.option_type == Call))
+    (isempty(put_strikes) || isempty(call_strikes)) && return nothing
+    return (surface=surface, expiry=expiry, tau=tau, recs=recs,
+            put_strikes=put_strikes, call_strikes=call_strikes)
+end
+
 function _leg_relative_spread(rec::OptionRecord)::Float64
     if ismissing(rec.bid_price) || ismissing(rec.ask_price)
         return 0.0
@@ -523,6 +544,70 @@ function condor_metrics_from_strikes(
         short_call_delta=entry.short_call_delta,
         long_put_delta=entry.long_put_delta,
         long_call_delta=entry.long_call_delta
+    )
+end
+
+"""
+    resolve_condor_from_deltas(ctx, settlement_spot, put_delta, call_delta; ...) -> Union{Nothing, NamedTuple}
+
+Convenience function: given short-leg deltas, find short strikes via
+`_delta_strangle_strikes_asymmetric`, select wings via `_condor_wings_by_objective`,
+and compute realized P&L via `condor_metrics_from_strikes`.
+
+Returns `(short_put_K, short_call_K, long_put_K, long_call_K, pnl, max_loss)` or `nothing`.
+"""
+function resolve_condor_from_deltas(
+    ctx,
+    settlement_spot::Float64,
+    put_delta::Float64,
+    call_delta::Float64;
+    wing_objective::Symbol=:roi,
+    target_max_loss::Union{Nothing,Float64}=nothing,
+    max_loss_min::Float64=0.0,
+    max_loss_max::Float64=Inf,
+    min_credit::Float64=0.0,
+    min_delta_gap::Float64=0.08,
+    prefer_symmetric::Bool=false,
+    rate::Float64=DEFAULT_RATE,
+    div_yield::Float64=DEFAULT_DIV_YIELD
+)::Union{Nothing,NamedTuple}
+    shorts = _delta_strangle_strikes_asymmetric(
+        ctx, put_delta, call_delta;
+        rate=rate, div_yield=div_yield
+    )
+    shorts === nothing && return nothing
+    short_put_K, short_call_K = shorts
+
+    wings = _condor_wings_by_objective(
+        ctx, short_put_K, short_call_K;
+        objective=wing_objective,
+        target_max_loss=target_max_loss,
+        max_loss_min=max_loss_min,
+        max_loss_max=max_loss_max,
+        min_credit=min_credit,
+        rate=rate,
+        div_yield=div_yield,
+        min_delta_gap=min_delta_gap,
+        prefer_symmetric=prefer_symmetric,
+        debug=false
+    )
+    wings === nothing && return nothing
+    long_put_K, long_call_K = wings
+
+    metrics = condor_metrics_from_strikes(
+        ctx, settlement_spot,
+        short_put_K, short_call_K, long_put_K, long_call_K;
+        rate=rate, div_yield=div_yield
+    )
+    metrics === nothing && return nothing
+
+    return (
+        short_put_K=short_put_K,
+        short_call_K=short_call_K,
+        long_put_K=long_put_K,
+        long_call_K=long_call_K,
+        pnl=metrics.pnl,
+        max_loss=metrics.max_loss
     )
 end
 

@@ -241,134 +241,28 @@ function build_feature_stats_df(
     )
 end
 
-function build_condor_ctx(
-    surface::VolatilitySurface,
-    expiry::DateTime,
-    tau::Float64
-)::Union{Nothing,NamedTuple}
-    recs = filter(r -> r.expiry == expiry, surface.records)
-    isempty(recs) && return nothing
+# build_condor_ctx, condor_metrics_from_strikes, and resolve_condor_from_deltas
+# are now imported from VolSurfaceAnalysis (src/ml/training.jl).
+# The script's RISK_FREE_RATE/DIV_YIELD match src DEFAULT_RATE/DEFAULT_DIV_YIELD.
 
-    put_strikes = sort(unique(r.strike for r in recs if r.option_type == Put))
-    call_strikes = sort(unique(r.strike for r in recs if r.option_type == Call))
-    (isempty(put_strikes) || isempty(call_strikes)) && return nothing
-
-    return (
-        surface=surface,
-        expiry=expiry,
-        tau=tau,
-        recs=recs,
-        put_strikes=put_strikes,
-        call_strikes=call_strikes
-    )
-end
-
-function find_rec_by_strike(recs::Vector{OptionRecord}, K::Float64)::Union{Nothing,OptionRecord}
-    for r in recs
-        r.strike == K && return r
-    end
-    return nothing
-end
-
-function condor_metrics_from_strikes(
-    ctx,
-    settlement_spot::Float64,
-    short_put_K::Float64,
-    short_call_K::Float64,
-    long_put_K::Float64,
-    long_call_K::Float64
-)::Union{Nothing,NamedTuple}
-    put_recs = filter(r -> r.option_type == Put, ctx.recs)
-    call_recs = filter(r -> r.option_type == Call, ctx.recs)
-
-    sp = find_rec_by_strike(put_recs, short_put_K)
-    sc = find_rec_by_strike(call_recs, short_call_K)
-    lp = find_rec_by_strike(put_recs, long_put_K)
-    lc = find_rec_by_strike(call_recs, long_call_K)
-    (sp === nothing || sc === nothing || lp === nothing || lc === nothing) && return nothing
-
-    if ismissing(sp.bid_price) || ismissing(sc.bid_price) || ismissing(lp.ask_price) || ismissing(lc.ask_price)
-        return nothing
-    end
-
-    net_credit = (sp.bid_price + sc.bid_price - lp.ask_price - lc.ask_price) * ctx.surface.spot
-    put_payoff = -max(short_put_K - settlement_spot, 0.0) + max(long_put_K - settlement_spot, 0.0)
-    call_payoff = -max(settlement_spot - short_call_K, 0.0) + max(settlement_spot - long_call_K, 0.0)
-    pnl = put_payoff + call_payoff + net_credit
-
-    width_put = short_put_K - long_put_K
-    width_call = long_call_K - short_call_K
-    max_loss = max(width_put, width_call) - net_credit
-
-    return (
-        pnl=pnl,
-        max_loss=max_loss,
-        net_credit=net_credit,
-        width_put=width_put,
-        width_call=width_call
-    )
-end
-
-function resolve_condor_from_deltas(
+# Wrap resolve_condor_from_deltas to use script-specific defaults
+function _resolve_condor(
     ctx,
     settlement_spot::Float64,
     put_delta::Float64,
-    call_delta::Float64;
-    target_max_loss::Union{Nothing,Float64}=TARGET_MAX_LOSS,
-    wing_objective::Symbol=SCORE_WING_OBJECTIVE,
-    max_loss_min::Float64=SCORE_MAX_LOSS_MIN,
-    max_loss_max::Float64=SCORE_MAX_LOSS_MAX,
-    min_credit::Float64=SCORE_MIN_CREDIT,
-    min_delta_gap::Float64=MIN_DELTA_GAP,
-    prefer_symmetric::Bool=PREFER_SYMMETRIC_WINGS,
-    rate::Float64=RISK_FREE_RATE,
-    div_yield::Float64=DIV_YIELD
+    call_delta::Float64
 )::Union{Nothing,NamedTuple}
-    shorts = VolSurfaceAnalysis._delta_strangle_strikes_asymmetric(
-        ctx,
-        put_delta,
-        call_delta;
-        rate=rate,
-        div_yield=div_yield
-    )
-    shorts === nothing && return nothing
-    short_put_K, short_call_K = shorts
-
-    wings = VolSurfaceAnalysis._condor_wings_by_objective(
-        ctx,
-        short_put_K,
-        short_call_K;
-        objective=wing_objective,
-        target_max_loss=target_max_loss,
-        max_loss_min=max_loss_min,
-        max_loss_max=max_loss_max,
-        min_credit=min_credit,
-        rate=rate,
-        div_yield=div_yield,
-        min_delta_gap=min_delta_gap,
-        prefer_symmetric=prefer_symmetric,
-        debug=false
-    )
-    wings === nothing && return nothing
-    long_put_K, long_call_K = wings
-
-    metrics = condor_metrics_from_strikes(
-        ctx,
-        settlement_spot,
-        short_put_K,
-        short_call_K,
-        long_put_K,
-        long_call_K
-    )
-    metrics === nothing && return nothing
-
-    return (
-        short_put_K=short_put_K,
-        short_call_K=short_call_K,
-        long_put_K=long_put_K,
-        long_call_K=long_call_K,
-        pnl=metrics.pnl,
-        max_loss=metrics.max_loss
+    resolve_condor_from_deltas(
+        ctx, settlement_spot, put_delta, call_delta;
+        target_max_loss=TARGET_MAX_LOSS,
+        wing_objective=SCORE_WING_OBJECTIVE,
+        max_loss_min=SCORE_MAX_LOSS_MIN,
+        max_loss_max=SCORE_MAX_LOSS_MAX,
+        min_credit=SCORE_MIN_CREDIT,
+        min_delta_gap=MIN_DELTA_GAP,
+        prefer_symmetric=PREFER_SYMMETRIC_WINGS,
+        rate=RISK_FREE_RATE,
+        div_yield=DIV_YIELD
     )
 end
 
@@ -716,7 +610,7 @@ function main()
             pred_put_delta = Float64(pred_deltas[1])
             pred_call_delta = Float64(pred_deltas[2])
             pred_size = size(raw, 1) >= 3 ? Float64(raw[3, 1]) : missing
-            pred_condor = resolve_condor_from_deltas(
+            pred_condor = _resolve_condor(
                 ctx,
                 settlement,
                 pred_put_delta,
@@ -823,7 +717,7 @@ function main()
             settlement
         )
 
-        grid_condor = resolve_condor_from_deltas(
+        grid_condor = _resolve_condor(
             ctx,
             settlement,
             grid_best_put_delta,
@@ -834,7 +728,7 @@ function main()
         pred_pnl = pred_condor === nothing ? missing : pred_condor.pnl
         pred_max_loss = pred_condor === nothing ? missing : pred_condor.max_loss
 
-        base_condor = resolve_condor_from_deltas(
+        base_condor = _resolve_condor(
             ctx,
             settlement,
             BASELINE_PUT_DELTA,

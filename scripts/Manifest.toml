@@ -1895,7 +1895,7 @@ uuid = "41fe7b60-77ed-43a1-b4f0-825fd5a5650d"
 version = "0.2.0"
 
 [[deps.VolSurfaceAnalysis]]
-deps = ["BSON", "ChenSignatures", "DataFrames", "Dates", "Distributions", "DuckDB", "Flux", "HTTP", "JSON3", "Parquet2", "Plots", "Random", "Roots", "Statistics", "TimeZones"]
+deps = ["BSON", "ChenSignatures", "DataFrames", "Dates", "Distributions", "DuckDB", "Flux", "HTTP", "JSON3", "Parquet2", "Plots", "Printf", "Random", "Roots", "Statistics", "TimeZones"]
 path = ".."
 uuid = "b18484be-7c68-40cd-be13-c5bda9828903"
 version = "1.0.0-DEV"

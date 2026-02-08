@@ -149,9 +149,7 @@ function main()
     println("Running backtest...")
     positions, pnls = backtest_strategy(strategy, surfaces, settlement_spots)
 
-    attempted = Set{Tuple{DateTime, DateTime}}()
-    pnl_by_key = Dict{Tuple{DateTime, DateTime}, Float64}()
-
+    # Build per-leg detailed results (script-specific)
     detailed_results = DataFrame(
         EntryTime = DateTime[],
         EntrySpot = Float64[],
@@ -163,86 +161,45 @@ function main()
         ExitSpot = Float64[],
         PnL = Float64[]
     )
-
     for (pos, pnl) in zip(positions, pnls)
-        key = (pos.entry_timestamp, pos.trade.expiry)
-        push!(attempted, key)
-
-        if ismissing(pnl)
-            continue
-        end
-
-        pnl_by_key[key] = get(pnl_by_key, key, 0.0) + pnl
+        ismissing(pnl) && continue
         exit_spot = get(settlement_spots, pos.trade.expiry, NaN)
-
         push!(detailed_results, (
-            pos.entry_timestamp,
-            pos.entry_spot,
-            pos.trade.expiry,
-            pos.trade.strike,
-            string(pos.trade.option_type),
-            pos.trade.direction,
-            pos.entry_price,
-            exit_spot,
-            pnl
+            pos.entry_timestamp, pos.entry_spot, pos.trade.expiry,
+            pos.trade.strike, string(pos.trade.option_type), pos.trade.direction,
+            pos.entry_price, exit_spot, pnl
         ))
     end
 
-    realized_keys = collect(keys(pnl_by_key))
-    realized = [pnl_by_key[k] for k in realized_keys]
-
-    missing_n = length(attempted) - length(realized_keys)
-    total_pnl = isempty(realized) ? 0.0 : sum(realized)
-    avg_pnl = isempty(realized) ? 0.0 : total_pnl / length(realized)
+    # Aggregate PnL and build results
+    pnl_by_key, missing_n = aggregate_pnl(positions, pnls)
+    realized = [pnl_by_key[k] for k in sort(collect(keys(pnl_by_key)); by=k -> k[1])]
+    n_attempted = length(pnl_by_key) + missing_n
+    df_results = pnl_results_dataframe(positions, pnls)
 
     metrics = performance_metrics(positions, pnls; margin_per_trade=12000.0)
 
-    lines = String[]
-    push!(lines, "=" ^ 80)
-    push!(lines, "POLYGON SPY SHORT STRANGLE BACKTEST RESULTS")
-    push!(lines, "=" ^ 80)
-    push!(lines, "")
-    push!(lines, "WARNING: SYNTHETIC BID/ASK SPREADS (CONSERVATIVE)")
-    push!(lines, "  bid = low, ask = high from minute bars")
-    push!(lines, "")
-    push!(lines, "Underlying: $UNDERLYING_SYMBOL")
-    push!(lines, "Data range: $(first(filtered_dates)) to $(last(filtered_dates))")
-    push!(lines, "Excluded dates >= $END_DATE_CUTOFF")
-    push!(lines, "")
-    push!(lines, "Strategy Parameters:")
-    push!(lines, "  Entry time: $(ENTRY_TIME_ET) ET (DST-aware)")
-    push!(lines, "  Expiry: ~$EXPIRY_INTERVAL from entry")
-    push!(lines, "  Short legs: +/-$(round(TARGET_DELTA * 100, digits=0)) delta")
-    push!(lines, "  Quantity per leg: $QUANTITY")
-    push!(lines, "")
-    push!(lines, "Results:")
-    push!(lines, "  Scheduled entries: $(length(schedule))")
-    push!(lines, "  Actual strangles: $(length(attempted))")
-    push!(lines, "  Total positions: $(length(positions))")
-    push!(lines, "  Missing settlements: $missing_n")
-    push!(lines, "")
-    push!(lines, "P&L (per strangle):")
-    push!(lines, "  Total: \$$(round(total_pnl, digits=2))")
-    push!(lines, "  Average: \$$(round(avg_pnl, digits=2))")
-    push!(lines, "  Count: $(length(realized))")
-
-    if !isempty(realized)
-        push!(lines, "  Min: \$$(round(minimum(realized), digits=2))")
-        push!(lines, "  Max: \$$(round(maximum(realized), digits=2))")
-        winners = count(x -> x > 0, realized)
-        win_rate = winners / length(realized) * 100
-        push!(lines, "  Winners: $winners / $(length(realized)) ($(round(win_rate, digits=1))%)")
-    end
-
-    push!(lines, "")
-    push!(lines, "Performance Metrics (margin per trade: \$12000):")
-    push!(lines, "  Total ROI: $(metrics.total_roi === missing ? "n/a" : string(round(metrics.total_roi * 100, digits=2)) * "%")")
-    push!(lines, "  Sharpe: $(metrics.sharpe === missing ? "n/a" : string(round(metrics.sharpe, digits=2)))")
-    push!(lines, "  Sortino: $(metrics.sortino === missing ? "n/a" : string(round(metrics.sortino, digits=2)))")
-    push!(lines, "  Win Rate: $(metrics.win_rate === missing ? "n/a" : string(round(metrics.win_rate * 100, digits=1)) * "%")")
-
-    push!(lines, "")
-    push!(lines, "=" ^ 80)
+    # Generate text report
+    lines = format_backtest_report(
+        metrics;
+        title="POLYGON SPY SHORT STRANGLE BACKTEST RESULTS",
+        subtitle="WARNING: SYNTHETIC BID/ASK SPREADS (CONSERVATIVE)\n  bid = low, ask = high from minute bars",
+        params=[
+            "Underlying" => "$UNDERLYING_SYMBOL",
+            "Data range" => "$(first(filtered_dates)) to $(last(filtered_dates))",
+            "Excluded dates" => ">= $END_DATE_CUTOFF",
+            "Entry time" => "$(ENTRY_TIME_ET) ET (DST-aware)",
+            "Expiry" => "~$EXPIRY_INTERVAL from entry",
+            "Short legs" => "+/-$(round(TARGET_DELTA * 100, digits=0)) delta",
+            "Quantity per leg" => "$QUANTITY"
+        ],
+        realized_pnls=realized,
+        n_scheduled=length(schedule),
+        n_attempted=n_attempted,
+        n_positions=length(positions),
+        n_missing=missing_n,
+        margin_description="\$12000 per trade"
+    )
 
     output_file = joinpath(RUN_DIR, "results_$(UNDERLYING_SYMBOL)_results.txt")
     open(output_file, "w") do io
@@ -258,25 +215,6 @@ function main()
     println()
     println("Results written to: $output_file")
 
-    df_results = DataFrame(
-        EntryDate = Date[],
-        EntryTime = DateTime[],
-        ExpiryDate = Date[],
-        PnL = Float64[],
-        Result = String[]
-    )
-
-    for key in sort(realized_keys; by=k -> k[1])
-        pnl_val = pnl_by_key[key]
-        push!(df_results, (
-            Date(key[1]),
-            key[1],
-            Date(key[2]),
-            pnl_val,
-            pnl_val > 0 ? "Win" : "Loss"
-        ))
-    end
-
     csv_path = joinpath(RUN_DIR, "results_$(UNDERLYING_SYMBOL)_pnl.csv")
     CSV.write(csv_path, df_results)
     println("Daily P&L saved to: $csv_path")
@@ -286,34 +224,7 @@ function main()
     println("Detailed trades saved to: $trades_csv_path")
 
     metrics_csv_path = joinpath(RUN_DIR, "results_$(UNDERLYING_SYMBOL)_metrics.csv")
-    metrics_df = DataFrame(
-        Metric = [
-            "count", "missing", "total_pnl", "avg_pnl", "min_pnl", "max_pnl", "win_rate",
-            "avg_bid_ask_spread_rel",
-            "total_roi", "annualized_roi_simple", "annualized_roi_cagr",
-            "avg_return", "volatility", "sharpe", "sortino",
-            "duration_days", "duration_years"
-        ],
-        Value = [
-            metrics.count,
-            metrics.missing,
-            metrics.total_pnl,
-            metrics.avg_pnl,
-            metrics.min_pnl,
-            metrics.max_pnl,
-            metrics.win_rate,
-            metrics.avg_bid_ask_spread_rel,
-            metrics.total_roi,
-            metrics.annualized_roi_simple,
-            metrics.annualized_roi_cagr,
-            metrics.avg_return,
-            metrics.volatility,
-            metrics.sharpe,
-            metrics.sortino,
-            metrics.duration_days,
-            metrics.duration_years
-        ]
-    )
+    metrics_df = metrics_to_dataframe(metrics)
     CSV.write(metrics_csv_path, metrics_df)
     println("Metrics saved to: $metrics_csv_path")
 
