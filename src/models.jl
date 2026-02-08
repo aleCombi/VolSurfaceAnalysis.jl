@@ -112,12 +112,12 @@ function black76_delta(F::Float64, K::Float64, T::Float64, σ::Float64,
     if T <= 0.0
         # At expiry: delta is 1 (ITM) or 0 (OTM)
         cp = call_put_sign(option_type)
-        return cp * (F - K) > 0 ? Float64(cp) : 0.0
+        return cp * (F - K) >= 0 ? Float64(cp) : 0.0
     end
-    
+
     if σ <= 0.0
         cp = call_put_sign(option_type)
-        return cp * (F - K) > 0 ? Float64(cp) : 0.0
+        return cp * (F - K) >= 0 ? Float64(cp) : 0.0
     end
     
     sqrtT = sqrt(T)

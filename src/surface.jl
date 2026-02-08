@@ -249,6 +249,7 @@ function build_surface(records::Vector{OptionRecord})::VolatilitySurface
 
         if best !== nothing && !ismissing(best.mark_iv)
             vol = best.mark_iv / 100.0
+            (vol <= 0.0 || vol > 10.0) && continue
 
             # Compute bid/ask IVs from prices
             bvol = bid_iv(best)

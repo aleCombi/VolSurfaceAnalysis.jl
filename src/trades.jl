@@ -32,6 +32,7 @@ Convenience constructor with default direction (long) and quantity (1.0).
 function Trade(underlying::Underlying, strike::Float64, expiry::DateTime,
                option_type::OptionType;
                direction::Int=1, quantity::Float64=1.0)
+    direction in (-1, 1) || error("direction must be -1 or 1, got $direction")
     return Trade(underlying, strike, expiry, option_type, direction, quantity)
 end
 

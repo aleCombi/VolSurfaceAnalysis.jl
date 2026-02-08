@@ -617,6 +617,7 @@ function enumerate_condor_candidates(
     end
 
     if max_candidates > 0 && length(candidates) > max_candidates
+        max_candidates = min(max_candidates, length(candidates))
         raw_idx = collect(round.(Int, range(1, length(candidates), length=max_candidates)))
         idx = unique(clamp.(raw_idx, 1, length(candidates)))
         candidates = candidates[idx]

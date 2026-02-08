@@ -256,6 +256,7 @@ function compute_path_signature(
     try
         return sig_leadlag(path, level)
     catch e
+        @warn "Path signature computation failed" exception=(e, catch_backtrace())
         return zeros(Float64, expected_dim)
     end
 end
@@ -281,6 +282,7 @@ function compute_logsig_features(
         basis = _logsig_basis(_LEADLAG_PATH_DIM, level)
         return logsig_leadlag(path, basis)
     catch e
+        @warn "Log-signature computation failed" exception=(e, catch_backtrace())
         return zeros(Float64, expected_dim)
     end
 end

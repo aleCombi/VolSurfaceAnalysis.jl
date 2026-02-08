@@ -178,6 +178,10 @@ function condor_group_stats(group_positions::Vector{Position})::Union{NamedTuple
         return missing
     end
 
+    if length(short_puts) != 1 || length(long_puts) != 1 || length(short_calls) != 1 || length(long_calls) != 1
+        return missing
+    end
+
     short_put = maximum(short_puts)
     long_put = minimum(long_puts)
     short_call = minimum(short_calls)

@@ -133,11 +133,11 @@ Scripts use `scripts/Project.toml` via `Pkg.activate(@__DIR__)`.
 
 | Lambda | Pred Avg ROI | Base Avg ROI | ML Edge | Pred Beats Base |
 |--------|-------------|-------------|---------|-----------------|
-| 0.0 (worst-case) | 6.1% | 2.4% | +3.6% | 65.9% |
-| 0.7 (canonical) | 8.0% | 3.4% | +4.6% | 63.4% |
+| 0.0 (canonical) | 6.1% | 2.4% | +3.6% | 65.9% |
+| 0.7 | 8.0% | 3.4% | +4.6% | 63.4% |
 | 1.0 (no spread) | 8.7% | 4.0% | +4.7% | 64.2% |
 
-- `spread_lambda` controls synthetic bid/ask: 0.0 = bid=low/ask=high (widest), 1.0 = midpoint (no spread)
+- `spread_lambda` controls synthetic bid/ask: 0.0 = bid=low/ask=high (widest, canonical default for all scripts), 1.0 = midpoint (no spread)
 - **Key finding**: ML edge is friction-robust. The model's ~2x ROI advantage over baseline holds across all lambda values. The alpha comes from genuine strike selection, not spread-gaming.
 - Baseline profitability at all lambda levels reflects the SPX variance risk premium (short-dated options are structurally overpriced due to hedging demand).
 
