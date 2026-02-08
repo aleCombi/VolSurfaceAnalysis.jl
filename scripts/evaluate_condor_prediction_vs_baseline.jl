@@ -67,168 +67,6 @@ const DEFAULT_MODEL_PATH = joinpath(@__DIR__, "latest_runs", "ml_strike_selector
 # Helpers
 # =============================================================================
 
-function build_entry_timestamps(dates::Vector{Date}, entry_time::Time)::Vector{DateTime}
-    ts = DateTime[]
-    for date in dates
-        push!(ts, et_to_utc(date, entry_time))
-    end
-    return sort(ts)
-end
-
-function load_minute_spots(
-    start_date::Date,
-    end_date::Date;
-    lookback_days::Union{Nothing,Int}=SPOT_HISTORY_LOOKBACK_DAYS,
-    symbol::String=SPOT_SYMBOL,
-    multiplier::Float64=SPOT_MULTIPLIER
-)::Dict{DateTime,Float64}
-    all_dates = available_polygon_dates(DEFAULT_STORE, symbol)
-    isempty(all_dates) && error("No spot dates found for $symbol")
-
-    min_date = lookback_days === nothing ? minimum(all_dates) : start_date - Day(lookback_days)
-    filtered_dates = filter(d -> d >= min_date && d <= end_date, all_dates)
-
-    spots = Dict{DateTime,Float64}()
-    for d in filtered_dates
-        path = polygon_spot_path(DEFAULT_STORE, d, symbol)
-        isfile(path) || continue
-        dict = read_polygon_spot_prices(path; underlying=symbol)
-        merge!(spots, dict)
-    end
-
-    if multiplier != 1.0
-        for (k, v) in spots
-            spots[k] = v * multiplier
-        end
-    end
-
-    return spots
-end
-
-function load_surfaces_and_spots(
-    start_date::Date,
-    end_date::Date;
-    symbol::String=UNDERLYING_SYMBOL,
-    spot_symbol::String=SPOT_SYMBOL,
-    spot_multiplier::Float64=SPOT_MULTIPLIER,
-    entry_time::Time=ENTRY_TIME_ET
-)
-    println("  Loading dates from $start_date to $end_date...")
-    all_dates = available_polygon_dates(DEFAULT_STORE, symbol)
-    filtered_dates = filter(d -> d >= start_date && d <= end_date, all_dates)
-    isempty(filtered_dates) && error("No dates found in range $start_date to $end_date")
-    println("  Found $(length(filtered_dates)) trading days")
-
-    entry_ts = build_entry_timestamps(filtered_dates, entry_time)
-
-    # Load entry spots (from spot proxy symbol, scaled)
-    entry_spots = read_polygon_spot_prices_for_timestamps(
-        polygon_spot_root(DEFAULT_STORE),
-        entry_ts;
-        symbol=spot_symbol
-    )
-    if spot_multiplier != 1.0
-        for (k, v) in entry_spots
-            entry_spots[k] = v * spot_multiplier
-        end
-    end
-    println("  Loaded $(length(entry_spots)) entry spots (via $spot_symbol × $spot_multiplier)")
-
-    # Build surfaces (options from symbol, spots already scaled)
-    path_for_ts = ts -> polygon_options_path(DEFAULT_STORE, Date(ts), symbol)
-    read_records = (path; where="") -> read_polygon_option_records(
-        path,
-        entry_spots;
-        where=where,
-        min_volume=MIN_VOLUME,
-        warn=false,
-        spread_lambda=SPREAD_LAMBDA
-    )
-    surfaces = build_surfaces_for_timestamps(
-        entry_ts;
-        path_for_timestamp=path_for_ts,
-        read_records=read_records
-    )
-    println("  Built $(length(surfaces)) surfaces")
-
-    # Load settlement spots (need to compute expiry times first)
-    expiry_ts = DateTime[]
-    for (ts, surface) in surfaces
-        expiries = unique(rec.expiry for rec in surface.records)
-        tau_target = time_to_expiry(ts + EXPIRY_INTERVAL, ts)
-        for exp in expiries
-            tau = time_to_expiry(exp, ts)
-            if abs(tau - tau_target) < 0.1
-                push!(expiry_ts, exp)
-            end
-        end
-    end
-    expiry_ts = unique(expiry_ts)
-
-    settlement_spots = read_polygon_spot_prices_for_timestamps(
-        polygon_spot_root(DEFAULT_STORE),
-        expiry_ts;
-        symbol=spot_symbol
-    )
-    if spot_multiplier != 1.0
-        for (k, v) in settlement_spots
-            settlement_spots[k] = v * spot_multiplier
-        end
-    end
-    println("  Loaded $(length(settlement_spots)) settlement spots (via $spot_symbol × $spot_multiplier)")
-
-    return surfaces, entry_spots, settlement_spots
-end
-
-function build_spot_history_dict(
-    timestamps::Vector{DateTime},
-    all_spots::Dict{DateTime,Float64};
-    lookback_days::Union{Nothing,Int}=SPOT_HISTORY_LOOKBACK_DAYS
-)::Dict{DateTime,SpotHistory}
-    history_dict = Dict{DateTime,SpotHistory}()
-    sorted_pairs = sort(collect(all_spots); by=first)
-    isempty(sorted_pairs) && return history_dict
-
-    ts_vec = [p[1] for p in sorted_pairs]
-    price_vec = [p[2] for p in sorted_pairs]
-    first_ts = ts_vec[1]
-
-    for ts in timestamps
-        start_ts = lookback_days === nothing ? first_ts : ts - Day(lookback_days)
-        i = searchsortedfirst(ts_vec, start_ts)
-        j = searchsortedfirst(ts_vec, ts) - 1
-        if j >= i && (j - i + 1) >= 2
-            history_dict[ts] = SpotHistory(ts_vec[i:j], price_vec[i:j])
-        end
-    end
-    return history_dict
-end
-
-function build_prev_surfaces_dict(
-    surfaces::Dict{DateTime,VolatilitySurface};
-    symbol::String=UNDERLYING_SYMBOL
-)::Dict{DateTime,VolatilitySurface}
-    all_option_dates = sort(available_polygon_dates(DEFAULT_STORE, symbol))
-    by_date = Dict{Date,DateTime}()
-    for ts in keys(surfaces)
-        d = Date(ts)
-        if !haskey(by_date, d) || ts < by_date[d]
-            by_date[d] = ts
-        end
-    end
-    prev_dict = Dict{DateTime,VolatilitySurface}()
-    for ts in keys(surfaces)
-        d = Date(ts)
-        idx = searchsortedlast(all_option_dates, d - Day(1))
-        idx < 1 && continue
-        prev_date = all_option_dates[idx]
-        if haskey(by_date, prev_date)
-            prev_dict[ts] = surfaces[by_date[prev_date]]
-        end
-    end
-    return prev_dict
-end
-
 function nearest_expiry_and_tau(surface::VolatilitySurface, ts::DateTime, expiry_interval::Period)
     expiries = unique(rec.expiry for rec in surface.records)
     isempty(expiries) && return nothing
@@ -808,14 +646,21 @@ function main()
         eval_start,
         eval_end;
         symbol=symbol,
-        entry_time=ENTRY_TIME_ET
+        spot_symbol=SPOT_SYMBOL,
+        spot_multiplier=SPOT_MULTIPLIER,
+        entry_times=ENTRY_TIME_ET,
+        min_volume=MIN_VOLUME,
+        spread_lambda=SPREAD_LAMBDA,
+        expiry_interval=EXPIRY_INTERVAL
     )
     timestamps = sort(collect(keys(surfaces)))
     println("  Loading minute spot history...")
     minute_spots = load_minute_spots(
         eval_start,
         eval_end;
-        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS
+        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS,
+        symbol=SPOT_SYMBOL,
+        multiplier=SPOT_MULTIPLIER
     )
     spot_history = build_spot_history_dict(timestamps, minute_spots; lookback_days=SPOT_HISTORY_LOOKBACK_DAYS)
     println("  Built spot history for $(length(spot_history)) timestamps")

@@ -572,3 +572,11 @@ function apply_normalization(
 )::Matrix{Float32}
     return (X .- means) ./ stds
 end
+
+function apply_normalization(
+    x::Vector{Float32},
+    means::Vector{Float32},
+    stds::Vector{Float32}
+)::Vector{Float32}
+    return (x .- means) ./ stds
+end

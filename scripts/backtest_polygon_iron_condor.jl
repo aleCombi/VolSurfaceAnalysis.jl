@@ -43,16 +43,8 @@ const RUN_DIR    = joinpath(@__DIR__, "runs", "backtest_polygon_iron_condor_$(RU
 const LATEST_DIR = joinpath(@__DIR__, "latest_runs", "backtest_polygon_iron_condor")
 
 # -----------------------------------------------------------------------------
-# Data loading helpers
+# Backtest
 # -----------------------------------------------------------------------------
-
-function build_entry_timestamps(dates::Vector{Date})::Vector{DateTime}
-    ts = DateTime[]
-    for date in dates
-        push!(ts, et_to_utc(date, ENTRY_TIME_ET))
-    end
-    return ts
-end
 
 function run_symbol_backtest(symbol::String)
     println("=" ^ 60)
@@ -68,7 +60,7 @@ function run_symbol_backtest(symbol::String)
 
     println("  Dates: $(length(filtered_dates)) range $(first(filtered_dates)) to $(last(filtered_dates))")
 
-    entry_ts = build_entry_timestamps(filtered_dates)
+    entry_ts = build_entry_timestamps(filtered_dates, ENTRY_TIME_ET)
     entry_spots = read_polygon_spot_prices_for_timestamps(
         polygon_spot_root(DEFAULT_STORE),
         entry_ts;

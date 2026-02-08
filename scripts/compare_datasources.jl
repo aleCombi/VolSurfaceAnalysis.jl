@@ -28,10 +28,6 @@ const CONDOR_MIN_CREDIT = 0.10
 
 # ── Shared setup ─────────────────────────────────────────────────────────────
 
-function build_entry_timestamps(dates::Vector{Date})::Vector{DateTime}
-    [et_to_utc(date, ENTRY_TIME_ET) for date in dates]
-end
-
 function make_strike_selector()
     ctx -> begin
         shorts = VolSurfaceAnalysis._delta_strangle_strikes_asymmetric(
@@ -63,7 +59,7 @@ end
 
 all_dates = available_polygon_dates(DEFAULT_STORE, SYMBOL)
 filtered_dates = filter(d -> d < END_DATE_CUTOFF, all_dates)
-entry_ts = build_entry_timestamps(filtered_dates)
+entry_ts = build_entry_timestamps(filtered_dates, ENTRY_TIME_ET)
 
 println("Symbol: $SYMBOL")
 println("Dates:  $(length(filtered_dates)) ($(first(filtered_dates)) to $(last(filtered_dates)))")

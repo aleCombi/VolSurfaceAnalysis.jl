@@ -42,6 +42,7 @@ julia --project=scripts scripts/evaluate_condor_prediction_vs_baseline.jl
   - `data/polygon.jl` -- `PolygonBar`, parquet readers (synthetic bid/ask from OHLC)
   - `data/local_store.jl` -- `LocalDataStore`, `DEFAULT_STORE`, path derivation
   - `data/duckdb.jl` -- DuckDB query helpers for parquet
+  - `data/helpers.jl` -- shared data-loading helpers: `build_entry_timestamps`, `load_minute_spots`, `load_surfaces_and_spots`, `build_spot_history_dict`, `build_prev_surfaces_dict`
 
 - **Backtest engine**
   - `backtest/portfolio.jl` -- `Position`, `open_position`, `settle`, `entry_cost`
@@ -98,22 +99,16 @@ Scripts use `scripts/Project.toml` via `Pkg.activate(@__DIR__)`.
 
 ## Known Technical Debt
 
-### Verbosity / Duplication (~25-30% of src/ could be reduced)
+### Remaining Duplication
 
-1. **`src/ml/training.jl`** (1,494 lines) -- biggest offender:
-   - `simulate_strangle_pnl()` vs `simulate_condor_pnl()` share ~90% of code (differ only by 2 vs 4 legs)
-   - `generate_training_data()` vs `generate_condor_training_data()` are near-identical loops
-   - `train_model!()` vs `train_scoring_model!()` share ~90% of training loop logic
-   - Repeated null-checking chains appear 6+ times
+1. **`src/ml/training.jl`** (~1,400 lines):
+   - `simulate_strangle_pnl()` vs `simulate_condor_pnl()` share only ~14% code (wing logic fundamentally different)
+   - `generate_*` and `train_*` pairs already share core abstractions (`_generate_delta_training_data_core`, `_train_loop!`)
+   - Rate/div_yield defaults now use `DEFAULT_RATE`/`DEFAULT_DIV_YIELD` constants
 
-2. **`src/strategies/helpers.jl`** (782 lines):
-   - `_sigma_strangle_strikes()` vs `_sigma_condor_strikes()` differ only by 2 extra strikes
-   - `_delta_strangle_strikes()` vs `_delta_strangle_strikes_asymmetric()` differ only by same-vs-different deltas
-   - `_best_delta_strike()` loop pattern repeated 8+ times
+2. **`src/strategies/helpers.jl`**: `_best_delta_strike()` loop pattern repeated 8+ times
 
-3. **`src/ml/model.jl`**: `create_strike_model()` vs `create_scoring_model()` have identical layer construction
-
-4. **`src/backtest/metrics.jl`**: `performance_metrics()` has two near-identical branches for margin computation
+3. **`src/backtest/metrics.jl`**: `performance_metrics()` has two near-identical branches for margin computation
 
 ### ML Integration Gap
 

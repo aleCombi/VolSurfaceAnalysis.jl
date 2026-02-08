@@ -18,23 +18,23 @@ Strategy Parameters:
 
 Results:
   Scheduled entries: 376
-  Actual condors: 361
-  Total positions: 1444
+  Actual condors: 373
+  Total positions: 1492
   Missing settlements: 5
 
 P&L (per condor):
-  Total: $-11.62
-  Count: 356
-  Average: $-0.03
-  Min: $-11.69
-  Max: $3.0
-  Winners: 275 / 356 (77.2%)
+  Total: $3.31
+  Count: 368
+  Average: $0.01
+  Min: $-6.3
+  Max: $2.87
+  Winners: 289 / 368 (78.5%)
 
 Performance Metrics (return basis: per-condor max loss):
-  Total ROI: -0.52%
-  Annualized ROI (CAGR): -0.35%
-  Sharpe: -0.49
-  Sortino: -0.53
-  Win Rate: 77.2%
+  Total ROI: 0.16%
+  Annualized ROI (CAGR): 0.11%
+  Sharpe: -0.04
+  Sortino: -0.04
+  Win Rate: 78.5%
 
 ================================================================================

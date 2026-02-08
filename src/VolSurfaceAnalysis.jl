@@ -43,6 +43,7 @@ include("strategies.jl")           # Strategy implementations
 # Machine Learning Module
 # ============================================================================
 include("ml/features.jl")          # Feature extraction from vol surfaces
+include("data/helpers.jl")         # Shared data-loading helpers for scripts
 include("ml/model.jl")             # Flux.jl neural network definition
 include("ml/training.jl")          # Training loop and data generation
 include("ml/strike_selector.jl")   # ML-based strike selector
@@ -82,6 +83,8 @@ export polygon_options_root, polygon_spot_root
 export polygon_options_path, polygon_spot_path
 export deribit_history_path, deribit_delivery_path
 export available_polygon_dates, available_deribit_dates
+export build_entry_timestamps, load_minute_spots, load_surfaces_and_spots
+export build_spot_history_dict, build_prev_surfaces_dict
 
 # ============================================================================
 # Exports: Pricing Models

@@ -65,13 +65,14 @@ function _atm_iv_from_records(
     return atm_iv
 end
 
-function _sigma_strangle_strikes(
+function _sigma_strikes(
     ctx,
     short_sigmas::Float64,
     rate::Float64,
     div_yield::Float64;
+    long_sigmas::Union{Nothing,Float64}=nothing,
     debug::Bool=false
-)::Union{Nothing,Tuple{Float64,Float64}}
+)
     tau = ctx.tau
     tau <= 0.0 && return nothing
 
@@ -88,10 +89,12 @@ function _sigma_strangle_strikes(
 
     sigma_move = atm_iv * sqrt(tau)
     if debug
-        println(
-            "  ATM IV=$(round(atm_iv * 100; digits=1))%, sigma=$(round(sigma_move * 100; digits=2))%, " *
-            "shorts +/-$(round(short_sigmas * sigma_move * 100; digits=2))%"
-        )
+        msg = "  ATM IV=$(round(atm_iv * 100; digits=1))%, sigma=$(round(sigma_move * 100; digits=2))%, " *
+              "shorts +/-$(round(short_sigmas * sigma_move * 100; digits=2))%"
+        if long_sigmas !== nothing
+            msg *= ", longs +/-$(round(long_sigmas * sigma_move * 100; digits=2))%"
+        end
+        println(msg)
     end
     short_put_pct = 1.0 - short_sigmas * sigma_move
     short_call_pct = 1.0 + short_sigmas * sigma_move
@@ -102,65 +105,34 @@ function _sigma_strangle_strikes(
         return nothing
     end
 
-    target_put = ctx.surface.spot * short_put_pct
-    target_call = ctx.surface.spot * short_call_pct
+    if long_sigmas === nothing
+        target_put = ctx.surface.spot * short_put_pct
+        target_call = ctx.surface.spot * short_call_pct
+        short_put_K = _pick_otm_strike(put_strikes, ctx.surface.spot, target_put; side=:put)
+        short_call_K = _pick_otm_strike(call_strikes, ctx.surface.spot, target_call; side=:call)
+        return (short_put_K, short_call_K)
+    else
+        long_put_pct = 1.0 - long_sigmas * sigma_move
+        long_call_pct = 1.0 + long_sigmas * sigma_move
+        return _condor_strikes(
+            put_strikes, call_strikes, ctx.surface.spot,
+            short_put_pct, short_call_pct, long_put_pct, long_call_pct
+        )
+    end
+end
 
-    short_put_K = _pick_otm_strike(put_strikes, ctx.surface.spot, target_put; side=:put)
-    short_call_K = _pick_otm_strike(call_strikes, ctx.surface.spot, target_call; side=:call)
-
-    return (short_put_K, short_call_K)
+function _sigma_strangle_strikes(
+    ctx, short_sigmas::Float64, rate::Float64, div_yield::Float64;
+    debug::Bool=false
+)::Union{Nothing,Tuple{Float64,Float64}}
+    return _sigma_strikes(ctx, short_sigmas, rate, div_yield; debug=debug)
 end
 
 function _sigma_condor_strikes(
-    ctx,
-    short_sigmas::Float64,
-    long_sigmas::Float64,
-    rate::Float64,
-    div_yield::Float64;
+    ctx, short_sigmas::Float64, long_sigmas::Float64, rate::Float64, div_yield::Float64;
     debug::Bool=false
 )::Union{Nothing,Tuple{Float64,Float64,Float64,Float64}}
-    tau = ctx.tau
-    tau <= 0.0 && return nothing
-
-    atm_iv = _atm_iv_from_records(
-        ctx.recs,
-        ctx.surface.spot,
-        tau,
-        rate,
-        div_yield;
-        debug=debug,
-        timestamp=ctx.surface.timestamp
-    )
-    atm_iv === nothing && return nothing
-
-    sigma_move = atm_iv * sqrt(tau)
-    if debug
-        println(
-            "  ATM IV=$(round(atm_iv * 100; digits=1))%, sigma=$(round(sigma_move * 100; digits=2))%, " *
-            "shorts +/-$(round(short_sigmas * sigma_move * 100; digits=2))%, " *
-            "longs +/-$(round(long_sigmas * sigma_move * 100; digits=2))%"
-        )
-    end
-    short_put_pct = 1.0 - short_sigmas * sigma_move
-    short_call_pct = 1.0 + short_sigmas * sigma_move
-    long_put_pct = 1.0 - long_sigmas * sigma_move
-    long_call_pct = 1.0 + long_sigmas * sigma_move
-
-    put_strikes = ctx.put_strikes
-    call_strikes = ctx.call_strikes
-    if isempty(put_strikes) || isempty(call_strikes)
-        return nothing
-    end
-
-    return _condor_strikes(
-        put_strikes,
-        call_strikes,
-        ctx.surface.spot,
-        short_put_pct,
-        short_call_pct,
-        long_put_pct,
-        long_call_pct
-    )
+    return _sigma_strikes(ctx, short_sigmas, rate, div_yield; long_sigmas=long_sigmas, debug=debug)
 end
 
 function _delta_from_record(
@@ -226,43 +198,7 @@ function _delta_strangle_strikes(
     div_yield::Float64=0.0,
     debug::Bool=false
 )::Union{Nothing,Tuple{Float64,Float64}}
-    tau = ctx.tau
-    tau <= 0.0 && return nothing
-
-    put_recs = filter(r -> r.option_type == Put, ctx.recs)
-    call_recs = filter(r -> r.option_type == Call, ctx.recs)
-    isempty(put_recs) && return nothing
-    isempty(call_recs) && return nothing
-
-    F = ctx.surface.spot * exp((rate - div_yield) * tau)
-    target = abs(target_delta)
-
-    short_put = _best_delta_strike(
-        put_recs,
-        -target,
-        ctx.surface.spot,
-        :put,
-        F,
-        tau,
-        rate;
-        debug=debug
-    )
-    short_call = _best_delta_strike(
-        call_recs,
-        target,
-        ctx.surface.spot,
-        :call,
-        F,
-        tau,
-        rate;
-        debug=debug
-    )
-
-    if short_put === nothing || short_call === nothing
-        return nothing
-    end
-
-    return (short_put, short_call)
+    return _delta_strangle_strikes_asymmetric(ctx, abs(target_delta), abs(target_delta); rate, div_yield, debug)
 end
 
 """

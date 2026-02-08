@@ -88,7 +88,7 @@ function (selector::MLStrikeSelector)(ctx)
 
     # Convert to vector and normalize
     x = features_to_vector(feats)
-    x_norm = (x .- selector.feature_means) ./ selector.feature_stds
+    x_norm = apply_normalization(x, selector.feature_means, selector.feature_stds)
 
     # Run model inference (need to reshape for Flux)
     Flux.testmode!(selector.model)
@@ -245,7 +245,7 @@ function (selector::MLCondorStrikeSelector)(ctx)
     feats === nothing && return nothing
 
     x = features_to_vector(feats)
-    x_norm = (x .- selector.feature_means) ./ selector.feature_stds
+    x_norm = apply_normalization(x, selector.feature_means, selector.feature_stds)
 
     Flux.testmode!(selector.model)
     x_input = reshape(x_norm, :, 1)
@@ -474,7 +474,7 @@ function (selector::MLCondorScoreSelector)(ctx)
         return _fallback_or_nothing(selector.fallback_selector, ctx)
     end
 
-    X_norm = (X .- selector.feature_means) ./ selector.feature_stds
+    X_norm = apply_normalization(X, selector.feature_means, selector.feature_stds)
     Flux.testmode!(selector.model)
     raw_scores = selector.model(X_norm)
     scores = vec(raw_scores)

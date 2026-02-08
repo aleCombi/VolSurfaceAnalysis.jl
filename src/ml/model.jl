@@ -49,32 +49,30 @@ Output activation depends on output_dim:
 # Returns
 - `Chain`: Flux neural network model
 """
-function create_strike_model(;
-    input_dim::Int=N_FEATURES,
-    hidden_dims::Vector{Int}=[64, 32, 16],
-    output_dim::Int=3,
-    dropout_rate::Float64=0.2
-)::Chain
+function _build_mlp_layers(input_dim::Int, hidden_dims::Vector{Int}, dropout_rate::Float64)::Vector
     layers = []
-
-    # Input layer
     push!(layers, Dense(input_dim => hidden_dims[1], relu))
     if dropout_rate > 0
         push!(layers, Dropout(dropout_rate))
     end
-
-    # Hidden layers
     for i in 1:(length(hidden_dims)-1)
         push!(layers, Dense(hidden_dims[i] => hidden_dims[i+1], relu))
         if dropout_rate > 0
             push!(layers, Dropout(dropout_rate))
         end
     end
+    return layers
+end
 
-    # Output layer with mixed activation (sigmoid for deltas, tanh for size)
+function create_strike_model(;
+    input_dim::Int=N_FEATURES,
+    hidden_dims::Vector{Int}=[64, 32, 16],
+    output_dim::Int=3,
+    dropout_rate::Float64=0.2
+)::Chain
+    layers = _build_mlp_layers(input_dim, hidden_dims, dropout_rate)
     push!(layers, Dense(hidden_dims[end] => output_dim, identity))
     push!(layers, mixed_output_activation)
-
     return Chain(layers...)
 end
 
@@ -89,20 +87,7 @@ function create_scoring_model(;
     hidden_dims::Vector{Int}=[128, 64, 32],
     dropout_rate::Float64=0.2
 )::Chain
-    layers = []
-
-    push!(layers, Dense(input_dim => hidden_dims[1], relu))
-    if dropout_rate > 0
-        push!(layers, Dropout(dropout_rate))
-    end
-
-    for i in 1:(length(hidden_dims)-1)
-        push!(layers, Dense(hidden_dims[i] => hidden_dims[i+1], relu))
-        if dropout_rate > 0
-            push!(layers, Dropout(dropout_rate))
-        end
-    end
-
+    layers = _build_mlp_layers(input_dim, hidden_dims, dropout_rate)
     push!(layers, Dense(hidden_dims[end] => 1, identity))
     return Chain(layers...)
 end

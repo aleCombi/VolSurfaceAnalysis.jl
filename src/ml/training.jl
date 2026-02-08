@@ -3,6 +3,9 @@
 
 using Flux.Optimise: Adam
 
+const DEFAULT_RATE = 0.045
+const DEFAULT_DIV_YIELD = 0.013
+
 """
     TrainingDataset
 
@@ -107,8 +110,8 @@ function simulate_strangle_pnl(
     settlement_spot::Float64,
     put_delta::Float64,
     call_delta::Float64;
-    rate::Float64=0.045,
-    div_yield::Float64=0.013,
+    rate::Float64=DEFAULT_RATE,
+    div_yield::Float64=DEFAULT_DIV_YIELD,
     expiry_interval::Period=Day(1)
 )::Union{Float64,Nothing}
     env = _prepare_simulation_env(surface, expiry_interval, rate, div_yield)
@@ -182,8 +185,8 @@ Find optimal delta values via grid search.
 function find_optimal_deltas(
     surface::VolatilitySurface,
     settlement_spot::Float64;
-    rate::Float64=0.045,
-    div_yield::Float64=0.013,
+    rate::Float64=DEFAULT_RATE,
+    div_yield::Float64=DEFAULT_DIV_YIELD,
     expiry_interval::Period=Day(1),
     delta_grid::Vector{Float64}=DELTA_GRID
 )::Union{Tuple{Float64,Float64,Float64},Nothing}
@@ -241,8 +244,8 @@ function simulate_condor_pnl(
     min_credit::Float64=0.0,
     min_delta_gap::Float64=0.08,
     prefer_symmetric::Bool=true,
-    rate::Float64=0.045,
-    div_yield::Float64=0.013,
+    rate::Float64=DEFAULT_RATE,
+    div_yield::Float64=DEFAULT_DIV_YIELD,
     expiry_interval::Period=Day(1)
 )::Union{Float64,Nothing}
     env = _prepare_simulation_env(surface, expiry_interval, rate, div_yield; compute_strikes=true)
@@ -352,8 +355,8 @@ function find_optimal_condor_deltas(
     min_credit::Float64=0.0,
     min_delta_gap::Float64=0.08,
     prefer_symmetric::Bool=true,
-    rate::Float64=0.045,
-    div_yield::Float64=0.013,
+    rate::Float64=DEFAULT_RATE,
+    div_yield::Float64=DEFAULT_DIV_YIELD,
     expiry_interval::Period=Day(1),
     delta_grid::Vector{Float64}=DELTA_GRID
 )::Union{Tuple{Float64,Float64,Float64},Nothing}
@@ -382,9 +385,11 @@ Build a strike-selection context for the expiry closest to `surface.timestamp + 
 """
 function build_condor_ctx(
     surface::VolatilitySurface;
-    expiry_interval::Period=Day(1)
+    expiry_interval::Period=Day(1),
+    rate::Float64=DEFAULT_RATE,
+    div_yield::Float64=DEFAULT_DIV_YIELD
 )::Union{Nothing,NamedTuple}
-    env = _prepare_simulation_env(surface, expiry_interval, 0.045, 0.013; compute_strikes=true)
+    env = _prepare_simulation_env(surface, expiry_interval, rate, div_yield; compute_strikes=true)
     env === nothing && return nothing
     return (ctx=env.ctx, expiry=env.expiry, tau=env.tau)
 end
@@ -410,8 +415,8 @@ function condor_entry_metrics_from_strikes(
     short_call_K::Float64,
     long_put_K::Float64,
     long_call_K::Float64;
-    rate::Float64=0.045,
-    div_yield::Float64=0.013
+    rate::Float64=DEFAULT_RATE,
+    div_yield::Float64=DEFAULT_DIV_YIELD
 )::Union{Nothing,NamedTuple}
     put_recs = filter(r -> r.option_type == Put, ctx.recs)
     call_recs = filter(r -> r.option_type == Call, ctx.recs)
@@ -482,8 +487,8 @@ function condor_metrics_from_strikes(
     short_call_K::Float64,
     long_put_K::Float64,
     long_call_K::Float64;
-    rate::Float64=0.045,
-    div_yield::Float64=0.013
+    rate::Float64=DEFAULT_RATE,
+    div_yield::Float64=DEFAULT_DIV_YIELD
 )::Union{Nothing,NamedTuple}
     entry = condor_entry_metrics_from_strikes(
         ctx,
@@ -539,8 +544,8 @@ function enumerate_condor_candidates(
     min_credit::Float64=0.0,
     min_delta_gap::Float64=0.08,
     prefer_symmetric::Bool=true,
-    rate::Float64=0.045,
-    div_yield::Float64=0.013
+    rate::Float64=DEFAULT_RATE,
+    div_yield::Float64=DEFAULT_DIV_YIELD
 )::Vector{NamedTuple}
     if !(wing_objective in (:target_max_loss, :roi, :pnl))
         error("wing_objective must be one of :target_max_loss, :roi, :pnl")
@@ -636,8 +641,8 @@ function condor_scoring_feature_vector(
     state_features::Vector{Float32},
     ctx,
     candidate;
-    rate::Float64=0.045,
-    div_yield::Float64=0.013,
+    rate::Float64=DEFAULT_RATE,
+    div_yield::Float64=DEFAULT_DIV_YIELD,
     implied_move_floor::Float64=1e-6
 )::Union{Nothing,Vector{Float32}}
     entry = condor_entry_metrics_from_strikes(
@@ -738,8 +743,8 @@ function generate_condor_candidate_training_data(
     surfaces::Dict{DateTime,VolatilitySurface},
     settlement_spots::Dict{DateTime,Float64},
     spot_history_dict::Dict{DateTime,SpotHistory};
-    rate::Float64=0.045,
-    div_yield::Float64=0.013,
+    rate::Float64=DEFAULT_RATE,
+    div_yield::Float64=DEFAULT_DIV_YIELD,
     expiry_interval::Period=Day(1),
     utility_objective::Symbol=:roi,
     candidate_delta_grid::Vector{Float64}=collect(0.05:0.015:0.35),
@@ -971,8 +976,8 @@ function generate_condor_training_data(
     surfaces::Dict{DateTime,VolatilitySurface},
     settlement_spots::Dict{DateTime,Float64},
     spot_history_dict::Dict{DateTime,SpotHistory};
-    rate::Float64=0.045,
-    div_yield::Float64=0.013,
+    rate::Float64=DEFAULT_RATE,
+    div_yield::Float64=DEFAULT_DIV_YIELD,
     expiry_interval::Period=Day(1),
     wing_delta_abs::Union{Nothing,Float64}=0.05,
     target_max_loss::Union{Nothing,Float64}=nothing,
@@ -1078,8 +1083,8 @@ function generate_training_data(
     surfaces::Dict{DateTime,VolatilitySurface},
     settlement_spots::Dict{DateTime,Float64},
     spot_history_dict::Dict{DateTime,SpotHistory};
-    rate::Float64=0.045,
-    div_yield::Float64=0.013,
+    rate::Float64=DEFAULT_RATE,
+    div_yield::Float64=DEFAULT_DIV_YIELD,
     expiry_interval::Period=Day(1),
     use_logsig::Bool=false,
     prev_surfaces::Union{Nothing,Dict{DateTime,VolatilitySurface}}=nothing,
