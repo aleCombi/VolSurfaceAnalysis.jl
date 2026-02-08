@@ -48,6 +48,43 @@ end
 # Delta grid for searching optimal strikes
 const DELTA_GRID = collect(0.05:0.025:0.35)
 
+"""Resolve expiry, filter records by type, and compute forward rate for simulation functions."""
+function _prepare_simulation_env(
+    surface::VolatilitySurface,
+    expiry_interval::Period,
+    rate::Float64,
+    div_yield::Float64;
+    compute_strikes::Bool=false
+)
+    expiry_result = _select_expiry(expiry_interval, surface)
+    expiry_result === nothing && return nothing
+
+    expiry, _, tau = expiry_result
+    tau <= 0.0 && return nothing
+
+    recs = filter(r -> r.expiry == expiry, surface.records)
+    isempty(recs) && return nothing
+
+    put_recs = filter(r -> r.option_type == Put, recs)
+    call_recs = filter(r -> r.option_type == Call, recs)
+    isempty(put_recs) && return nothing
+    isempty(call_recs) && return nothing
+
+    F = surface.spot * exp((rate - div_yield) * tau)
+
+    ctx = nothing
+    if compute_strikes
+        put_strikes = sort(unique(r.strike for r in put_recs))
+        call_strikes = sort(unique(r.strike for r in call_recs))
+        (isempty(put_strikes) || isempty(call_strikes)) && return nothing
+        ctx = (surface=surface, expiry=expiry, tau=tau, recs=recs,
+               put_strikes=put_strikes, call_strikes=call_strikes)
+    end
+
+    return (expiry=expiry, tau=tau, recs=recs, put_recs=put_recs,
+            call_recs=call_recs, F=F, ctx=ctx)
+end
+
 """
     simulate_strangle_pnl(surface, settlement_spot, put_delta, call_delta; rate, div_yield, expiry_interval) -> Union{Float64, Nothing}
 
@@ -74,63 +111,63 @@ function simulate_strangle_pnl(
     div_yield::Float64=0.013,
     expiry_interval::Period=Day(1)
 )::Union{Float64,Nothing}
-    # Find expiry
-    expiry_result = _select_expiry(expiry_interval, surface)
-    expiry_result === nothing && return nothing
-
-    expiry, _, tau = expiry_result
-    tau <= 0.0 && return nothing
-
-    # Get records for this expiry
-    recs = filter(r -> r.expiry == expiry, surface.records)
-    isempty(recs) && return nothing
-
-    put_recs = filter(r -> r.option_type == Put, recs)
-    call_recs = filter(r -> r.option_type == Call, recs)
-    isempty(put_recs) && return nothing
-    isempty(call_recs) && return nothing
-
-    F = surface.spot * exp((rate - div_yield) * tau)
+    env = _prepare_simulation_env(surface, expiry_interval, rate, div_yield)
+    env === nothing && return nothing
+    (; put_recs, call_recs, F) = env
 
     # Find strikes by delta
-    short_put_K = _best_delta_strike(put_recs, -put_delta, surface.spot, :put, F, tau, rate)
-    short_call_K = _best_delta_strike(call_recs, call_delta, surface.spot, :call, F, tau, rate)
+    short_put_K = _best_delta_strike(put_recs, -put_delta, surface.spot, :put, F, env.tau, rate)
+    short_call_K = _best_delta_strike(call_recs, call_delta, surface.spot, :call, F, env.tau, rate)
 
     (short_put_K === nothing || short_call_K === nothing) && return nothing
 
     # Get entry prices (bid for shorts)
-    put_rec = nothing
-    call_rec = nothing
-    for rec in put_recs
-        if rec.strike == short_put_K
-            put_rec = rec
-            break
-        end
-    end
-    for rec in call_recs
-        if rec.strike == short_call_K
-            call_rec = rec
-            break
-        end
-    end
+    put_rec = _find_rec_by_strike(put_recs, short_put_K)
+    call_rec = _find_rec_by_strike(call_recs, short_call_K)
 
     (put_rec === nothing || call_rec === nothing) && return nothing
     (ismissing(put_rec.bid_price) || ismissing(call_rec.bid_price)) && return nothing
 
     # Entry cost (negative for shorts = premium received)
-    entry_put = put_rec.bid_price * (-1) * surface.spot  # Short put
-    entry_call = call_rec.bid_price * (-1) * surface.spot  # Short call
+    entry_put = put_rec.bid_price * (-1) * surface.spot
+    entry_call = call_rec.bid_price * (-1) * surface.spot
     entry_cost = entry_put + entry_call
 
     # Settlement payoff
-    put_payoff = max(short_put_K - settlement_spot, 0.0) * (-1)  # Short put
-    call_payoff = max(settlement_spot - short_call_K, 0.0) * (-1)  # Short call
+    put_payoff = max(short_put_K - settlement_spot, 0.0) * (-1)
+    call_payoff = max(settlement_spot - short_call_K, 0.0) * (-1)
     total_payoff = put_payoff + call_payoff
 
-    # P&L = payoff - entry_cost
     pnl = total_payoff - entry_cost
-
     return pnl
+end
+
+"""Grid search over delta pairs, calling `simulate_fn(put_delta, call_delta)` for each."""
+function _find_optimal_deltas_grid(
+    delta_grid::Vector{Float64},
+    simulate_fn::Function
+)::Union{Tuple{Float64,Float64,Float64},Nothing}
+    best_pnl = -Inf
+    best_put_delta = 0.15
+    best_call_delta = 0.15
+    n_valid = 0
+
+    for put_delta in delta_grid
+        for call_delta in delta_grid
+            pnl = simulate_fn(put_delta, call_delta)
+            pnl === nothing && continue
+            n_valid += 1
+
+            if pnl > best_pnl
+                best_pnl = pnl
+                best_put_delta = put_delta
+                best_call_delta = call_delta
+            end
+        end
+    end
+
+    n_valid < 1 && return nothing
+    return (best_put_delta, best_call_delta, best_pnl)
 end
 
 """
@@ -150,33 +187,11 @@ function find_optimal_deltas(
     expiry_interval::Period=Day(1),
     delta_grid::Vector{Float64}=DELTA_GRID
 )::Union{Tuple{Float64,Float64,Float64},Nothing}
-    best_pnl = -Inf
-    best_put_delta = 0.15
-    best_call_delta = 0.15
-
-    n_valid = 0
-
-    for put_delta in delta_grid
-        for call_delta in delta_grid
-            pnl = simulate_strangle_pnl(
-                surface, settlement_spot, put_delta, call_delta;
-                rate=rate, div_yield=div_yield, expiry_interval=expiry_interval
-            )
-            pnl === nothing && continue
-            n_valid += 1
-
-            if pnl > best_pnl
-                best_pnl = pnl
-                best_put_delta = put_delta
-                best_call_delta = call_delta
-            end
-        end
-    end
-
-    # Need at least some valid combinations
-    n_valid < 1 && return nothing
-
-    return (best_put_delta, best_call_delta, best_pnl)
+    sim_fn = (pd, cd) -> simulate_strangle_pnl(
+        surface, settlement_spot, pd, cd;
+        rate=rate, div_yield=div_yield, expiry_interval=expiry_interval
+    )
+    return _find_optimal_deltas_grid(delta_grid, sim_fn)
 end
 
 """
@@ -230,33 +245,9 @@ function simulate_condor_pnl(
     div_yield::Float64=0.013,
     expiry_interval::Period=Day(1)
 )::Union{Float64,Nothing}
-    expiry_result = _select_expiry(expiry_interval, surface)
-    expiry_result === nothing && return nothing
-
-    expiry, _, tau = expiry_result
-    tau <= 0.0 && return nothing
-
-    recs = filter(r -> r.expiry == expiry, surface.records)
-    isempty(recs) && return nothing
-
-    put_recs = filter(r -> r.option_type == Put, recs)
-    call_recs = filter(r -> r.option_type == Call, recs)
-    isempty(put_recs) && return nothing
-    isempty(call_recs) && return nothing
-
-    put_strikes = sort(unique(r.strike for r in put_recs))
-    call_strikes = sort(unique(r.strike for r in call_recs))
-    isempty(put_strikes) && return nothing
-    isempty(call_strikes) && return nothing
-
-    ctx = (
-        surface=surface,
-        expiry=expiry,
-        tau=tau,
-        recs=recs,
-        put_strikes=put_strikes,
-        call_strikes=call_strikes
-    )
+    env = _prepare_simulation_env(surface, expiry_interval, rate, div_yield; compute_strikes=true)
+    env === nothing && return nothing
+    (; put_recs, call_recs, ctx) = env
 
     use_fixed_delta_wings = (
         wing_objective == :target_max_loss &&
@@ -366,40 +357,21 @@ function find_optimal_condor_deltas(
     expiry_interval::Period=Day(1),
     delta_grid::Vector{Float64}=DELTA_GRID
 )::Union{Tuple{Float64,Float64,Float64},Nothing}
-    best_pnl = -Inf
-    best_put_delta = 0.15
-    best_call_delta = 0.15
-    n_valid = 0
-
-    for put_delta in delta_grid
-        for call_delta in delta_grid
-            pnl = simulate_condor_pnl(
-                surface, settlement_spot, put_delta, call_delta;
-                wing_delta_abs=wing_delta_abs,
-                target_max_loss=target_max_loss,
-                wing_objective=wing_objective,
-                max_loss_min=max_loss_min,
-                max_loss_max=max_loss_max,
-                min_credit=min_credit,
-                min_delta_gap=min_delta_gap,
-                prefer_symmetric=prefer_symmetric,
-                rate=rate,
-                div_yield=div_yield,
-                expiry_interval=expiry_interval
-            )
-            pnl === nothing && continue
-            n_valid += 1
-
-            if pnl > best_pnl
-                best_pnl = pnl
-                best_put_delta = put_delta
-                best_call_delta = call_delta
-            end
-        end
-    end
-
-    n_valid < 1 && return nothing
-    return (best_put_delta, best_call_delta, best_pnl)
+    sim_fn = (pd, cd) -> simulate_condor_pnl(
+        surface, settlement_spot, pd, cd;
+        wing_delta_abs=wing_delta_abs,
+        target_max_loss=target_max_loss,
+        wing_objective=wing_objective,
+        max_loss_min=max_loss_min,
+        max_loss_max=max_loss_max,
+        min_credit=min_credit,
+        min_delta_gap=min_delta_gap,
+        prefer_symmetric=prefer_symmetric,
+        rate=rate,
+        div_yield=div_yield,
+        expiry_interval=expiry_interval
+    )
+    return _find_optimal_deltas_grid(delta_grid, sim_fn)
 end
 
 """
@@ -412,28 +384,9 @@ function build_condor_ctx(
     surface::VolatilitySurface;
     expiry_interval::Period=Day(1)
 )::Union{Nothing,NamedTuple}
-    expiry_result = _select_expiry(expiry_interval, surface)
-    expiry_result === nothing && return nothing
-
-    expiry, _, tau = expiry_result
-    tau <= 0.0 && return nothing
-
-    recs = filter(r -> r.expiry == expiry, surface.records)
-    isempty(recs) && return nothing
-
-    put_strikes = sort(unique(r.strike for r in recs if r.option_type == Put))
-    call_strikes = sort(unique(r.strike for r in recs if r.option_type == Call))
-    (isempty(put_strikes) || isempty(call_strikes)) && return nothing
-
-    ctx = (
-        surface=surface,
-        expiry=expiry,
-        tau=tau,
-        recs=recs,
-        put_strikes=put_strikes,
-        call_strikes=call_strikes
-    )
-    return (ctx=ctx, expiry=expiry, tau=tau)
+    env = _prepare_simulation_env(surface, expiry_interval, 0.045, 0.013; compute_strikes=true)
+    env === nothing && return nothing
+    return (ctx=env.ctx, expiry=env.expiry, tau=env.tau)
 end
 
 function _leg_relative_spread(rec::OptionRecord)::Float64
@@ -916,30 +869,13 @@ function generate_condor_candidate_training_data(
     return CondorScoringDataset(X, utilities, pnls, max_losses, timestamps)
 end
 
-"""
-    generate_condor_training_data(surfaces, settlement_spots, spot_history_dict;
-        rate, div_yield, expiry_interval, wing_delta_abs, target_max_loss, wing_objective,
-        max_loss_min, max_loss_max, min_credit, min_delta_gap, prefer_symmetric, use_logsig, verbose)
-        -> TrainingDataset
-
-Generate training data for iron condor strike selection by grid searching
-optimal inner deltas under the configured wing policy.
-"""
-function generate_condor_training_data(
+"""Core loop for generating delta-prediction training data via grid-search optimization."""
+function _generate_delta_training_data_core(
     surfaces::Dict{DateTime,VolatilitySurface},
     settlement_spots::Dict{DateTime,Float64},
-    spot_history_dict::Dict{DateTime,SpotHistory};
-    rate::Float64=0.045,
-    div_yield::Float64=0.013,
+    spot_history_dict::Dict{DateTime,SpotHistory},
+    optimize_fn::Function;
     expiry_interval::Period=Day(1),
-    wing_delta_abs::Union{Nothing,Float64}=0.05,
-    target_max_loss::Union{Nothing,Float64}=nothing,
-    wing_objective::Symbol=:target_max_loss,
-    max_loss_min::Float64=0.0,
-    max_loss_max::Float64=Inf,
-    min_credit::Float64=0.0,
-    min_delta_gap::Float64=0.08,
-    prefer_symmetric::Bool=true,
     use_logsig::Bool=false,
     prev_surfaces::Union{Nothing,Dict{DateTime,VolatilitySurface}}=nothing,
     verbose::Bool=true
@@ -982,20 +918,7 @@ function generate_condor_training_data(
             continue
         end
 
-        result = find_optimal_condor_deltas(
-            surface, settlement;
-            wing_delta_abs=wing_delta_abs,
-            target_max_loss=target_max_loss,
-            wing_objective=wing_objective,
-            max_loss_min=max_loss_min,
-            max_loss_max=max_loss_max,
-            min_credit=min_credit,
-            min_delta_gap=min_delta_gap,
-            prefer_symmetric=prefer_symmetric,
-            rate=rate,
-            div_yield=div_yield,
-            expiry_interval=expiry_interval
-        )
+        result = optimize_fn(surface, settlement)
         if result === nothing
             n_skipped += 1
             continue
@@ -1032,6 +955,57 @@ function generate_condor_training_data(
     end
 
     return TrainingDataset(X, Y, raw_Y, pnls, size_labels, timestamps)
+end
+
+"""
+    generate_condor_training_data(surfaces, settlement_spots, spot_history_dict;
+        rate, div_yield, expiry_interval, wing_delta_abs, target_max_loss, wing_objective,
+        max_loss_min, max_loss_max, min_credit, min_delta_gap, prefer_symmetric, use_logsig, verbose)
+        -> TrainingDataset
+
+Generate training data for iron condor strike selection by grid searching
+optimal inner deltas under the configured wing policy.
+"""
+function generate_condor_training_data(
+    surfaces::Dict{DateTime,VolatilitySurface},
+    settlement_spots::Dict{DateTime,Float64},
+    spot_history_dict::Dict{DateTime,SpotHistory};
+    rate::Float64=0.045,
+    div_yield::Float64=0.013,
+    expiry_interval::Period=Day(1),
+    wing_delta_abs::Union{Nothing,Float64}=0.05,
+    target_max_loss::Union{Nothing,Float64}=nothing,
+    wing_objective::Symbol=:target_max_loss,
+    max_loss_min::Float64=0.0,
+    max_loss_max::Float64=Inf,
+    min_credit::Float64=0.0,
+    min_delta_gap::Float64=0.08,
+    prefer_symmetric::Bool=true,
+    use_logsig::Bool=false,
+    prev_surfaces::Union{Nothing,Dict{DateTime,VolatilitySurface}}=nothing,
+    verbose::Bool=true
+)::TrainingDataset
+    opt_fn = (surface, settlement) -> find_optimal_condor_deltas(
+        surface, settlement;
+        wing_delta_abs=wing_delta_abs,
+        target_max_loss=target_max_loss,
+        wing_objective=wing_objective,
+        max_loss_min=max_loss_min,
+        max_loss_max=max_loss_max,
+        min_credit=min_credit,
+        min_delta_gap=min_delta_gap,
+        prefer_symmetric=prefer_symmetric,
+        rate=rate,
+        div_yield=div_yield,
+        expiry_interval=expiry_interval
+    )
+    return _generate_delta_training_data_core(
+        surfaces, settlement_spots, spot_history_dict, opt_fn;
+        expiry_interval=expiry_interval,
+        use_logsig=use_logsig,
+        prev_surfaces=prev_surfaces,
+        verbose=verbose
+    )
 end
 
 """
@@ -1110,96 +1084,107 @@ function generate_training_data(
     prev_surfaces::Union{Nothing,Dict{DateTime,VolatilitySurface}}=nothing,
     verbose::Bool=true
 )::TrainingDataset
-    features_list = Vector{Float32}[]
-    labels_list = Vector{Float32}[]
-    raw_deltas_list = Vector{Float32}[]
-    pnls = Float32[]
-    timestamps = DateTime[]
+    opt_fn = (surface, settlement) -> find_optimal_deltas(
+        surface, settlement;
+        rate=rate, div_yield=div_yield, expiry_interval=expiry_interval
+    )
+    return _generate_delta_training_data_core(
+        surfaces, settlement_spots, spot_history_dict, opt_fn;
+        expiry_interval=expiry_interval,
+        use_logsig=use_logsig,
+        prev_surfaces=prev_surfaces,
+        verbose=verbose
+    )
+end
 
-    sorted_ts = sort(collect(keys(surfaces)))
-    n_total = length(sorted_ts)
-    n_skipped = 0
-    n_processed = 0
+"""Generic training loop with early stopping, used by both `train_model!` and `train_scoring_model!`."""
+function _train_loop!(
+    model,
+    n_samples::Int,
+    get_batch::Function,
+    compute_loss::Function,
+    compute_val_loss::Union{Nothing,Function},
+    history_keys::Vector{String};
+    on_batch_end::Union{Nothing,Function}=nothing,
+    format_epoch::Union{Nothing,Function}=nothing,
+    epochs::Int=100,
+    batch_size::Int=32,
+    learning_rate::Float64=1e-3,
+    patience::Int=10,
+    verbose::Bool=true
+)
+    opt_state = Flux.setup(Adam(learning_rate), model)
+    best_val_loss = Inf
+    patience_counter = 0
+    best_model_state = nothing
+    history = Dict{String,Vector{Float64}}(k => Float64[] for k in history_keys)
 
-    for (i, ts) in enumerate(sorted_ts)
-        surface = surfaces[ts]
+    for epoch in 1:epochs
+        perm = randperm(n_samples)
+        epoch_loss = 0.0
+        n_batches = 0
+        accum = Dict{String,Float64}()
 
-        # Compute expiry time
-        expiry_target = ts + expiry_interval
-        expiries = unique(rec.expiry for rec in surface.records)
-        isempty(expiries) && continue
+        Flux.trainmode!(model)
 
-        taus = [time_to_expiry(e, ts) for e in expiries]
-        tau_target = time_to_expiry(expiry_target, ts)
-        idx = argmin(abs.(taus .- tau_target))
-        expiry = expiries[idx]
-        tau = taus[idx]
+        for batch_start in 1:batch_size:n_samples
+            batch_end = min(batch_start + batch_size - 1, n_samples)
+            batch_idx = perm[batch_start:batch_end]
+            batch_data = get_batch(batch_idx)
 
-        # Get settlement spot
-        settlement = get(settlement_spots, expiry, nothing)
-        if settlement === nothing
-            n_skipped += 1
-            continue
+            loss, grads = Flux.withgradient(model) do m
+                compute_loss(m, batch_data)
+            end
+            Flux.update!(opt_state, model, grads[1])
+
+            epoch_loss += loss
+            n_batches += 1
+
+            if on_batch_end !== nothing
+                on_batch_end(model, batch_data, accum)
+            end
         end
 
-        # Get spot history for this timestamp
-        spot_history = get(spot_history_dict, ts, nothing)
-        prev_surface = prev_surfaces !== nothing ? get(prev_surfaces, ts, nothing) : nothing
+        avg_train_loss = epoch_loss / n_batches
+        push!(history["train_loss"], Float64(avg_train_loss))
 
-        # Extract features
-        feats = extract_features(surface, tau; spot_history=spot_history, use_logsig=use_logsig, prev_surface=prev_surface)
-        if feats === nothing
-            n_skipped += 1
-            continue
+        Flux.testmode!(model)
+        val_loss = if compute_val_loss !== nothing
+            compute_val_loss(model)
+        else
+            avg_train_loss
+        end
+        push!(history["val_loss"], Float64(val_loss))
+
+        extra_str = ""
+        if format_epoch !== nothing
+            extra_str = format_epoch(accum, n_batches, history)
         end
 
-        # Find optimal deltas
-        result = find_optimal_deltas(
-            surface, settlement;
-            rate=rate, div_yield=div_yield, expiry_interval=expiry_interval
-        )
-        if result === nothing
-            n_skipped += 1
-            continue
+        if val_loss < best_val_loss
+            best_val_loss = val_loss
+            patience_counter = 0
+            best_model_state = Flux.state(model)
+        else
+            patience_counter += 1
         end
 
-        best_put_delta, best_call_delta, best_pnl = result
+        if verbose && (epoch % 10 == 0 || epoch == 1 || patience_counter >= patience)
+            val_str = compute_val_loss !== nothing ? ", val=$(round(val_loss, digits=6))" : ""
+            println("  Epoch $epoch: train=$(round(avg_train_loss, digits=6))$val_str$extra_str")
+        end
 
-        # Store data
-        push!(features_list, features_to_vector(feats))
-        push!(raw_deltas_list, Float32[best_put_delta, best_call_delta])
-        # Scale deltas to [0, 1] for model training
-        scaled = unscale_deltas(Float32[best_put_delta, best_call_delta])
-        push!(labels_list, scaled)
-        push!(pnls, Float32(best_pnl))
-        push!(timestamps, ts)
-
-        n_processed += 1
-
-        if verbose && (i % 20 == 0 || i == n_total)
-            println("  Processed $i / $n_total (valid: $n_processed, skipped: $n_skipped)")
+        if patience_counter >= patience
+            verbose && println("  Early stopping at epoch $epoch")
+            break
         end
     end
 
-    if isempty(features_list)
-        error("No valid training samples generated")
+    if best_model_state !== nothing && compute_val_loss !== nothing
+        Flux.loadmodel!(model, best_model_state)
     end
 
-    # Stack into matrices
-    X = reduce(hcat, features_list)
-    Y = reduce(hcat, labels_list)
-    raw_Y = reduce(hcat, raw_deltas_list)
-
-    # Compute position size labels from P&L distribution
-    size_labels = compute_size_labels(pnls)
-
-    if verbose
-        n_positive = count(p -> p > 0, pnls)
-        avg_size = mean(size_labels)
-        println("  Position sizing: $(n_positive)/$(length(pnls)) profitable, avg_size=$(round(avg_size, digits=3))")
-    end
-
-    return TrainingDataset(X, Y, raw_Y, pnls, size_labels, timestamps)
+    return model, history
 end
 
 """
@@ -1235,102 +1220,43 @@ function train_model!(
     size_weight::Float32=1.0f0,
     verbose::Bool=true
 )
-    opt_state = Flux.setup(Adam(learning_rate), model)
-
     n_samples = size(train_data.features, 2)
-    best_val_loss = Inf
-    patience_counter = 0
-    best_model_state = nothing
 
-    history = Dict{String,Vector{Float64}}(
-        "train_loss" => Float64[],
-        "val_loss" => Float64[],
-        "train_delta_loss" => Float64[],
-        "train_size_loss" => Float64[]
+    get_batch = batch_idx -> (
+        x=train_data.features[:, batch_idx],
+        y_deltas=train_data.labels[:, batch_idx],
+        y_sizes=train_data.size_labels[batch_idx]
     )
 
-    for epoch in 1:epochs
-        # Shuffle data
-        perm = randperm(n_samples)
+    loss_fn = (m, bd) -> combined_loss(m, bd.x, bd.y_deltas, bd.y_sizes;
+        delta_weight=delta_weight, size_weight=size_weight)
 
-        epoch_loss = 0.0
-        epoch_delta_loss = 0.0
-        epoch_size_loss = 0.0
-        n_batches = 0
+    val_fn = val_data !== nothing ? (m -> begin
+        combined_loss(m, val_data.features, val_data.labels, val_data.size_labels;
+            delta_weight=delta_weight, size_weight=size_weight)
+    end) : nothing
 
-        # Training mode
-        Flux.trainmode!(model)
-
-        for batch_start in 1:batch_size:n_samples
-            batch_end = min(batch_start + batch_size - 1, n_samples)
-            batch_idx = perm[batch_start:batch_end]
-
-            x_batch = train_data.features[:, batch_idx]
-            y_deltas_batch = train_data.labels[:, batch_idx]
-            y_sizes_batch = train_data.size_labels[batch_idx]
-
-            # Compute gradients and update
-            loss, grads = Flux.withgradient(model) do m
-                combined_loss(m, x_batch, y_deltas_batch, y_sizes_batch;
-                    delta_weight=delta_weight, size_weight=size_weight)
-            end
-
-            Flux.update!(opt_state, model, grads[1])
-
-            # Track individual losses for monitoring
-            preds = model(x_batch)
-            d_loss = mse(preds[1:2, :], y_deltas_batch)
-            s_loss = mse(preds[3, :], y_sizes_batch)
-
-            epoch_loss += loss
-            epoch_delta_loss += d_loss
-            epoch_size_loss += s_loss
-            n_batches += 1
-        end
-
-        avg_train_loss = epoch_loss / n_batches
-        avg_delta_loss = epoch_delta_loss / n_batches
-        avg_size_loss = epoch_size_loss / n_batches
-        push!(history["train_loss"], avg_train_loss)
-        push!(history["train_delta_loss"], Float64(avg_delta_loss))
-        push!(history["train_size_loss"], Float64(avg_size_loss))
-
-        # Validation
-        val_loss = if val_data !== nothing
-            Flux.testmode!(model)
-            combined_loss(model, val_data.features, val_data.labels, val_data.size_labels;
-                delta_weight=delta_weight, size_weight=size_weight)
-        else
-            avg_train_loss
-        end
-        push!(history["val_loss"], Float64(val_loss))
-
-        # Early stopping
-        if val_loss < best_val_loss
-            best_val_loss = val_loss
-            patience_counter = 0
-            best_model_state = Flux.state(model)
-        else
-            patience_counter += 1
-        end
-
-        if verbose && (epoch % 10 == 0 || epoch == 1 || patience_counter >= patience)
-            val_str = val_data !== nothing ? ", val=$(round(val_loss, digits=6))" : ""
-            println("  Epoch $epoch: train=$(round(avg_train_loss, digits=6))$val_str (δ=$(round(avg_delta_loss, digits=4)), sz=$(round(avg_size_loss, digits=4)))")
-        end
-
-        if patience_counter >= patience
-            verbose && println("  Early stopping at epoch $epoch")
-            break
-        end
+    batch_end_fn = (m, bd, accum) -> begin
+        preds = m(bd.x)
+        accum["delta"] = get(accum, "delta", 0.0) + Float64(mse(preds[1:2, :], bd.y_deltas))
+        accum["size"] = get(accum, "size", 0.0) + Float64(mse(preds[3, :], bd.y_sizes))
     end
 
-    # Restore best model if we have validation
-    if best_model_state !== nothing && val_data !== nothing
-        Flux.loadmodel!(model, best_model_state)
+    fmt_fn = (accum, n_batches, history) -> begin
+        avg_d = get(accum, "delta", 0.0) / n_batches
+        avg_s = get(accum, "size", 0.0) / n_batches
+        push!(history["train_delta_loss"], avg_d)
+        push!(history["train_size_loss"], avg_s)
+        " (δ=$(round(avg_d, digits=4)), sz=$(round(avg_s, digits=4)))"
     end
 
-    return model, history
+    return _train_loop!(
+        model, n_samples, get_batch, loss_fn, val_fn,
+        ["train_loss", "val_loss", "train_delta_loss", "train_size_loss"];
+        on_batch_end=batch_end_fn, format_epoch=fmt_fn,
+        epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
+        patience=patience, verbose=verbose
+    )
 end
 
 """
@@ -1401,78 +1327,29 @@ function train_scoring_model!(
     patience::Int=10,
     verbose::Bool=true
 )
-    opt_state = Flux.setup(Adam(learning_rate), model)
-
     n_samples = size(train_data.features, 2)
-    best_val_loss = Inf
-    patience_counter = 0
-    best_model_state = nothing
 
-    history = Dict{String,Vector{Float64}}(
-        "train_loss" => Float64[],
-        "val_loss" => Float64[]
+    get_batch = batch_idx -> (
+        x=train_data.features[:, batch_idx],
+        y=train_data.utilities[batch_idx]
     )
 
-    for epoch in 1:epochs
-        perm = randperm(n_samples)
-        epoch_loss = 0.0
-        n_batches = 0
-
-        Flux.trainmode!(model)
-
-        for batch_start in 1:batch_size:n_samples
-            batch_end = min(batch_start + batch_size - 1, n_samples)
-            batch_idx = perm[batch_start:batch_end]
-
-            x_batch = train_data.features[:, batch_idx]
-            y_batch = train_data.utilities[batch_idx]
-
-            loss, grads = Flux.withgradient(model) do m
-                preds = vec(m(x_batch))
-                mse(preds, y_batch)
-            end
-            Flux.update!(opt_state, model, grads[1])
-
-            epoch_loss += loss
-            n_batches += 1
-        end
-
-        avg_train_loss = epoch_loss / n_batches
-        push!(history["train_loss"], Float64(avg_train_loss))
-
-        val_loss = if val_data === nothing
-            avg_train_loss
-        else
-            Flux.testmode!(model)
-            preds = vec(model(val_data.features))
-            mse(preds, val_data.utilities)
-        end
-        push!(history["val_loss"], Float64(val_loss))
-
-        if val_loss < best_val_loss
-            best_val_loss = val_loss
-            patience_counter = 0
-            best_model_state = Flux.state(model)
-        else
-            patience_counter += 1
-        end
-
-        if verbose && (epoch % 10 == 0 || epoch == 1 || patience_counter >= patience)
-            val_str = val_data !== nothing ? ", val=$(round(val_loss, digits=6))" : ""
-            println("  Epoch $epoch: train=$(round(avg_train_loss, digits=6))$val_str")
-        end
-
-        if patience_counter >= patience
-            verbose && println("  Early stopping at epoch $epoch")
-            break
-        end
+    loss_fn = (m, bd) -> begin
+        preds = vec(m(bd.x))
+        mse(preds, bd.y)
     end
 
-    if best_model_state !== nothing && val_data !== nothing
-        Flux.loadmodel!(model, best_model_state)
-    end
+    val_fn = val_data !== nothing ? (m -> begin
+        preds = vec(m(val_data.features))
+        mse(preds, val_data.utilities)
+    end) : nothing
 
-    return model, history
+    return _train_loop!(
+        model, n_samples, get_batch, loss_fn, val_fn,
+        ["train_loss", "val_loss"];
+        epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
+        patience=patience, verbose=verbose
+    )
 end
 
 """
