@@ -45,6 +45,7 @@ julia --project=scripts scripts/evaluate_condor_prediction_vs_baseline.jl
 
 - **Backtest engine**
   - `backtest/portfolio.jl` -- `Position`, `open_position`, `settle`, `entry_cost`
+  - `backtest/data_source.jl` -- `BacktestDataSource` protocol, `DictDataSource`, `ParquetDataSource`
   - `backtest/engine.jl` -- `Strategy`, `ScheduledStrategy`, `backtest_strategy`
   - `backtest/metrics.jl` -- `performance_metrics`, `condor_trade_table`, `condor_max_loss_by_key`
   - `backtest/plots.jl` -- plot helpers
@@ -63,7 +64,8 @@ julia --project=scripts scripts/evaluate_condor_prediction_vs_baseline.jl
 
 ### Key Patterns
 
-- **Strategy interface**: Implement `ScheduledStrategy` with `entry_schedule()` and `entry_positions()`. The engine calls `backtest_strategy(strategy, surfaces, spots)` returning `(positions, pnls)`.
+- **Strategy interface**: Implement `ScheduledStrategy` with `entry_schedule()` and `entry_positions()`. The engine calls `backtest_strategy(strategy, source::BacktestDataSource)` returning `(positions, pnls)`. A backward-compatible `backtest_strategy(strategy, surfaces, spots)` convenience method wraps dicts in `DictDataSource`.
+- **Data source protocol**: `BacktestDataSource` is the abstract type with three methods: `available_timestamps(source)`, `get_surface(source, ts)`, `get_settlement_spot(source, ts)`. `DictDataSource` wraps pre-loaded dicts. `ParquetDataSource` loads lazily from parquet with caching (2x faster than Dict on SPY because it eliminates the dry-run pattern).
 - **Strike selectors**: Callable `f(ctx) -> strikes_tuple | nothing`. The `ctx` named tuple: `(surface, expiry, tau, recs, put_strikes, call_strikes)`.
 - **Pricing convention**: Prices in `OptionRecord` are fractions of spot (Deribit convention). Multiply by `surface.spot` for USD. The backtest uses bid for sells, ask for buys.
 - **ROI evaluation**: `performance_metrics(positions, pnls; margin_by_key=condor_max_loss_by_key(positions))` computes ROI using per-condor max loss as margin.
@@ -90,6 +92,7 @@ root/
 | `backtest_polygon_short_strangle.jl` | Yes | Strangle backtest |
 | `ml_strike_selector.jl` | Yes (for validation) | ML training + backtest evaluation |
 | `evaluate_condor_prediction_vs_baseline.jl` | **No** (own loop) | Detailed ML vs baseline comparison |
+| `compare_datasources.jl` | Yes | Correctness + speed comparison of DictDataSource vs ParquetDataSource |
 
 Scripts use `scripts/Project.toml` via `Pkg.activate(@__DIR__)`.
 
@@ -160,3 +163,4 @@ Scripts use `scripts/Project.toml` via `Pkg.activate(@__DIR__)`.
 - `nothing` for "computation failed / skip this entry"
 - `DAYS_PER_YEAR = 365.25` for time-to-expiry
 - Deribit expiry normalized to 08:00 UTC; Polygon expiry to 16:00 ET (DST-aware)
+- **Commit messages**: Do not mention Claude, AI, or any assistant tooling in commit messages or PR descriptions

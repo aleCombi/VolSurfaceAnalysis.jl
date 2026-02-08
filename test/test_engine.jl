@@ -195,5 +195,26 @@ using DuckDB
         @test pnl[1] ≈ expected_pnl
     end
 
+    # ============================================================
+    # 6. DictDataSource — same result via protocol
+    # ============================================================
+    @testset "DictDataSource" begin
+        source = DictDataSource(surfaces, settlement_spots)
+
+        @test available_timestamps(source) == schedule
+        @test get_surface(source, entry_ts) isa VolatilitySurface
+        @test get_surface(source, DateTime(2099, 1, 1)) === nothing
+        @test get_settlement_spot(source, expiry_ts) == settlement_spot
+        @test ismissing(get_settlement_spot(source, DateTime(2099, 1, 1)))
+
+        pos2, pnl2 = backtest_strategy(BuyTheOnlyCall(), source)
+
+        @test length(pos2) == length(positions)
+        @test length(pnl2) == length(pnl)
+        @test pos2[1].trade.strike == positions[1].trade.strike
+        @test pos2[1].entry_price  == positions[1].entry_price
+        @test pnl2[1] ≈ pnl[1]
+    end
+
     try rm(tmpfile; force=true) catch end
 end

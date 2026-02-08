@@ -33,6 +33,7 @@ include("trades.jl")               # Trade representation and pricing
 # Backtesting
 # ============================================================================
 include("backtest/portfolio.jl")   # Position management (pure)
+include("backtest/data_source.jl") # BacktestDataSource protocol
 include("backtest/engine.jl")      # Minimal backtest engine
 include("backtest/metrics.jl")     # Backtest metrics
 include("backtest/plots.jl")       # Backtest plots
@@ -113,6 +114,10 @@ export Position, open_position, entry_cost, settle
 export Strategy, ScheduledStrategy
 export next_portfolio, entry_schedule, entry_positions
 export BacktestResult, backtest_strategy
+
+# Data sources
+export BacktestDataSource, DictDataSource, ParquetDataSource
+export available_timestamps, get_surface, get_settlement_spot
 export BacktestMetrics, PerformanceMetrics
 export aggregate_pnl, backtest_metrics, performance_metrics, profit_curve, average_entry_spread
 export condor_group_stats, condor_trade_table, condor_max_loss_by_key
