@@ -612,16 +612,51 @@ function main()
         if model_mode == :delta
             x_norm = (state_x .- feature_means) ./ feature_stds
             raw = model(reshape(x_norm, :, 1))
-            pred_deltas = scale_deltas(raw[1:2, :]; min_delta=MIN_DELTA, max_delta=MAX_DELTA)
-            pred_put_delta = Float64(pred_deltas[1])
-            pred_call_delta = Float64(pred_deltas[2])
-            pred_size = size(raw, 1) >= 3 ? Float64(raw[3, 1]) : missing
-            pred_condor = _resolve_condor(
-                ctx,
-                settlement,
-                pred_put_delta,
-                pred_call_delta
-            )
+            n_outputs = size(raw, 1)
+
+            if n_outputs == 4
+                # 4-output model: all deltas predicted end-to-end
+                scaled = scale_deltas_4d(raw)
+                pred_put_delta = Float64(scaled[1])
+                pred_call_delta = Float64(scaled[2])
+                lp_delta = Float64(scaled[3])
+                lc_delta = Float64(scaled[4])
+                pred_size = missing
+
+                strikes = _delta_condor_strikes(
+                    ctx, pred_put_delta, pred_call_delta, lp_delta, lc_delta;
+                    rate=RISK_FREE_RATE, div_yield=DIV_YIELD,
+                    min_delta_gap=MIN_DELTA_GAP
+                )
+                pred_condor = if strikes !== nothing
+                    sp_K, sc_K, lp_K, lc_K = strikes
+                    metrics = condor_metrics_from_strikes(
+                        ctx, settlement, sp_K, sc_K, lp_K, lc_K;
+                        rate=RISK_FREE_RATE, div_yield=DIV_YIELD
+                    )
+                    if metrics !== nothing
+                        (short_put_K=sp_K, short_call_K=sc_K,
+                         long_put_K=lp_K, long_call_K=lc_K,
+                         pnl=metrics.pnl, max_loss=metrics.max_loss)
+                    else
+                        nothing
+                    end
+                else
+                    nothing
+                end
+            else
+                # 2/3-output model: predict short deltas, search for wings
+                pred_deltas = scale_deltas(raw[1:2, :]; min_delta=MIN_DELTA, max_delta=MAX_DELTA)
+                pred_put_delta = Float64(pred_deltas[1])
+                pred_call_delta = Float64(pred_deltas[2])
+                pred_size = n_outputs >= 3 ? Float64(raw[3, 1]) : missing
+                pred_condor = _resolve_condor(
+                    ctx,
+                    settlement,
+                    pred_put_delta,
+                    pred_call_delta
+                )
+            end
             x_for_stats = Float64.(state_x)
             x_norm_for_stats = Float64.(x_norm)
         else
