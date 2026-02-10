@@ -1,40 +1,14 @@
 # Backtest engine (minimal, functional)
-# Strategy transforms a portfolio at time t into a portfolio at time t+epsilon.
 
 using Dates
-
-"""
-    Strategy
-
-Abstract strategy type. Implement `next_portfolio` to define how the portfolio
-should evolve given the current portfolio, surface, and previous timestamp.
-"""
-abstract type Strategy end
-
-"""
-    next_portfolio(strategy, positions, surface, prev_timestamp) -> Vector{Position}
-
-Return the portfolio at time t+epsilon given the portfolio at time t, the
-market surface observed at time t, and the previous timestamp.
-
-This function must be implemented by user strategies.
-"""
-function next_portfolio(
-    ::Strategy,
-    ::Vector{Position},
-    ::VolatilitySurface,
-    ::DateTime
-)::Vector{Position}
-    error("next_portfolio not implemented for this strategy")
-end
 
 """
     ScheduledStrategy
 
 Abstract strategy with a fixed entry schedule. Implement `entry_schedule` and
-`entry_positions`. A default `next_portfolio` is provided.
+`entry_positions`.
 """
-abstract type ScheduledStrategy <: Strategy end
+abstract type ScheduledStrategy end
 
 """
     entry_schedule(strategy) -> Vector{DateTime}
@@ -48,55 +22,24 @@ end
 """
     entry_positions(strategy, surface) -> Vector{Position}
 
-Return the positions to enter at the given surface. Positions can depend on both
-the strategy and the surface.
+Return the positions to enter at the given surface (legacy 2-arg form).
 """
 function entry_positions(::ScheduledStrategy, ::VolatilitySurface)::Vector{Position}
     error("entry_positions not implemented for this strategy")
 end
 
 """
-    next_portfolio(strategy, positions, surface, prev_timestamp) -> Vector{Position}
+    entry_positions(strategy, surface, history::BacktestDataSource) -> Vector{Position}
 
-Default implementation for scheduled strategies. `prev_timestamp` must always be
-provided; for the first step, pass the current timestamp (or an earlier time if
-you want entries at the first snapshot).
+Return the positions to enter at the given surface. `history` is a
+`BacktestDataSource` filtered to timestamps <= the current entry time,
+providing access to historical surfaces and spot prices without look-ahead.
+
+Strategies that don't need history can implement the 2-arg form instead;
+the default 3-arg fallback delegates to it.
 """
-function next_portfolio(
-    strategy::ScheduledStrategy,
-    positions::Vector{Position},
-    surface::VolatilitySurface,
-    prev_timestamp::DateTime
-)::Vector{Position}
-    should_enter = any(
-        t -> (t > prev_timestamp && t <= surface.timestamp),
-        entry_schedule(strategy)
-    )
-
-    if should_enter
-        new_positions = entry_positions(strategy, surface)
-        return vcat(positions, new_positions)
-    end
-    return positions
-end
-
-"""
-    BacktestResult
-
-Minimal backtest result container.
-
-# Fields
-- `timestamps`: snapshot times
-- `realized_pnl`: realized P&L at each step (from expired positions)
-- `cumulative_pnl`: cumulative realized P&L
-- `positions`: optional portfolio snapshots (when recording is enabled)
-"""
-struct BacktestResult
-    timestamps::Vector{DateTime}
-    realized_pnl::Vector{Float64}
-    cumulative_pnl::Vector{Float64}
-    positions::Union{Nothing, Vector{Vector{Position}}}
-end
+entry_positions(s::ScheduledStrategy, surface::VolatilitySurface, ::BacktestDataSource) =
+    entry_positions(s, surface)
 
 """
     backtest_strategy(strategy, source::BacktestDataSource) -> (positions, pnl)
@@ -129,7 +72,8 @@ function backtest_strategy(
 
         surface = get_surface(source, ts[idx])
         surface === nothing && continue
-        positions = entry_positions(strategy, surface)
+        history = HistoricalView(source, ts[idx])
+        positions = entry_positions(strategy, surface, history)
 
         for pos in positions
             settlement_spot = get_settlement_spot(source, pos.trade.expiry)

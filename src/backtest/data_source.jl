@@ -1,5 +1,5 @@
 # BacktestDataSource protocol: abstracts how the backtest engine accesses
-# volatility surfaces (for entry) and spot prices (for settlement).
+# volatility surfaces, spot prices (for settlement), and historical data.
 
 using Dates
 
@@ -15,6 +15,8 @@ Abstract type for backtest data providers. Implementations must define:
 - `available_timestamps(source)::Vector{DateTime}` — sorted timestamps where entry surfaces exist
 - `get_surface(source, ts)::Union{VolatilitySurface, Nothing}` — surface at `ts`, or `nothing`
 - `get_settlement_spot(source, ts)::Union{Float64, Missing}` — settlement spot at `ts`, or `missing`
+- `get_spot(source, ts)::Union{Float64, Missing}` — spot price at any timestamp, or `missing`
+- `get_spots(source, from, to)::Dict{DateTime, Float64}` — all spot prices in `[from, to]`
 """
 abstract type BacktestDataSource end
 
@@ -45,6 +47,25 @@ function get_settlement_spot(::BacktestDataSource, ::DateTime)::Union{Float64, M
     error("get_settlement_spot not implemented for this BacktestDataSource")
 end
 
+"""
+    get_spot(source::BacktestDataSource, ts::DateTime) -> Union{Float64, Missing}
+
+Return the spot price at timestamp `ts`, or `missing` if unavailable.
+Unlike `get_settlement_spot`, this is for general spot queries (e.g. historical lookups).
+Default implementation falls back to `get_settlement_spot`.
+"""
+get_spot(source::BacktestDataSource, ts::DateTime)::Union{Float64, Missing} =
+    get_settlement_spot(source, ts)
+
+"""
+    get_spots(source::BacktestDataSource, from::DateTime, to::DateTime) -> Dict{DateTime, Float64}
+
+Return all available spot prices in the interval `[from, to]`.
+Default implementation returns an empty dict.
+"""
+get_spots(::BacktestDataSource, ::DateTime, ::DateTime)::Dict{DateTime, Float64} =
+    Dict{DateTime, Float64}()
+
 # ============================================================================
 # DictDataSource — wraps pre-loaded Dict{DateTime, VolatilitySurface} + spots
 # ============================================================================
@@ -63,6 +84,11 @@ end
 available_timestamps(d::DictDataSource) = sort(collect(keys(d.surfaces)))
 get_surface(d::DictDataSource, ts::DateTime) = get(d.surfaces, ts, nothing)
 get_settlement_spot(d::DictDataSource, ts::DateTime) = get(d.spots, ts, missing)
+get_spot(d::DictDataSource, ts::DateTime) = get(d.spots, ts, missing)
+
+function get_spots(d::DictDataSource, from::DateTime, to::DateTime)::Dict{DateTime, Float64}
+    Dict(k => v for (k, v) in d.spots if from <= k <= to)
+end
 
 # ============================================================================
 # ParquetDataSource — lazy loading from parquet files
@@ -147,26 +173,65 @@ function get_surface(s::ParquetDataSource, ts::DateTime)::Union{VolatilitySurfac
     return surf
 end
 
-function get_settlement_spot(s::ParquetDataSource, ts::DateTime)::Union{Float64, Missing}
-    d = Date(ts)
-
-    # Load all spots for this date if not cached
-    if !haskey(s.spot_date_cache, d)
-        date_str = Dates.format(d, "yyyy-mm-dd")
-        path = joinpath(s.spot_root, "date=$date_str", "symbol=$(s.spot_symbol)", "data.parquet")
-
-        if isfile(path)
-            dict = read_polygon_spot_prices(path; underlying=s.spot_symbol)
-            if s.spot_multiplier != 1.0
-                for (k, v) in dict
-                    dict[k] = v * s.spot_multiplier
-                end
+function _ensure_spot_date_cached!(s::ParquetDataSource, d::Date)
+    haskey(s.spot_date_cache, d) && return
+    date_str = Dates.format(d, "yyyy-mm-dd")
+    path = joinpath(s.spot_root, "date=$date_str", "symbol=$(s.spot_symbol)", "data.parquet")
+    if isfile(path)
+        dict = read_polygon_spot_prices(path; underlying=s.spot_symbol)
+        if s.spot_multiplier != 1.0
+            for (k, v) in dict
+                dict[k] = v * s.spot_multiplier
             end
-            s.spot_date_cache[d] = dict
-        else
-            s.spot_date_cache[d] = Dict{DateTime, Float64}()
         end
+        s.spot_date_cache[d] = dict
+    else
+        s.spot_date_cache[d] = Dict{DateTime, Float64}()
     end
-
-    return get(s.spot_date_cache[d], ts, missing)
 end
+
+function get_settlement_spot(s::ParquetDataSource, ts::DateTime)::Union{Float64, Missing}
+    _ensure_spot_date_cached!(s, Date(ts))
+    return get(s.spot_date_cache[Date(ts)], ts, missing)
+end
+
+get_spot(s::ParquetDataSource, ts::DateTime)::Union{Float64, Missing} =
+    get_settlement_spot(s, ts)
+
+function get_spots(s::ParquetDataSource, from::DateTime, to::DateTime)::Dict{DateTime, Float64}
+    result = Dict{DateTime, Float64}()
+    d = Date(from)
+    d_end = Date(to)
+    while d <= d_end
+        _ensure_spot_date_cached!(s, d)
+        for (ts, price) in s.spot_date_cache[d]
+            if from <= ts <= to
+                result[ts] = price
+            end
+        end
+        d += Day(1)
+    end
+    return result
+end
+
+# ============================================================================
+# HistoricalView — time-filtered wrapper preventing look-ahead bias
+# ============================================================================
+
+"""
+    HistoricalView <: BacktestDataSource
+
+Wraps a `BacktestDataSource` with a time cutoff. All queries for timestamps
+after the cutoff return nothing/missing, preventing look-ahead bias.
+The backtest engine creates one per entry time and passes it to `entry_positions`.
+"""
+struct HistoricalView <: BacktestDataSource
+    inner::BacktestDataSource
+    cutoff::DateTime
+end
+
+available_timestamps(v::HistoricalView) = filter(t -> t <= v.cutoff, available_timestamps(v.inner))
+get_surface(v::HistoricalView, ts::DateTime) = ts <= v.cutoff ? get_surface(v.inner, ts) : nothing
+get_settlement_spot(v::HistoricalView, ts::DateTime) = ts <= v.cutoff ? get_settlement_spot(v.inner, ts) : missing
+get_spot(v::HistoricalView, ts::DateTime) = ts <= v.cutoff ? get_spot(v.inner, ts) : missing
+get_spots(v::HistoricalView, from::DateTime, to::DateTime) = get_spots(v.inner, from, min(to, v.cutoff))

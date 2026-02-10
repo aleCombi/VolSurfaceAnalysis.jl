@@ -114,13 +114,13 @@ export Trade, price, payoff, find_vol
 export Position, open_position, entry_cost, settle
 
 # Engine
-export Strategy, ScheduledStrategy
-export next_portfolio, entry_schedule, entry_positions
-export BacktestResult, backtest_strategy
+export ScheduledStrategy
+export entry_schedule, entry_positions
+export backtest_strategy
 
 # Data sources
-export BacktestDataSource, DictDataSource, ParquetDataSource
-export available_timestamps, get_surface, get_settlement_spot
+export BacktestDataSource, DictDataSource, ParquetDataSource, HistoricalView
+export available_timestamps, get_surface, get_settlement_spot, get_spot, get_spots
 export BacktestMetrics, PerformanceMetrics
 export aggregate_pnl, backtest_metrics, performance_metrics, profit_curve, average_entry_spread
 export condor_group_stats, condor_trade_table, condor_max_loss_by_key
@@ -147,17 +147,20 @@ export normalize_features, apply_normalization
 
 # Model
 export create_strike_model, scale_deltas, unscale_deltas
+export scale_deltas_4d, unscale_deltas_4d, predict_condor_deltas
+export SHORT_MIN_DELTA, SHORT_MAX_DELTA, LONG_MIN_DELTA, LONG_MAX_DELTA
 export create_scoring_model
 export delta_loss, predict_deltas
 export predict_with_sizing, combined_loss
 
 # Training
-export TrainingDataset, DELTA_GRID
+export TrainingDataset, DELTA_GRID, LONG_DELTA_GRID
 export CondorScoringDataset
 export simulate_strangle_pnl, find_optimal_deltas
 export generate_training_data, train_model!, evaluate_model
 export compute_size_labels
 export simulate_condor_pnl, find_optimal_condor_deltas, generate_condor_training_data
+export simulate_condor_pnl_4d, find_optimal_condor_deltas_4d, generate_condor_4d_training_data
 export build_condor_ctx, condor_entry_metrics_from_strikes, condor_metrics_from_strikes
 export resolve_condor_from_deltas
 export enumerate_condor_candidates, condor_scoring_feature_vector

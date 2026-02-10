@@ -216,5 +216,67 @@ using DuckDB
         @test pnl2[1] ≈ pnl[1]
     end
 
+    # ============================================================
+    # 7. get_spot / get_spots on DictDataSource
+    # ============================================================
+    @testset "DictDataSource get_spot/get_spots" begin
+        # DictDataSource.get_spot delegates to the spots dict (same as get_settlement_spot)
+        source = DictDataSource(surfaces, settlement_spots)
+        @test get_spot(source, expiry_ts) == settlement_spot
+        @test ismissing(get_spot(source, DateTime(2099, 1, 1)))
+
+        # get_spots returns all spots in range
+        spots_range = get_spots(source, expiry_ts - Minute(1), expiry_ts + Minute(1))
+        @test haskey(spots_range, expiry_ts)
+        @test spots_range[expiry_ts] == settlement_spot
+
+        # Empty range returns empty dict
+        empty_range = get_spots(source, DateTime(2099, 1, 1), DateTime(2099, 1, 2))
+        @test isempty(empty_range)
+    end
+
+    # ============================================================
+    # 8. HistoricalView — time-filtered wrapper
+    # ============================================================
+    @testset "HistoricalView" begin
+        source = DictDataSource(surfaces, settlement_spots)
+
+        # View with cutoff at entry time: can see entry surface, not future
+        view = HistoricalView(source, entry_ts)
+        @test entry_ts in available_timestamps(view)
+        @test get_surface(view, entry_ts) isa VolatilitySurface
+
+        # Cannot see surface at a future time (if one existed)
+        future_ts = entry_ts + Day(1)
+        @test get_surface(view, future_ts) === nothing
+
+        # Settlement spot at expiry is in the future relative to entry
+        @test ismissing(get_settlement_spot(view, expiry_ts))
+        @test ismissing(get_spot(view, expiry_ts))
+
+        # get_spots clamps range to cutoff
+        clamped = get_spots(view, entry_ts - Day(1), expiry_ts)
+        for (ts, _) in clamped
+            @test ts <= entry_ts
+        end
+
+        # View with cutoff after expiry: can see everything
+        full_view = HistoricalView(source, expiry_ts + Day(1))
+        @test get_spot(full_view, expiry_ts) == settlement_spot
+    end
+
+    # ============================================================
+    # 9. 3-arg entry_positions backward compat (2-arg strategy works)
+    # ============================================================
+    @testset "entry_positions backward compat" begin
+        source = DictDataSource(surfaces, settlement_spots)
+        history = HistoricalView(source, entry_ts)
+
+        # BuyTheOnlyCall only implements 2-arg; 3-arg should delegate to it
+        pos3 = entry_positions(BuyTheOnlyCall(), surfaces[entry_ts], history)
+        @test length(pos3) == 1
+        @test pos3[1].trade.strike == strike
+    end
+
     try rm(tmpfile; force=true) catch end
 end

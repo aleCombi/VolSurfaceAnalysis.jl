@@ -24,14 +24,17 @@ const MODEL_MODE = :delta   # :delta (current), :score (candidate scoring), :hyb
 
 # Data periods
 const TRAIN_START = Date(2024, 2, 7)
-const TRAIN_END = Date(2025, 2, 7)
-const VAL_START = Date(2025, 2, 7)
-const VAL_END = Date(2025, 8, 7)
+const TRAIN_END = Date(2024, 11, 7)
+const VAL_START = Date(2024, 11, 7)
+const VAL_END = Date(2025, 2, 7)
+const TEST_START = Date(2025, 2, 7)
+const TEST_END = Date(2025, 5, 7)
 
 # Strategy parameters
 # Multiple entry times for training (more data), single time for validation (fair comparison)
 const TRAIN_ENTRY_TIMES_ET = [Time(10, 0), Time(11, 0), Time(12, 0), Time(13, 0), Time(14, 0)]
 const VAL_ENTRY_TIME_ET = Time(10, 0)  # 10:00 AM Eastern Time
+const TEST_ENTRY_TIME_ET = Time(10, 0)
 const EXPIRY_INTERVAL = Day(1)
 const QUANTITY = 1.0
 const TAU_TOL = 1e-6
@@ -115,6 +118,9 @@ function main()
     println("Underlying: $symbol")
     println("Output directory: $RUN_DIR")
     println("Model mode: $MODEL_MODE")
+    println("Training:   $TRAIN_START to $TRAIN_END")
+    println("Validation: $VAL_START to $VAL_END (early stopping)")
+    println("Test:       $TEST_START to $TEST_END (backtest eval)")
     if MODEL_MODE != :delta && STRATEGY == "condor"
         println("Scoring objective: $SCORE_UTILITY_OBJECTIVE, max candidates/day: $SCORE_MAX_CANDIDATES_PER_DAY")
     end
@@ -190,21 +196,14 @@ function main()
             verbose=true
         )
     elseif STRATEGY == "condor"
-        generate_condor_training_data(
+        generate_condor_4d_training_data(
             train_surfaces,
             train_settlement_spots,
             train_spot_history;
+            min_delta_gap=MIN_DELTA_GAP,
             rate=RISK_FREE_RATE,
             div_yield=DIV_YIELD,
             expiry_interval=EXPIRY_INTERVAL,
-            wing_delta_abs=nothing,
-            target_max_loss=(CONDOR_WING_OBJECTIVE == :target_max_loss ? TARGET_MAX_LOSS : nothing),
-            wing_objective=CONDOR_WING_OBJECTIVE,
-            max_loss_min=CONDOR_MAX_LOSS_MIN,
-            max_loss_max=CONDOR_MAX_LOSS_MAX,
-            min_credit=CONDOR_MIN_CREDIT,
-            min_delta_gap=MIN_DELTA_GAP,
-            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             use_logsig=USE_LOGSIG,
             prev_surfaces=train_prev_surfaces,
             verbose=true
@@ -229,8 +228,13 @@ function main()
         println("  Utility range: [$(minimum(train_data.utilities)), $(maximum(train_data.utilities))]")
         println("  Candidate PnL range: [$(minimum(train_data.pnls)), $(maximum(train_data.pnls))]")
     else
-        println("  Label range: put_delta=[$(minimum(train_data.raw_deltas[1,:])), $(maximum(train_data.raw_deltas[1,:]))]")
-        println("              call_delta=[$(minimum(train_data.raw_deltas[2,:])), $(maximum(train_data.raw_deltas[2,:]))]")
+        n_label_dims = size(train_data.raw_deltas, 1)
+        println("  Label range: short_put_delta=[$(minimum(train_data.raw_deltas[1,:])), $(maximum(train_data.raw_deltas[1,:]))]")
+        println("              short_call_delta=[$(minimum(train_data.raw_deltas[2,:])), $(maximum(train_data.raw_deltas[2,:]))]")
+        if n_label_dims >= 4
+            println("              long_put_delta=[$(minimum(train_data.raw_deltas[3,:])), $(maximum(train_data.raw_deltas[3,:]))]")
+            println("              long_call_delta=[$(minimum(train_data.raw_deltas[4,:])), $(maximum(train_data.raw_deltas[4,:]))]")
+        end
     end
     println()
 
@@ -297,21 +301,14 @@ function main()
             verbose=true
         )
     elseif STRATEGY == "condor"
-        generate_condor_training_data(
+        generate_condor_4d_training_data(
             val_surfaces,
             val_settlement_spots,
             val_spot_history;
+            min_delta_gap=MIN_DELTA_GAP,
             rate=RISK_FREE_RATE,
             div_yield=DIV_YIELD,
             expiry_interval=EXPIRY_INTERVAL,
-            wing_delta_abs=nothing,
-            target_max_loss=(CONDOR_WING_OBJECTIVE == :target_max_loss ? TARGET_MAX_LOSS : nothing),
-            wing_objective=CONDOR_WING_OBJECTIVE,
-            max_loss_min=CONDOR_MAX_LOSS_MIN,
-            max_loss_max=CONDOR_MAX_LOSS_MAX,
-            min_credit=CONDOR_MIN_CREDIT,
-            min_delta_gap=MIN_DELTA_GAP,
-            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             use_logsig=USE_LOGSIG,
             prev_surfaces=val_prev_surfaces,
             verbose=true
@@ -334,6 +331,98 @@ function main()
     println()
 
     # -------------------------------------------------------------------------
+    # Load Test Data
+    # -------------------------------------------------------------------------
+    println("PHASE 3b: Loading Test Data")
+    println("-" ^ 40)
+
+    test_surfaces, test_entry_spots, test_settlement_spots = load_surfaces_and_spots(
+        TEST_START, TEST_END;
+        symbol=symbol,
+        spot_symbol=SPOT_SYMBOL,
+        spot_multiplier=SPOT_MULTIPLIER,
+        entry_times=TEST_ENTRY_TIME_ET,
+        min_volume=MIN_VOLUME,
+        spread_lambda=SPREAD_LAMBDA,
+        expiry_interval=EXPIRY_INTERVAL
+    )
+
+    test_timestamps = sort(collect(keys(test_surfaces)))
+    println("  Loading minute spot history for test...")
+    test_minute_spots = load_minute_spots(
+        TEST_START, TEST_END;
+        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS,
+        symbol=SPOT_SYMBOL,
+        multiplier=SPOT_MULTIPLIER
+    )
+    println("  Loaded $(length(test_minute_spots)) minute spot points")
+    test_spot_history = build_spot_history_dict(
+        test_timestamps,
+        test_minute_spots;
+        lookback_days=SPOT_HISTORY_LOOKBACK_DAYS
+    )
+    println("  Built spot history for $(length(test_spot_history)) timestamps")
+
+    test_prev_surfaces = build_prev_surfaces_dict(test_surfaces; symbol=symbol)
+    println("  Built prev-day surface map for $(length(test_prev_surfaces))/$(length(test_surfaces)) timestamps")
+    println()
+
+    # Generate test labels
+    println("  Generating test labels...")
+    test_data = if STRATEGY == "condor" && MODEL_MODE != :delta
+        generate_condor_candidate_training_data(
+            test_surfaces,
+            test_settlement_spots,
+            test_spot_history;
+            rate=RISK_FREE_RATE,
+            div_yield=DIV_YIELD,
+            expiry_interval=EXPIRY_INTERVAL,
+            utility_objective=SCORE_UTILITY_OBJECTIVE,
+            candidate_delta_grid=SCORE_DELTA_GRID,
+            max_candidates_per_day=SCORE_MAX_CANDIDATES_PER_DAY,
+            wing_delta_abs=nothing,
+            target_max_loss=(CONDOR_WING_OBJECTIVE == :target_max_loss ? TARGET_MAX_LOSS : nothing),
+            wing_objective=CONDOR_WING_OBJECTIVE,
+            max_loss_min=CONDOR_MAX_LOSS_MIN,
+            max_loss_max=CONDOR_MAX_LOSS_MAX,
+            min_credit=CONDOR_MIN_CREDIT,
+            min_delta_gap=MIN_DELTA_GAP,
+            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
+            use_logsig=USE_LOGSIG,
+            prev_surfaces=test_prev_surfaces,
+            verbose=true
+        )
+    elseif STRATEGY == "condor"
+        generate_condor_4d_training_data(
+            test_surfaces,
+            test_settlement_spots,
+            test_spot_history;
+            min_delta_gap=MIN_DELTA_GAP,
+            rate=RISK_FREE_RATE,
+            div_yield=DIV_YIELD,
+            expiry_interval=EXPIRY_INTERVAL,
+            use_logsig=USE_LOGSIG,
+            prev_surfaces=test_prev_surfaces,
+            verbose=true
+        )
+    else
+        generate_training_data(
+            test_surfaces,
+            test_settlement_spots,
+            test_spot_history;
+            rate=RISK_FREE_RATE,
+            div_yield=DIV_YIELD,
+            expiry_interval=EXPIRY_INTERVAL,
+            use_logsig=USE_LOGSIG,
+            prev_surfaces=test_prev_surfaces,
+            verbose=true
+        )
+    end
+    println()
+    println("  Test samples: $(length(test_data.timestamps))")
+    println()
+
+    # -------------------------------------------------------------------------
     # Normalize Features
     # -------------------------------------------------------------------------
     println("PHASE 4: Normalizing Features")
@@ -341,6 +430,7 @@ function main()
 
     X_train_norm, feature_means, feature_stds = normalize_features(train_data.features)
     X_val_norm = apply_normalization(val_data.features, feature_means, feature_stds)
+    X_test_norm = apply_normalization(test_data.features, feature_means, feature_stds)
 
     train_data_norm = if STRATEGY == "condor" && MODEL_MODE != :delta
         CondorScoringDataset(
@@ -378,6 +468,24 @@ function main()
             val_data.timestamps
         )
     end
+    test_data_norm = if STRATEGY == "condor" && MODEL_MODE != :delta
+        CondorScoringDataset(
+            X_test_norm,
+            test_data.utilities,
+            test_data.pnls,
+            test_data.max_losses,
+            test_data.timestamps
+        )
+    else
+        TrainingDataset(
+            X_test_norm,
+            test_data.labels,
+            test_data.raw_deltas,
+            test_data.pnls,
+            test_data.size_labels,
+            test_data.timestamps
+        )
+    end
 
     println("  Feature means: $(round.(feature_means, digits=4))")
     println("  Feature stds:  $(round.(feature_stds, digits=4))")
@@ -398,7 +506,7 @@ function main()
     if STRATEGY == "condor" && MODEL_MODE != :delta
         println("  Architecture: $(input_dim) -> $(SCORE_HIDDEN_DIMS) -> 1 (utility score)")
     else
-        println("  Architecture: $(input_dim) -> $(HIDDEN_DIMS) -> 3 (deltas + sizing)")
+        println("  Architecture: $(input_dim) -> $(HIDDEN_DIMS) -> 4 (4-delta condor)")
     end
     println("  Epochs: $EPOCHS, Batch size: $BATCH_SIZE, LR: $LEARNING_RATE")
     println()
@@ -423,7 +531,7 @@ function main()
         strike_model = create_strike_model(
             input_dim=input_dim,
             hidden_dims=HIDDEN_DIMS,
-            output_dim=3,  # put_delta, call_delta, position_size
+            output_dim=4,  # short_put, short_call, long_put, long_call deltas
             dropout_rate=DROPOUT_RATE
         )
         train_model!(
@@ -450,32 +558,44 @@ function main()
     println("PHASE 6: Evaluating Model")
     println("-" ^ 40)
 
-    train_eval, val_eval = if STRATEGY == "condor" && MODEL_MODE != :delta
-        evaluate_scoring_model(model, train_data_norm), evaluate_scoring_model(model, val_data_norm)
+    train_eval, val_eval, test_eval = if STRATEGY == "condor" && MODEL_MODE != :delta
+        evaluate_scoring_model(model, train_data_norm), evaluate_scoring_model(model, val_data_norm), evaluate_scoring_model(model, test_data_norm)
     else
-        evaluate_model(model, train_data_norm), evaluate_model(model, val_data_norm)
+        evaluate_model(model, train_data_norm), evaluate_model(model, val_data_norm), evaluate_model(model, test_data_norm)
     end
 
     if STRATEGY == "condor" && MODEL_MODE != :delta
         println("  Training Set:")
         println("    Utility MSE: $(round(train_eval["utility_mse"], digits=6)), MAE: $(round(train_eval["utility_mae"], digits=4))")
-        println("  Validation Set:")
+        println("  Validation Set (early stopping):")
         println("    Utility MSE: $(round(val_eval["utility_mse"], digits=6)), MAE: $(round(val_eval["utility_mae"], digits=4))")
+        println("  Test Set:")
+        println("    Utility MSE: $(round(test_eval["utility_mse"], digits=6)), MAE: $(round(test_eval["utility_mae"], digits=4))")
     else
         println("  Training Set:")
         println("    Delta MSE: $(round(train_eval["delta_mse"], digits=6)), MAE: $(round(train_eval["delta_mae"], digits=4))")
-        println("    Size  MSE: $(round(train_eval["size_mse"], digits=6)), MAE: $(round(train_eval["size_mae"], digits=4))")
+        if train_eval["size_mse"] > 0
+            println("    Size  MSE: $(round(train_eval["size_mse"], digits=6)), MAE: $(round(train_eval["size_mae"], digits=4))")
+        end
 
-        println("  Validation Set:")
+        println("  Validation Set (early stopping):")
         println("    Delta MSE: $(round(val_eval["delta_mse"], digits=6)), MAE: $(round(val_eval["delta_mae"], digits=4))")
-        println("    Size  MSE: $(round(val_eval["size_mse"], digits=6)), MAE: $(round(val_eval["size_mae"], digits=4))")
+        if val_eval["size_mse"] > 0
+            println("    Size  MSE: $(round(val_eval["size_mse"], digits=6)), MAE: $(round(val_eval["size_mae"], digits=4))")
+        end
+
+        println("  Test Set:")
+        println("    Delta MSE: $(round(test_eval["delta_mse"], digits=6)), MAE: $(round(test_eval["delta_mae"], digits=4))")
+        if test_eval["size_mse"] > 0
+            println("    Size  MSE: $(round(test_eval["size_mse"], digits=6)), MAE: $(round(test_eval["size_mae"], digits=4))")
+        end
     end
     println()
 
     # -------------------------------------------------------------------------
     # Backtest Comparison
     # -------------------------------------------------------------------------
-    println("PHASE 7: Backtest Comparison (Validation Period)")
+    println("PHASE 7: Backtest Comparison (Test Period)")
     println("-" ^ 40)
 
     # Create ML selector
@@ -529,7 +649,6 @@ function main()
             prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             rate=RISK_FREE_RATE,
             div_yield=DIV_YIELD,
-            spot_history=val_spot_history,
             use_logsig=USE_LOGSIG,
             fallback_selector=fallback_selector
         )
@@ -548,7 +667,6 @@ function main()
             prefer_symmetric=PREFER_SYMMETRIC_WINGS,
             rate=RISK_FREE_RATE,
             div_yield=DIV_YIELD,
-            spot_history=val_spot_history,
             use_logsig=USE_LOGSIG
         )
     else
@@ -558,13 +676,12 @@ function main()
             max_delta=0.35f0,
             rate=RISK_FREE_RATE,
             div_yield=DIV_YIELD,
-            spot_history=val_spot_history,
             use_logsig=USE_LOGSIG
         )
     end
 
     # Create strategies
-    schedule = sort(collect(keys(val_surfaces)))
+    schedule = sort(collect(keys(test_surfaces)))
 
     strategy_ml = if STRATEGY == "condor"
         IronCondorStrategy(
@@ -681,14 +798,19 @@ function main()
     end
 
     # Run backtests
+    # Merge minute spots with settlement spots so DictDataSource serves both
+    # historical queries (for ML features) and settlement lookups.
+    all_spots = merge(test_minute_spots, test_settlement_spots)
+    test_source = DictDataSource(test_surfaces, all_spots)
+
     println("  Running ML strategy backtest...")
-    pos_ml, pnl_ml = backtest_strategy(strategy_ml, val_surfaces, val_settlement_spots)
+    pos_ml, pnl_ml = backtest_strategy(strategy_ml, test_source)
 
     println("  Running baseline (fixed delta) backtest...")
-    pos_baseline, pnl_baseline = backtest_strategy(strategy_baseline, val_surfaces, val_settlement_spots)
+    pos_baseline, pnl_baseline = backtest_strategy(strategy_baseline, test_source)
 
     println("  Running baseline (0.8 sigma) backtest...")
-    pos_sigma, pnl_sigma = backtest_strategy(strategy_sigma, val_surfaces, val_settlement_spots)
+    pos_sigma, pnl_sigma = backtest_strategy(strategy_sigma, test_source)
     println()
 
     # Compute metrics
@@ -710,7 +832,7 @@ function main()
     println("RESULTS SUMMARY")
     println("=" ^ 80)
     println()
-    println("Validation Period: $VAL_START to $VAL_END")
+    println("Test Period: $TEST_START to $TEST_END (val for early stopping: $VAL_START to $VAL_END)")
     if STRATEGY == "condor"
         println("Return basis: per-trade max loss")
     else
@@ -799,13 +921,20 @@ function main()
     end
 
     # Save training history
-    history_df = if haskey(history, "train_delta_loss")
+    history_df = if haskey(history, "train_size_loss")
         DataFrame(
             Epoch = 1:length(history["train_loss"]),
             TrainLoss = history["train_loss"],
             ValLoss = history["val_loss"],
             TrainDeltaLoss = history["train_delta_loss"],
             TrainSizeLoss = history["train_size_loss"]
+        )
+    elseif haskey(history, "train_delta_loss")
+        DataFrame(
+            Epoch = 1:length(history["train_loss"]),
+            TrainLoss = history["train_loss"],
+            ValLoss = history["val_loss"],
+            TrainDeltaLoss = history["train_delta_loss"]
         )
     else
         DataFrame(
@@ -818,25 +947,38 @@ function main()
     CSV.write(history_path, history_df)
     println("Training history saved to: $history_path")
 
-    # Save predicted vs actual deltas and sizes for analysis
+    # Save predicted vs actual deltas and sizes for analysis (test set)
     predictions_df = if STRATEGY == "condor" && MODEL_MODE != :delta
         DataFrame(
-            Timestamp = val_data.timestamps,
-            TrueUtility = val_data.utilities,
-            PredUtility = val_eval["pred_utilities"],
-            CandidatePnL = val_data.pnls,
-            CandidateMaxLoss = val_data.max_losses
+            Timestamp = test_data.timestamps,
+            TrueUtility = test_data.utilities,
+            PredUtility = test_eval["pred_utilities"],
+            CandidatePnL = test_data.pnls,
+            CandidateMaxLoss = test_data.max_losses
+        )
+    elseif size(test_data.raw_deltas, 1) == 4
+        DataFrame(
+            Timestamp = test_data.timestamps,
+            TrueShortPutDelta = test_data.raw_deltas[1, :],
+            TrueShortCallDelta = test_data.raw_deltas[2, :],
+            TrueLongPutDelta = test_data.raw_deltas[3, :],
+            TrueLongCallDelta = test_data.raw_deltas[4, :],
+            PredShortPutDelta = test_eval["pred_deltas"][1, :],
+            PredShortCallDelta = test_eval["pred_deltas"][2, :],
+            PredLongPutDelta = test_eval["pred_deltas"][3, :],
+            PredLongCallDelta = test_eval["pred_deltas"][4, :],
+            BestPnL = test_data.pnls
         )
     else
         DataFrame(
-            Timestamp = val_data.timestamps,
-            TruePutDelta = val_data.raw_deltas[1, :],
-            TrueCallDelta = val_data.raw_deltas[2, :],
-            PredPutDelta = val_eval["pred_deltas"][1, :],
-            PredCallDelta = val_eval["pred_deltas"][2, :],
-            TrueSize = val_data.size_labels,
-            PredSize = val_eval["pred_sizes"],
-            BestPnL = val_data.pnls
+            Timestamp = test_data.timestamps,
+            TruePutDelta = test_data.raw_deltas[1, :],
+            TrueCallDelta = test_data.raw_deltas[2, :],
+            PredPutDelta = test_eval["pred_deltas"][1, :],
+            PredCallDelta = test_eval["pred_deltas"][2, :],
+            TrueSize = test_data.size_labels,
+            PredSize = test_eval["pred_sizes"],
+            BestPnL = test_data.pnls
         )
     end
     predictions_path = joinpath(RUN_DIR, "predictions.csv")

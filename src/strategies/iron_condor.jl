@@ -98,7 +98,8 @@ end
 
 function entry_positions(
     strategy::IronCondorStrategy,
-    surface::VolatilitySurface
+    surface::VolatilitySurface,
+    history::BacktestDataSource=DictDataSource(Dict{DateTime,VolatilitySurface}(), Dict{DateTime,Float64}())
 )::Vector{Position}
     expiry_info = _select_expiry(strategy.expiry_interval, surface)
     if expiry_info === nothing
@@ -137,7 +138,8 @@ function entry_positions(
         tau=tau_closest,
         recs=recs,
         put_strikes=put_strikes,
-        call_strikes=call_strikes
+        call_strikes=call_strikes,
+        history=history
     )
 
     selector_result = if strategy.strike_selector === nothing

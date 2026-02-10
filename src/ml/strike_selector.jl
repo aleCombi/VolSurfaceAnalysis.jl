@@ -1,6 +1,34 @@
 # ML Strike Selector Wrapper
 # Callable struct that integrates trained model with backtest system
 
+const SPOT_LOOKBACK_DAYS = 5
+
+"""Build SpotHistory from a BacktestDataSource, looking back SPOT_LOOKBACK_DAYS."""
+function _build_spot_history(history::BacktestDataSource, now::DateTime)
+    spots = get_spots(history, now - Day(SPOT_LOOKBACK_DAYS), now)
+    isempty(spots) && return nothing
+    sorted = sort(collect(spots); by=first)
+    length(sorted) < 2 && return nothing
+    SpotHistory([p[1] for p in sorted], [p[2] for p in sorted])
+end
+
+"""Find the most recent surface from a previous trading date."""
+function _query_prev_surface(history::BacktestDataSource, now::DateTime)
+    today = Date(now)
+    ts_all = available_timestamps(history)
+    idx = findlast(t -> Date(t) < today, ts_all)
+    idx === nothing && return nothing
+    get_surface(history, ts_all[idx])
+end
+
+"""Extract features using history from ctx, falling back to nothing if unavailable."""
+function _extract_features_from_ctx(ctx, surface, tau, use_logsig)
+    history = get(ctx, :history, nothing)
+    spot_history = history !== nothing ? _build_spot_history(history, surface.timestamp) : nothing
+    prev_surface = history !== nothing ? _query_prev_surface(history, surface.timestamp) : nothing
+    extract_features(surface, tau; spot_history=spot_history, use_logsig=use_logsig, prev_surface=prev_surface)
+end
+
 """
     MLStrikeSelector
 
@@ -23,7 +51,6 @@ Position size interpretation:
 - `max_delta::Float32`: Maximum delta bound
 - `rate::Float64`: Risk-free rate for delta calculation
 - `div_yield::Float64`: Dividend yield for delta calculation
-- `spot_history::Dict{DateTime,SpotHistory}`: Spot history for features
 - `return_sizing::Bool`: If true and model has 3 outputs, return (put_K, call_K, size)
 - `use_logsig::Bool`: Use log-signature features instead of signature
 """
@@ -35,7 +62,6 @@ struct MLStrikeSelector
     max_delta::Float32
     rate::Float64
     div_yield::Float64
-    spot_history::Dict{DateTime,SpotHistory}
     return_sizing::Bool
     use_logsig::Bool
 end
@@ -53,13 +79,12 @@ function MLStrikeSelector(
     max_delta::Float32=0.35f0,
     rate::Float64=0.045,
     div_yield::Float64=0.013,
-    spot_history::Dict{DateTime,SpotHistory}=Dict{DateTime,SpotHistory}(),
     return_sizing::Bool=true,
     use_logsig::Bool=false
 )
     return MLStrikeSelector(
         model, feature_means, feature_stds,
-        min_delta, max_delta, rate, div_yield, spot_history, return_sizing, use_logsig
+        min_delta, max_delta, rate, div_yield, return_sizing, use_logsig
     )
 end
 
@@ -79,11 +104,7 @@ function (selector::MLStrikeSelector)(ctx)
     surface = ctx.surface
     tau = ctx.tau
 
-    # Get spot history for this timestamp if available
-    spot_history = get(selector.spot_history, surface.timestamp, nothing)
-
-    # Extract features
-    feats = extract_features(surface, tau; spot_history=spot_history, use_logsig=selector.use_logsig)
+    feats = _extract_features_from_ctx(ctx, surface, tau, selector.use_logsig)
     feats === nothing && return nothing
 
     # Convert to vector and normalize
@@ -149,6 +170,8 @@ struct MLCondorStrikeSelector
     feature_stds::Vector{Float32}
     min_delta::Float32
     max_delta::Float32
+    long_min_delta::Float32
+    long_max_delta::Float32
     wing_delta_abs::Union{Nothing,Float32}
     target_max_loss::Union{Nothing,Float32}
     wing_objective::Symbol
@@ -159,7 +182,6 @@ struct MLCondorStrikeSelector
     prefer_symmetric::Bool
     rate::Float64
     div_yield::Float64
-    spot_history::Dict{DateTime,SpotHistory}
     return_sizing::Bool
     use_logsig::Bool
 end
@@ -187,10 +209,11 @@ function MLCondorStrikeSelector(
     prefer_symmetric::Bool=true,
     min_delta::Float32=0.05f0,
     max_delta::Float32=0.35f0,
+    long_min_delta::Float32=LONG_MIN_DELTA,
+    long_max_delta::Float32=LONG_MAX_DELTA,
     rate::Float64=0.045,
     div_yield::Float64=0.013,
-    spot_history::Dict{DateTime,SpotHistory}=Dict{DateTime,SpotHistory}(),
-    return_sizing::Bool=true,
+    return_sizing::Bool=false,
     use_logsig::Bool=false
 )
     if !(wing_objective in (:target_max_loss, :roi, :pnl))
@@ -213,6 +236,8 @@ function MLCondorStrikeSelector(
         feature_stds,
         min_delta,
         max_delta,
+        long_min_delta,
+        long_max_delta,
         wing_delta_abs,
         target_max_loss,
         wing_objective,
@@ -223,7 +248,6 @@ function MLCondorStrikeSelector(
         prefer_symmetric,
         rate,
         div_yield,
-        spot_history,
         return_sizing,
         use_logsig
     )
@@ -240,8 +264,7 @@ function (selector::MLCondorStrikeSelector)(ctx)
     surface = ctx.surface
     tau = ctx.tau
 
-    spot_history = get(selector.spot_history, surface.timestamp, nothing)
-    feats = extract_features(surface, tau; spot_history=spot_history, use_logsig=selector.use_logsig)
+    feats = _extract_features_from_ctx(ctx, surface, tau, selector.use_logsig)
     feats === nothing && return nothing
 
     x = features_to_vector(feats)
@@ -250,15 +273,31 @@ function (selector::MLCondorStrikeSelector)(ctx)
     Flux.testmode!(selector.model)
     x_input = reshape(x_norm, :, 1)
     raw_output = selector.model(x_input)
+    n_outputs = size(raw_output, 1)
 
-    has_sizing = size(raw_output, 1) >= 3
+    if n_outputs == 4
+        # 4-output model: all deltas predicted end-to-end
+        scaled = scale_deltas_4d(raw_output)
+        sp_delta = Float64(scaled[1])
+        sc_delta = Float64(scaled[2])
+        lp_delta = Float64(scaled[3])
+        lc_delta = Float64(scaled[4])
 
+        strikes = _delta_condor_strikes(
+            ctx, sp_delta, sc_delta, lp_delta, lc_delta;
+            rate=selector.rate, div_yield=selector.div_yield,
+            min_delta_gap=Float64(selector.min_delta_gap)
+        )
+        strikes === nothing && return nothing
+        return strikes  # 4-tuple, no position_size
+    end
+
+    # 2 or 3-output model: predict short deltas, search for wings
     delta_raw = raw_output[1:2, :]
     deltas = scale_deltas(delta_raw; min_delta=selector.min_delta, max_delta=selector.max_delta)
     put_delta = Float64(deltas[1])
     call_delta = Float64(deltas[2])
 
-    # Determine short strikes using ML predicted deltas
     short_strikes = _delta_strangle_strikes_asymmetric(
         ctx,
         put_delta,
@@ -277,7 +316,6 @@ function (selector::MLCondorStrikeSelector)(ctx)
     )
 
     wings = if use_fixed_delta_wings
-        # Fixed delta mode
         long_put_K = _best_delta_strike(
             filter(r -> r.option_type == Put && r.strike < short_put_K, ctx.recs),
             -Float64(selector.wing_delta_abs),
@@ -320,14 +358,13 @@ function (selector::MLCondorStrikeSelector)(ctx)
     wings === nothing && return nothing
     long_put_K, long_call_K = wings
 
-    # Validate ordering
     if !(long_put_K < short_put_K < ctx.surface.spot < short_call_K < long_call_K)
         return nothing
     end
 
     strikes = (short_put_K, short_call_K, long_put_K, long_call_K)
 
-    if selector.return_sizing && has_sizing
+    if selector.return_sizing && n_outputs >= 3
         position_size = Float64(raw_output[3, 1])
         return (strikes[1], strikes[2], strikes[3], strikes[4], position_size)
     else
@@ -357,7 +394,6 @@ struct MLCondorScoreSelector
     prefer_symmetric::Bool
     rate::Float64
     div_yield::Float64
-    spot_history::Dict{DateTime,SpotHistory}
     use_logsig::Bool
     fallback_selector::Any
 end
@@ -383,7 +419,6 @@ function MLCondorScoreSelector(
     prefer_symmetric::Bool=true,
     rate::Float64=0.045,
     div_yield::Float64=0.013,
-    spot_history::Dict{DateTime,SpotHistory}=Dict{DateTime,SpotHistory}(),
     use_logsig::Bool=false,
     fallback_selector=nothing
 )
@@ -410,7 +445,6 @@ function MLCondorScoreSelector(
         prefer_symmetric,
         rate,
         div_yield,
-        spot_history,
         use_logsig,
         fallback_selector
     )
@@ -431,8 +465,7 @@ function (selector::MLCondorScoreSelector)(ctx)
     surface = ctx.surface
     tau = ctx.tau
 
-    spot_history = get(selector.spot_history, surface.timestamp, nothing)
-    feats = extract_features(surface, tau; spot_history=spot_history, use_logsig=selector.use_logsig)
+    feats = _extract_features_from_ctx(ctx, surface, tau, selector.use_logsig)
     feats === nothing && return _fallback_or_nothing(selector.fallback_selector, ctx)
 
     state_features = features_to_vector(feats)
@@ -486,7 +519,7 @@ function (selector::MLCondorScoreSelector)(ctx)
 end
 
 """
-    save_ml_selector(path, model, feature_means, feature_stds; min_delta, max_delta)
+    save_ml_selector(path, model, feature_means, feature_stds; min_delta, max_delta, long_min_delta, long_max_delta)
 
 Save a trained ML selector to a BSON file.
 """
@@ -496,14 +529,16 @@ function save_ml_selector(
     feature_means::Vector{Float32},
     feature_stds::Vector{Float32};
     min_delta::Float32=0.05f0,
-    max_delta::Float32=0.35f0
+    max_delta::Float32=0.35f0,
+    long_min_delta::Float32=LONG_MIN_DELTA,
+    long_max_delta::Float32=LONG_MAX_DELTA
 )
-    BSON.@save path model feature_means feature_stds min_delta max_delta
+    BSON.@save path model feature_means feature_stds min_delta max_delta long_min_delta long_max_delta
     return path
 end
 
 """
-    load_ml_selector(path; rate, div_yield, spot_history, return_sizing) -> MLStrikeSelector
+    load_ml_selector(path; rate, div_yield, return_sizing) -> MLStrikeSelector
 
 Load a trained ML selector from a BSON file.
 
@@ -511,15 +546,13 @@ Load a trained ML selector from a BSON file.
 - `path::String`: Path to BSON file
 - `rate::Float64`: Risk-free rate for strike conversion
 - `div_yield::Float64`: Dividend yield for strike conversion
-- `spot_history::Dict{DateTime,SpotHistory}`: Spot history for feature extraction
-- `return_sizing::Bool`: Whether to return position sizing (default: true)
+- `return_sizing::Bool`: Whether to return position sizing (default: false)
 """
 function load_ml_selector(
     path::String;
     rate::Float64=0.045,
     div_yield::Float64=0.013,
-    spot_history::Dict{DateTime,SpotHistory}=Dict{DateTime,SpotHistory}(),
-    return_sizing::Bool=true,
+    return_sizing::Bool=false,
     use_logsig::Bool=false
 )::MLStrikeSelector
     data = BSON.load(path)
@@ -531,7 +564,6 @@ function load_ml_selector(
         max_delta=get(data, :max_delta, 0.35f0),
         rate=rate,
         div_yield=div_yield,
-        spot_history=spot_history,
         return_sizing=return_sizing,
         use_logsig=use_logsig
     )
