@@ -13,10 +13,9 @@ Container for training data.
 
 # Fields
 - `features::Matrix{Float32}`: Input features (n_features × n_samples)
-- `labels::Matrix{Float32}`: Target deltas scaled to [0,1] (2 × n_samples)
-- `raw_deltas::Matrix{Float32}`: Original delta values (2 × n_samples)
+- `labels::Matrix{Float32}`: Target deltas scaled to [0,1] (4 × n_samples for condor)
+- `raw_deltas::Matrix{Float32}`: Original delta values (4 × n_samples for condor)
 - `pnls::Vector{Float32}`: Best P&L for each sample
-- `size_labels::Vector{Float32}`: Position size targets in [0, 1]
 - `timestamps::Vector{DateTime}`: Entry timestamps
 """
 struct TrainingDataset
@@ -24,7 +23,6 @@ struct TrainingDataset
     labels::Matrix{Float32}
     raw_deltas::Matrix{Float32}
     pnls::Vector{Float32}
-    size_labels::Vector{Float32}
     timestamps::Vector{DateTime}
 end
 
@@ -89,115 +87,6 @@ function _prepare_simulation_env(
 
     return (expiry=expiry, tau=tau, recs=recs, put_recs=put_recs,
             call_recs=call_recs, F=F, ctx=ctx)
-end
-
-"""
-    simulate_strangle_pnl(surface, settlement_spot, put_delta, call_delta; rate, div_yield, expiry_interval) -> Union{Float64, Nothing}
-
-Simulate P&L for a short strangle with given deltas.
-
-# Arguments
-- `surface::VolatilitySurface`: Entry surface
-- `settlement_spot::Float64`: Settlement spot price
-- `put_delta::Float64`: Absolute delta for short put
-- `call_delta::Float64`: Absolute delta for short call
-- `rate::Float64`: Risk-free rate
-- `div_yield::Float64`: Dividend yield
-- `expiry_interval::Period`: Time to expiry
-
-# Returns
-- P&L in dollars, or nothing if strikes cannot be found
-"""
-function simulate_strangle_pnl(
-    surface::VolatilitySurface,
-    settlement_spot::Float64,
-    put_delta::Float64,
-    call_delta::Float64;
-    rate::Float64,
-    div_yield::Float64,
-    expiry_interval::Period=Day(1)
-)::Union{Float64,Nothing}
-    env = _prepare_simulation_env(surface, expiry_interval, rate, div_yield)
-    env === nothing && return nothing
-    (; put_recs, call_recs, F) = env
-
-    # Find strikes by delta
-    short_put_K = _best_delta_strike(put_recs, -put_delta, surface.spot, :put, F, env.tau, rate)
-    short_call_K = _best_delta_strike(call_recs, call_delta, surface.spot, :call, F, env.tau, rate)
-
-    (short_put_K === nothing || short_call_K === nothing) && return nothing
-
-    # Get entry prices (bid for shorts)
-    put_rec = _find_rec_by_strike(put_recs, short_put_K)
-    call_rec = _find_rec_by_strike(call_recs, short_call_K)
-
-    (put_rec === nothing || call_rec === nothing) && return nothing
-    (ismissing(put_rec.bid_price) || ismissing(call_rec.bid_price)) && return nothing
-
-    # Entry cost (negative for shorts = premium received)
-    entry_put = put_rec.bid_price * (-1) * surface.spot
-    entry_call = call_rec.bid_price * (-1) * surface.spot
-    entry_cost = entry_put + entry_call
-
-    # Settlement payoff
-    put_payoff = max(short_put_K - settlement_spot, 0.0) * (-1)
-    call_payoff = max(settlement_spot - short_call_K, 0.0) * (-1)
-    total_payoff = put_payoff + call_payoff
-
-    pnl = total_payoff - entry_cost
-    return pnl
-end
-
-"""Grid search over delta pairs, calling `simulate_fn(put_delta, call_delta)` for each."""
-function _find_optimal_deltas_grid(
-    delta_grid::Vector{Float64},
-    simulate_fn::Function
-)::Union{Tuple{Float64,Float64,Float64},Nothing}
-    best_pnl = -Inf
-    best_put_delta = 0.15
-    best_call_delta = 0.15
-    n_valid = 0
-
-    for put_delta in delta_grid
-        for call_delta in delta_grid
-            pnl = simulate_fn(put_delta, call_delta)
-            pnl === nothing && continue
-            n_valid += 1
-
-            if pnl > best_pnl
-                best_pnl = pnl
-                best_put_delta = put_delta
-                best_call_delta = call_delta
-            end
-        end
-    end
-
-    n_valid < 1 && return nothing
-    return (best_put_delta, best_call_delta, best_pnl)
-end
-
-"""
-    find_optimal_deltas(surface, settlement_spot; rate, div_yield, expiry_interval, delta_grid)
-        -> Union{Tuple{Float64, Float64, Float64}, Nothing}
-
-Find optimal delta values via grid search.
-
-# Returns
-- Tuple of (best_put_delta, best_call_delta, best_pnl) or nothing
-"""
-function find_optimal_deltas(
-    surface::VolatilitySurface,
-    settlement_spot::Float64;
-    rate::Float64,
-    div_yield::Float64,
-    expiry_interval::Period=Day(1),
-    delta_grid::Vector{Float64}=DELTA_GRID
-)::Union{Tuple{Float64,Float64,Float64},Nothing}
-    sim_fn = (pd, cd) -> simulate_strangle_pnl(
-        surface, settlement_spot, pd, cd;
-        rate=rate, div_yield=div_yield, expiry_interval=expiry_interval
-    )
-    return _find_optimal_deltas_grid(delta_grid, sim_fn)
 end
 
 """
@@ -963,145 +852,6 @@ function generate_condor_candidate_training_data(
     return CondorScoringDataset(X, utilities, pnls, max_losses, timestamps)
 end
 
-"""Core loop for generating delta-prediction training data via grid-search optimization."""
-function _generate_delta_training_data_core(
-    surfaces::Dict{DateTime,VolatilitySurface},
-    settlement_spots::Dict{DateTime,Float64},
-    spot_history_dict::Dict{DateTime,SpotHistory},
-    optimize_fn::Function;
-    expiry_interval::Period=Day(1),
-    use_logsig::Bool=false,
-    prev_surfaces::Union{Nothing,Dict{DateTime,VolatilitySurface}}=nothing,
-    verbose::Bool=true
-)::TrainingDataset
-    features_list = Vector{Float32}[]
-    labels_list = Vector{Float32}[]
-    raw_deltas_list = Vector{Float32}[]
-    pnls = Float32[]
-    timestamps = DateTime[]
-
-    sorted_ts = sort(collect(keys(surfaces)))
-    n_total = length(sorted_ts)
-    n_skipped = 0
-    n_processed = 0
-
-    for (i, ts) in enumerate(sorted_ts)
-        surface = surfaces[ts]
-
-        expiry_target = ts + expiry_interval
-        expiries = unique(rec.expiry for rec in surface.records)
-        isempty(expiries) && continue
-
-        taus = [time_to_expiry(e, ts) for e in expiries]
-        tau_target = time_to_expiry(expiry_target, ts)
-        idx = argmin(abs.(taus .- tau_target))
-        expiry = expiries[idx]
-        tau = taus[idx]
-
-        settlement = get(settlement_spots, expiry, nothing)
-        if settlement === nothing
-            n_skipped += 1
-            continue
-        end
-
-        spot_history = get(spot_history_dict, ts, nothing)
-        prev_surface = prev_surfaces !== nothing ? get(prev_surfaces, ts, nothing) : nothing
-        feats = extract_features(surface, tau; spot_history=spot_history, use_logsig=use_logsig, prev_surface=prev_surface)
-        if feats === nothing
-            n_skipped += 1
-            continue
-        end
-
-        result = optimize_fn(surface, settlement)
-        if result === nothing
-            n_skipped += 1
-            continue
-        end
-
-        best_put_delta, best_call_delta, best_pnl = result
-
-        push!(features_list, features_to_vector(feats))
-        push!(raw_deltas_list, Float32[best_put_delta, best_call_delta])
-        scaled = unscale_deltas(Float32[best_put_delta, best_call_delta])
-        push!(labels_list, scaled)
-        push!(pnls, Float32(best_pnl))
-        push!(timestamps, ts)
-
-        n_processed += 1
-
-        if verbose && (i % 20 == 0 || i == n_total)
-            println("  Processed $i / $n_total (valid: $n_processed, skipped: $n_skipped)")
-        end
-    end
-
-    isempty(features_list) && error("No valid training samples generated")
-
-    X = reduce(hcat, features_list)
-    Y = reduce(hcat, labels_list)
-    raw_Y = reduce(hcat, raw_deltas_list)
-
-    size_labels = compute_size_labels(pnls)
-
-    if verbose
-        n_positive = count(p -> p > 0, pnls)
-        avg_size = mean(size_labels)
-        println("  Position sizing: $(n_positive)/$(length(pnls)) profitable, avg_size=$(round(avg_size, digits=3))")
-    end
-
-    return TrainingDataset(X, Y, raw_Y, pnls, size_labels, timestamps)
-end
-
-"""
-    generate_condor_training_data(surfaces, settlement_spots, spot_history_dict;
-        rate, div_yield, expiry_interval, wing_delta_abs, target_max_loss, wing_objective,
-        max_loss_min, max_loss_max, min_credit, min_delta_gap, prefer_symmetric, use_logsig, verbose)
-        -> TrainingDataset
-
-Generate training data for iron condor strike selection by grid searching
-optimal inner deltas under the configured wing policy.
-"""
-function generate_condor_training_data(
-    surfaces::Dict{DateTime,VolatilitySurface},
-    settlement_spots::Dict{DateTime,Float64},
-    spot_history_dict::Dict{DateTime,SpotHistory};
-    rate::Float64,
-    div_yield::Float64,
-    expiry_interval::Period=Day(1),
-    wing_delta_abs::Union{Nothing,Float64}=0.05,
-    target_max_loss::Union{Nothing,Float64}=nothing,
-    wing_objective::Symbol=:target_max_loss,
-    max_loss_min::Float64=0.0,
-    max_loss_max::Float64=Inf,
-    min_credit::Float64=0.0,
-    min_delta_gap::Float64=0.08,
-    prefer_symmetric::Bool=true,
-    use_logsig::Bool=false,
-    prev_surfaces::Union{Nothing,Dict{DateTime,VolatilitySurface}}=nothing,
-    verbose::Bool=true
-)::TrainingDataset
-    opt_fn = (surface, settlement) -> find_optimal_condor_deltas(
-        surface, settlement;
-        wing_delta_abs=wing_delta_abs,
-        target_max_loss=target_max_loss,
-        wing_objective=wing_objective,
-        max_loss_min=max_loss_min,
-        max_loss_max=max_loss_max,
-        min_credit=min_credit,
-        min_delta_gap=min_delta_gap,
-        prefer_symmetric=prefer_symmetric,
-        rate=rate,
-        div_yield=div_yield,
-        expiry_interval=expiry_interval
-    )
-    return _generate_delta_training_data_core(
-        surfaces, settlement_spots, spot_history_dict, opt_fn;
-        expiry_interval=expiry_interval,
-        use_logsig=use_logsig,
-        prev_surfaces=prev_surfaces,
-        verbose=verbose
-    )
-end
-
 """
     simulate_condor_pnl_4d(surface, settlement_spot, sp_delta, sc_delta, lp_delta, lc_delta;
         min_delta_gap, rate, div_yield, expiry_interval)
@@ -1325,15 +1075,12 @@ function _generate_condor_4d_training_data_core(
     Y = reduce(hcat, labels_list)
     raw_Y = reduce(hcat, raw_deltas_list)
 
-    # No position sizing for 4D models — fill with zeros
-    size_labels = zeros(Float32, length(pnls))
-
     if verbose
         n_positive = count(p -> p > 0, pnls)
         println("  4D condor data: $(n_processed) samples, $(n_positive)/$(length(pnls)) profitable")
     end
 
-    return TrainingDataset(X, Y, raw_Y, pnls, size_labels, timestamps)
+    return TrainingDataset(X, Y, raw_Y, pnls, timestamps)
 end
 
 """
@@ -1374,94 +1121,6 @@ function generate_condor_4d_training_data(
     )
 end
 
-"""
-    compute_size_labels(pnls; temperature, center_on_zero) -> Vector{Float32}
-
-Compute position size labels from P&L values using tanh normalization.
-
-Position sizing intuition:
-- Profitable trades → positive size (short vol / sell strangle)
-- Losing trades → negative size (long vol / buy strangle)
-- Temperature controls how aggressive the sizing is (lower = more extreme)
-
-# Arguments
-- `pnls::Vector{Float32}`: Raw P&L values (positive = profit when selling vol)
-- `temperature::Float64`: Scaling factor for tanh (default: 1.0)
-- `center_on_zero::Bool`: If true, center on 0 (profitable=sell, losing=buy).
-  If false, center on mean P&L (default: true)
-
-# Returns
-- Vector of position sizes in [-1, 1]
-  - +1: Strong signal to sell vol (short strangle)
-  - 0: No trade / neutral
-  - -1: Strong signal to buy vol (long strangle)
-"""
-function compute_size_labels(
-    pnls::Vector{Float32};
-    temperature::Float64=1.0,
-    center_on_zero::Bool=true
-)::Vector{Float32}
-    isempty(pnls) && return Float32[]
-
-    σ = std(pnls)
-    σ = max(σ, 1e-6)  # Avoid division by zero
-
-    if center_on_zero
-        # Center on 0: positive P&L → sell, negative P&L → buy
-        z_scores = pnls ./ (σ * temperature)
-    else
-        # Center on mean (relative performance)
-        μ = mean(pnls)
-        z_scores = (pnls .- μ) ./ (σ * temperature)
-    end
-
-    size_labels = Float32.(tanh.(z_scores))
-
-    return size_labels
-end
-
-"""
-    generate_training_data(surfaces, settlement_spots, spot_history_dict; rate, div_yield, expiry_interval, use_logsig, verbose)
-        -> TrainingDataset
-
-Generate training data from surfaces by grid searching for optimal deltas.
-
-# Arguments
-- `surfaces::Dict{DateTime,VolatilitySurface}`: Entry surfaces
-- `settlement_spots::Dict{DateTime,Float64}`: Settlement prices by expiry time
-- `spot_history_dict::Dict{DateTime,SpotHistory}`: Historical spots for each entry time
-- `rate::Float64`: Risk-free rate
-- `div_yield::Float64`: Dividend yield
-- `expiry_interval::Period`: Time to expiry
-- `use_logsig::Bool`: Use log-signature features instead of signature
-- `verbose::Bool`: Print progress
-
-# Returns
-- `TrainingDataset` with features, labels, and metadata
-"""
-function generate_training_data(
-    surfaces::Dict{DateTime,VolatilitySurface},
-    settlement_spots::Dict{DateTime,Float64},
-    spot_history_dict::Dict{DateTime,SpotHistory};
-    rate::Float64,
-    div_yield::Float64,
-    expiry_interval::Period=Day(1),
-    use_logsig::Bool=false,
-    prev_surfaces::Union{Nothing,Dict{DateTime,VolatilitySurface}}=nothing,
-    verbose::Bool=true
-)::TrainingDataset
-    opt_fn = (surface, settlement) -> find_optimal_deltas(
-        surface, settlement;
-        rate=rate, div_yield=div_yield, expiry_interval=expiry_interval
-    )
-    return _generate_delta_training_data_core(
-        surfaces, settlement_spots, spot_history_dict, opt_fn;
-        expiry_interval=expiry_interval,
-        use_logsig=use_logsig,
-        prev_surfaces=prev_surfaces,
-        verbose=verbose
-    )
-end
 
 """Generic training loop with early stopping, used by both `train_model!` and `train_scoring_model!`."""
 function _train_loop!(
@@ -1554,25 +1213,19 @@ function _train_loop!(
 end
 
 """
-    train_model!(model, train_data; val_data, epochs, batch_size, learning_rate, patience, delta_weight, size_weight, verbose)
+    train_model!(model, train_data; val_data, epochs, batch_size, learning_rate, patience, verbose)
         -> (model, history)
 
-Train the neural network model on delta predictions, and optionally position size.
-
-Dispatches on model output dimension:
-- 2-output (strangle deltas) or 4-output (condor deltas): trains with delta_loss only (MSE on all outputs)
-- 3-output (legacy): includes position size loss weighted by `size_weight`
+Train the neural network model on delta predictions (MSE loss).
 
 # Arguments
-- `model`: Flux model to train (2, 3, or 4 outputs)
+- `model`: Flux model to train (4 outputs for condor deltas)
 - `train_data::TrainingDataset`: Training data
 - `val_data::Union{Nothing,TrainingDataset}`: Validation data (optional)
 - `epochs::Int`: Maximum training epochs
 - `batch_size::Int`: Batch size
 - `learning_rate::Float64`: Learning rate for Adam optimizer
 - `patience::Int`: Early stopping patience
-- `delta_weight::Float32`: Weight for delta prediction loss (default: 1.0)
-- `size_weight::Float32`: Weight for position size prediction loss (default: 1.0, only for 3-output)
 - `verbose::Bool`: Print progress
 
 # Returns
@@ -1586,171 +1239,72 @@ function train_model!(
     batch_size::Int=32,
     learning_rate::Float64=1e-3,
     patience::Int=10,
-    delta_weight::Float32=1.0f0,
-    size_weight::Float32=1.0f0,
     verbose::Bool=true
 )
     n_samples = size(train_data.features, 2)
 
-    # Detect model output dimension from a test forward pass
-    test_output = model(train_data.features[:, 1:1])
-    n_model_outputs = size(test_output, 1)
+    get_batch = batch_idx -> (
+        x=train_data.features[:, batch_idx],
+        y_deltas=train_data.labels[:, batch_idx]
+    )
 
-    if n_model_outputs == 3
-        # Legacy 3-output: delta + position size
-        get_batch = batch_idx -> (
-            x=train_data.features[:, batch_idx],
-            y_deltas=train_data.labels[:, batch_idx],
-            y_sizes=train_data.size_labels[batch_idx]
-        )
+    loss_fn = (m, bd) -> delta_loss(m, bd.x, bd.y_deltas)
 
-        loss_fn = (m, bd) -> combined_loss(m, bd.x, bd.y_deltas, bd.y_sizes;
-            delta_weight=delta_weight, size_weight=size_weight)
+    val_fn = val_data !== nothing ? (m -> begin
+        delta_loss(m, val_data.features, val_data.labels)
+    end) : nothing
 
-        val_fn = val_data !== nothing ? (m -> begin
-            combined_loss(m, val_data.features, val_data.labels, val_data.size_labels;
-                delta_weight=delta_weight, size_weight=size_weight)
-        end) : nothing
-
-        batch_end_fn = (m, bd, accum) -> begin
-            preds = m(bd.x)
-            accum["delta"] = get(accum, "delta", 0.0) + Float64(mse(preds[1:2, :], bd.y_deltas))
-            accum["size"] = get(accum, "size", 0.0) + Float64(mse(preds[3, :], bd.y_sizes))
-        end
-
-        fmt_fn = (accum, n_batches, history) -> begin
-            avg_d = get(accum, "delta", 0.0) / n_batches
-            avg_s = get(accum, "size", 0.0) / n_batches
-            push!(history["train_delta_loss"], avg_d)
-            push!(history["train_size_loss"], avg_s)
-            " (δ=$(round(avg_d, digits=4)), sz=$(round(avg_s, digits=4)))"
-        end
-
-        return _train_loop!(
-            model, n_samples, get_batch, loss_fn, val_fn,
-            ["train_loss", "val_loss", "train_delta_loss", "train_size_loss"];
-            on_batch_end=batch_end_fn, format_epoch=fmt_fn,
-            epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
-            patience=patience, verbose=verbose
-        )
-    else
-        # 2-output (strangle) or 4-output (condor): pure delta loss
-        get_batch = batch_idx -> (
-            x=train_data.features[:, batch_idx],
-            y_deltas=train_data.labels[:, batch_idx]
-        )
-
-        loss_fn = (m, bd) -> delta_loss(m, bd.x, bd.y_deltas)
-
-        val_fn = val_data !== nothing ? (m -> begin
-            delta_loss(m, val_data.features, val_data.labels)
-        end) : nothing
-
-        batch_end_fn = (m, bd, accum) -> begin
-            preds = m(bd.x)
-            accum["delta"] = get(accum, "delta", 0.0) + Float64(mse(preds, bd.y_deltas))
-        end
-
-        fmt_fn = (accum, n_batches, history) -> begin
-            avg_d = get(accum, "delta", 0.0) / n_batches
-            push!(history["train_delta_loss"], avg_d)
-            " (δ=$(round(avg_d, digits=4)))"
-        end
-
-        return _train_loop!(
-            model, n_samples, get_batch, loss_fn, val_fn,
-            ["train_loss", "val_loss", "train_delta_loss"];
-            on_batch_end=batch_end_fn, format_epoch=fmt_fn,
-            epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
-            patience=patience, verbose=verbose
-        )
+    batch_end_fn = (m, bd, accum) -> begin
+        preds = m(bd.x)
+        accum["delta"] = get(accum, "delta", 0.0) + Float64(mse(preds, bd.y_deltas))
     end
+
+    fmt_fn = (accum, n_batches, history) -> begin
+        avg_d = get(accum, "delta", 0.0) / n_batches
+        push!(history["train_delta_loss"], avg_d)
+        " (δ=$(round(avg_d, digits=4)))"
+    end
+
+    return _train_loop!(
+        model, n_samples, get_batch, loss_fn, val_fn,
+        ["train_loss", "val_loss", "train_delta_loss"];
+        on_batch_end=batch_end_fn, format_epoch=fmt_fn,
+        epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
+        patience=patience, verbose=verbose
+    )
 end
 
 """
-    evaluate_model(model, data; min_delta, max_delta) -> Dict
+    evaluate_model(model, data) -> Dict
 
-Evaluate model on a dataset. Dispatches on model output dimension:
-- 4-output: uses `scale_deltas_4d` for per-leg scaling
-- 3-output (legacy): uses `scale_deltas` for short deltas + position size eval
-- 2-output: uses `scale_deltas` for short deltas only
+Evaluate 4-output condor delta model on a dataset.
 
 # Returns
 Dict with:
 - `delta_mse`: Mean squared error on delta predictions
 - `delta_mae`: Mean absolute error on deltas
-- `size_mse`: Mean squared error on position sizes (0.0 for 2/4-output)
-- `size_mae`: Mean absolute error on position sizes (0.0 for 2/4-output)
-- `pred_deltas`: Predicted deltas (n_outputs × n_samples)
-- `true_deltas`: True deltas (n_outputs × n_samples)
-- `pred_sizes`: Predicted position sizes (n_samples,) — zeros for 2/4-output
-- `true_sizes`: True position sizes (n_samples,) — zeros for 2/4-output
+- `pred_deltas`: Predicted deltas (4 × n_samples)
+- `true_deltas`: True deltas (4 × n_samples)
 """
 function evaluate_model(
     model,
-    data::TrainingDataset;
-    min_delta::Float32=0.05f0,
-    max_delta::Float32=0.35f0
+    data::TrainingDataset
 )::Dict
     Flux.testmode!(model)
 
     raw_output = model(data.features)
-    n_outputs = size(raw_output, 1)
-    n_samples = size(raw_output, 2)
     true_deltas = data.raw_deltas
 
-    if n_outputs == 4
-        pred_deltas = scale_deltas_4d(raw_output)
-        delta_mse = mean((pred_deltas .- true_deltas).^2)
-        delta_mae = mean(abs.(pred_deltas .- true_deltas))
+    pred_deltas = scale_deltas_4d(raw_output)
+    delta_mse = mean((pred_deltas .- true_deltas).^2)
+    delta_mae = mean(abs.(pred_deltas .- true_deltas))
 
-        return Dict(
-            "delta_mse" => delta_mse,
-            "delta_mae" => delta_mae,
-            "size_mse" => 0.0,
-            "size_mae" => 0.0,
-            "pred_deltas" => pred_deltas,
-            "true_deltas" => true_deltas,
-            "pred_sizes" => zeros(Float32, n_samples),
-            "true_sizes" => zeros(Float32, n_samples)
-        )
-    elseif n_outputs == 3
-        pred_deltas = scale_deltas(raw_output[1:2, :]; min_delta=min_delta, max_delta=max_delta)
-        delta_mse = mean((pred_deltas .- true_deltas).^2)
-        delta_mae = mean(abs.(pred_deltas .- true_deltas))
-
-        pred_sizes = vec(raw_output[3, :])
-        true_sizes = data.size_labels
-        size_mse = mean((pred_sizes .- true_sizes).^2)
-        size_mae = mean(abs.(pred_sizes .- true_sizes))
-
-        return Dict(
-            "delta_mse" => delta_mse,
-            "delta_mae" => delta_mae,
-            "size_mse" => size_mse,
-            "size_mae" => size_mae,
-            "pred_deltas" => pred_deltas,
-            "true_deltas" => true_deltas,
-            "pred_sizes" => pred_sizes,
-            "true_sizes" => true_sizes
-        )
-    else
-        # 2-output (strangle)
-        pred_deltas = scale_deltas(raw_output[1:2, :]; min_delta=min_delta, max_delta=max_delta)
-        delta_mse = mean((pred_deltas .- true_deltas).^2)
-        delta_mae = mean(abs.(pred_deltas .- true_deltas))
-
-        return Dict(
-            "delta_mse" => delta_mse,
-            "delta_mae" => delta_mae,
-            "size_mse" => 0.0,
-            "size_mae" => 0.0,
-            "pred_deltas" => pred_deltas,
-            "true_deltas" => true_deltas,
-            "pred_sizes" => zeros(Float32, n_samples),
-            "true_sizes" => zeros(Float32, n_samples)
-        )
-    end
+    return Dict(
+        "delta_mse" => delta_mse,
+        "delta_mae" => delta_mae,
+        "pred_deltas" => pred_deltas,
+        "true_deltas" => true_deltas
+    )
 end
 
 """

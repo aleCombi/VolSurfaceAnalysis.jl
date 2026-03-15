@@ -13,21 +13,11 @@ const LONG_MAX_DELTA = 0.15f0
 """
     mixed_output_activation(x) -> Array
 
-Custom activation for strike selection model:
-- 2-output or 4-output: all sigmoid → [0, 1] for deltas
-- 3-output (legacy): sigmoid for deltas, tanh for position size
+Activation for strike selection model: applies sigmoid to all outputs,
+mapping them to [0, 1] for delta prediction (2-output or 4-output models).
 """
 function mixed_output_activation(x)
-    n_outputs = size(x, 1)
-    if n_outputs == 3
-        # Legacy 3-output model: sigmoid for deltas, tanh for size
-        deltas = sigmoid.(x[1:2, :])
-        sizing = tanh.(x[3:end, :])
-        return vcat(deltas, sizing)
-    else
-        # 2-output (strangle) or 4-output (condor): all sigmoid
-        return sigmoid.(x)
-    end
+    return sigmoid.(x)
 end
 
 """
@@ -37,7 +27,6 @@ Create a neural network for strike selection.
 
 Output activation depends on output_dim:
 - 2 outputs: sigmoid for (short_put_delta, short_call_delta)
-- 3 outputs (legacy): sigmoid for deltas, tanh for position_size
 - 4 outputs: sigmoid for (short_put_delta, short_call_delta, long_put_delta, long_call_delta)
 
 # Arguments
@@ -161,21 +150,6 @@ function delta_loss(model, x, y)
     return mse(predictions, y)
 end
 
-"""
-    predict_deltas(model, x; min_delta, max_delta) -> Matrix{Float32}
-
-Get delta predictions from model (first 2 outputs only).
-"""
-function predict_deltas(
-    model,
-    x;
-    min_delta::Float32=0.05f0,
-    max_delta::Float32=0.35f0
-)::Matrix{Float32}
-    raw = model(x)
-    delta_raw = raw[1:2, :]
-    return scale_deltas(delta_raw; min_delta=min_delta, max_delta=max_delta)
-end
 
 """
     predict_condor_deltas(model, x; short_min_delta, short_max_delta, long_min_delta, long_max_delta) -> Matrix{Float32}
@@ -199,41 +173,3 @@ function predict_condor_deltas(
     )
 end
 
-"""
-    predict_with_sizing(model, x; min_delta, max_delta)
-
-Legacy: get delta predictions and position sizes from a 3-output model.
-"""
-function predict_with_sizing(
-    model,
-    x;
-    min_delta::Float32=0.05f0,
-    max_delta::Float32=0.35f0
-)
-    raw = model(x)
-    @assert size(raw, 1) >= 3 "Model must have at least 3 outputs for predict_with_sizing"
-
-    delta_raw = raw[1:2, :]
-    deltas = scale_deltas(delta_raw; min_delta=min_delta, max_delta=max_delta)
-    position_sizes = vec(raw[3, :])
-
-    return deltas, position_sizes
-end
-
-"""
-    combined_loss(model, x, y_deltas, y_sizes; delta_weight, size_weight)
-
-Legacy: combined MSE loss for 3-output models (deltas + position sizes).
-"""
-function combined_loss(
-    model, x, y_deltas, y_sizes;
-    delta_weight::Float32=1.0f0,
-    size_weight::Float32=1.0f0
-)
-    predictions = model(x)
-    pred_deltas = predictions[1:2, :]
-    delta_loss_val = mse(pred_deltas, y_deltas)
-    pred_sizes = predictions[3, :]
-    size_loss_val = mse(pred_sizes, y_sizes)
-    return delta_weight * delta_loss_val + size_weight * size_loss_val
-end

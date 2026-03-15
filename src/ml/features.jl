@@ -33,12 +33,7 @@ const _DELTA_Z_10 = 1.2815515655446004  # quantile(Normal(), 0.9)
 const _DELTA_Z_25 = 0.6744897501960817  # quantile(Normal(), 0.75)
 const _DELTA_Z_40 = 0.2533471031357997  # quantile(Normal(), 0.6)
 
-"""
-    path_feature_dim(; use_logsig=true, level=SIGNATURE_LEVEL) -> Int
-
-Number of path-derived features produced by the configured signature transform.
-"""
-function path_feature_dim(; use_logsig::Bool=true, level::Int=SIGNATURE_LEVEL)::Int
+function _path_feature_dim(; use_logsig::Bool=true, level::Int=SIGNATURE_LEVEL)::Int
     return use_logsig ?
         _logsig_feature_dim(_LEADLAG_PATH_DIM, level) :
         _sig_feature_dim(_LEADLAG_PATH_DIM, level)
@@ -246,7 +241,7 @@ function compute_path_signature(
     current_spot::Float64;
     level::Int=SIGNATURE_LEVEL
 )::Vector{Float64}
-    expected_dim = path_feature_dim(; use_logsig=false, level=level)
+    expected_dim = _path_feature_dim(; use_logsig=false, level=level)
     prices = vcat(spot_history, current_spot)
     n = length(prices)
     if n < 3
@@ -271,7 +266,7 @@ function compute_logsig_features(
     current_spot::Float64;
     level::Int=SIGNATURE_LEVEL
 )::Vector{Float64}
-    expected_dim = path_feature_dim(; use_logsig=true, level=level)
+    expected_dim = _path_feature_dim(; use_logsig=true, level=level)
     prices = vcat(spot_history, current_spot)
     n = length(prices)
     if n < 3
@@ -410,7 +405,7 @@ function extract_features(
     spot_return_1d = 0.0
     spot_return_5d = 0.0
     realized_vol_5d = 0.0
-    raw_sig = zeros(Float64, path_feature_dim(; use_logsig=use_logsig))
+    raw_sig = zeros(Float64, _path_feature_dim(; use_logsig=use_logsig))
 
     if spot_history !== nothing && length(spot_history.prices) >= 2
         times = spot_history.timestamps

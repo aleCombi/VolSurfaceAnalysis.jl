@@ -1,5 +1,5 @@
 # ML Strike Selector Training and Evaluation
-# Trains a neural network to learn optimal strike selection for short strangles
+# Trains a neural network to learn optimal strike selection for iron condors.
 # Train on 6 months, validate on subsequent period
 
 using Pkg
@@ -19,7 +19,6 @@ include(joinpath(@__DIR__, "configurations.jl"))
 # Configuration
 # =============================================================================
 const UNDERLYING_SYMBOL = "SPXW"
-const STRATEGY = "condor"  # "strangle" or "condor"
 const MODEL_MODE = :delta   # :delta (current), :score (candidate scoring), :hybrid (score with delta fallback)
 
 # Data periods
@@ -104,15 +103,12 @@ function main()
     CONDOR_MAX_LOSS_MAX = cfg.condor_max_loss_max
     CONDOR_MIN_CREDIT = cfg.condor_min_credit
 
-    if STRATEGY != "condor" && MODEL_MODE != :delta
-        error("MODEL_MODE=$(MODEL_MODE) is only supported for STRATEGY=\"condor\"")
-    end
     MODEL_MODE in (:delta, :score, :hybrid) || error("MODEL_MODE must be one of :delta, :score, :hybrid")
 
     mkpath(RUN_DIR)
 
     println("=" ^ 80)
-    strategy_label = STRATEGY == "condor" ? "ML IRON CONDOR SELECTOR" : "ML STRIKE SELECTOR"
+    strategy_label = "ML IRON CONDOR SELECTOR"
     println("$strategy_label - TRAINING AND EVALUATION")
     println("=" ^ 80)
     println("Underlying: $symbol")
@@ -121,7 +117,7 @@ function main()
     println("Training:   $TRAIN_START to $TRAIN_END")
     println("Validation: $VAL_START to $VAL_END (early stopping)")
     println("Test:       $TEST_START to $TEST_END (backtest eval)")
-    if MODEL_MODE != :delta && STRATEGY == "condor"
+    if MODEL_MODE != :delta
         println("Scoring objective: $SCORE_UTILITY_OBJECTIVE, max candidates/day: $SCORE_MAX_CANDIDATES_PER_DAY")
     end
     println()
@@ -172,7 +168,7 @@ function main()
     println("-" ^ 40)
     println("  This may take a while...")
 
-    train_data = if STRATEGY == "condor" && MODEL_MODE != :delta
+    train_data = if MODEL_MODE != :delta
         generate_condor_candidate_training_data(
             train_surfaces,
             train_settlement_spots,
@@ -195,7 +191,7 @@ function main()
             prev_surfaces=train_prev_surfaces,
             verbose=true
         )
-    elseif STRATEGY == "condor"
+    else
         generate_condor_4d_training_data(
             train_surfaces,
             train_settlement_spots,
@@ -208,33 +204,18 @@ function main()
             prev_surfaces=train_prev_surfaces,
             verbose=true
         )
-    else
-        generate_training_data(
-            train_surfaces,
-            train_settlement_spots,
-            train_spot_history;
-            rate=RISK_FREE_RATE,
-            div_yield=DIV_YIELD,
-            expiry_interval=EXPIRY_INTERVAL,
-            use_logsig=USE_LOGSIG,
-            prev_surfaces=train_prev_surfaces,
-            verbose=true
-        )
     end
     println()
     println("  Training samples: $(length(train_data.timestamps))")
     println("  Feature matrix: $(size(train_data.features))")
-    if STRATEGY == "condor" && MODEL_MODE != :delta
+    if MODEL_MODE != :delta
         println("  Utility range: [$(minimum(train_data.utilities)), $(maximum(train_data.utilities))]")
         println("  Candidate PnL range: [$(minimum(train_data.pnls)), $(maximum(train_data.pnls))]")
     else
-        n_label_dims = size(train_data.raw_deltas, 1)
         println("  Label range: short_put_delta=[$(minimum(train_data.raw_deltas[1,:])), $(maximum(train_data.raw_deltas[1,:]))]")
         println("              short_call_delta=[$(minimum(train_data.raw_deltas[2,:])), $(maximum(train_data.raw_deltas[2,:]))]")
-        if n_label_dims >= 4
-            println("              long_put_delta=[$(minimum(train_data.raw_deltas[3,:])), $(maximum(train_data.raw_deltas[3,:]))]")
-            println("              long_call_delta=[$(minimum(train_data.raw_deltas[4,:])), $(maximum(train_data.raw_deltas[4,:]))]")
-        end
+        println("              long_put_delta=[$(minimum(train_data.raw_deltas[3,:])), $(maximum(train_data.raw_deltas[3,:]))]")
+        println("              long_call_delta=[$(minimum(train_data.raw_deltas[4,:])), $(maximum(train_data.raw_deltas[4,:]))]")
     end
     println()
 
@@ -277,7 +258,7 @@ function main()
 
     # Generate validation labels (for evaluation)
     println("  Generating validation labels...")
-    val_data = if STRATEGY == "condor" && MODEL_MODE != :delta
+    val_data = if MODEL_MODE != :delta
         generate_condor_candidate_training_data(
             val_surfaces,
             val_settlement_spots,
@@ -300,24 +281,12 @@ function main()
             prev_surfaces=val_prev_surfaces,
             verbose=true
         )
-    elseif STRATEGY == "condor"
+    else
         generate_condor_4d_training_data(
             val_surfaces,
             val_settlement_spots,
             val_spot_history;
             min_delta_gap=MIN_DELTA_GAP,
-            rate=RISK_FREE_RATE,
-            div_yield=DIV_YIELD,
-            expiry_interval=EXPIRY_INTERVAL,
-            use_logsig=USE_LOGSIG,
-            prev_surfaces=val_prev_surfaces,
-            verbose=true
-        )
-    else
-        generate_training_data(
-            val_surfaces,
-            val_settlement_spots,
-            val_spot_history;
             rate=RISK_FREE_RATE,
             div_yield=DIV_YIELD,
             expiry_interval=EXPIRY_INTERVAL,
@@ -369,7 +338,7 @@ function main()
 
     # Generate test labels
     println("  Generating test labels...")
-    test_data = if STRATEGY == "condor" && MODEL_MODE != :delta
+    test_data = if MODEL_MODE != :delta
         generate_condor_candidate_training_data(
             test_surfaces,
             test_settlement_spots,
@@ -392,24 +361,12 @@ function main()
             prev_surfaces=test_prev_surfaces,
             verbose=true
         )
-    elseif STRATEGY == "condor"
+    else
         generate_condor_4d_training_data(
             test_surfaces,
             test_settlement_spots,
             test_spot_history;
             min_delta_gap=MIN_DELTA_GAP,
-            rate=RISK_FREE_RATE,
-            div_yield=DIV_YIELD,
-            expiry_interval=EXPIRY_INTERVAL,
-            use_logsig=USE_LOGSIG,
-            prev_surfaces=test_prev_surfaces,
-            verbose=true
-        )
-    else
-        generate_training_data(
-            test_surfaces,
-            test_settlement_spots,
-            test_spot_history;
             rate=RISK_FREE_RATE,
             div_yield=DIV_YIELD,
             expiry_interval=EXPIRY_INTERVAL,
@@ -432,7 +389,7 @@ function main()
     X_val_norm = apply_normalization(val_data.features, feature_means, feature_stds)
     X_test_norm = apply_normalization(test_data.features, feature_means, feature_stds)
 
-    train_data_norm = if STRATEGY == "condor" && MODEL_MODE != :delta
+    train_data_norm = if MODEL_MODE != :delta
         CondorScoringDataset(
             X_train_norm,
             train_data.utilities,
@@ -446,11 +403,10 @@ function main()
             train_data.labels,
             train_data.raw_deltas,
             train_data.pnls,
-            train_data.size_labels,
             train_data.timestamps
         )
     end
-    val_data_norm = if STRATEGY == "condor" && MODEL_MODE != :delta
+    val_data_norm = if MODEL_MODE != :delta
         CondorScoringDataset(
             X_val_norm,
             val_data.utilities,
@@ -464,11 +420,10 @@ function main()
             val_data.labels,
             val_data.raw_deltas,
             val_data.pnls,
-            val_data.size_labels,
             val_data.timestamps
         )
     end
-    test_data_norm = if STRATEGY == "condor" && MODEL_MODE != :delta
+    test_data_norm = if MODEL_MODE != :delta
         CondorScoringDataset(
             X_test_norm,
             test_data.utilities,
@@ -482,7 +437,6 @@ function main()
             test_data.labels,
             test_data.raw_deltas,
             test_data.pnls,
-            test_data.size_labels,
             test_data.timestamps
         )
     end
@@ -496,14 +450,14 @@ function main()
     # -------------------------------------------------------------------------
     println("PHASE 5: Training Neural Network")
     println("-" ^ 40)
-    input_dim = (STRATEGY == "condor" && MODEL_MODE != :delta) ?
+    input_dim = MODEL_MODE != :delta ?
         n_condor_scoring_features(; use_logsig=USE_LOGSIG) :
         n_features(; use_logsig=USE_LOGSIG)
     if size(train_data.features, 1) != input_dim
         error("Feature dimension mismatch: training matrix has $(size(train_data.features, 1)) rows, expected $input_dim")
     end
 
-    if STRATEGY == "condor" && MODEL_MODE != :delta
+    if MODEL_MODE != :delta
         println("  Architecture: $(input_dim) -> $(SCORE_HIDDEN_DIMS) -> 1 (utility score)")
     else
         println("  Architecture: $(input_dim) -> $(HIDDEN_DIMS) -> 4 (4-delta condor)")
@@ -511,7 +465,7 @@ function main()
     println("  Epochs: $EPOCHS, Batch size: $BATCH_SIZE, LR: $LEARNING_RATE")
     println()
 
-    model, history = if STRATEGY == "condor" && MODEL_MODE != :delta
+    model, history = if MODEL_MODE != :delta
         scoring_model = create_scoring_model(
             input_dim=input_dim,
             hidden_dims=SCORE_HIDDEN_DIMS,
@@ -558,13 +512,13 @@ function main()
     println("PHASE 6: Evaluating Model")
     println("-" ^ 40)
 
-    train_eval, val_eval, test_eval = if STRATEGY == "condor" && MODEL_MODE != :delta
+    train_eval, val_eval, test_eval = if MODEL_MODE != :delta
         evaluate_scoring_model(model, train_data_norm), evaluate_scoring_model(model, val_data_norm), evaluate_scoring_model(model, test_data_norm)
     else
         evaluate_model(model, train_data_norm), evaluate_model(model, val_data_norm), evaluate_model(model, test_data_norm)
     end
 
-    if STRATEGY == "condor" && MODEL_MODE != :delta
+    if MODEL_MODE != :delta
         println("  Training Set:")
         println("    Utility MSE: $(round(train_eval["utility_mse"], digits=6)), MAE: $(round(train_eval["utility_mae"], digits=4))")
         println("  Validation Set (early stopping):")
@@ -574,21 +528,12 @@ function main()
     else
         println("  Training Set:")
         println("    Delta MSE: $(round(train_eval["delta_mse"], digits=6)), MAE: $(round(train_eval["delta_mae"], digits=4))")
-        if train_eval["size_mse"] > 0
-            println("    Size  MSE: $(round(train_eval["size_mse"], digits=6)), MAE: $(round(train_eval["size_mae"], digits=4))")
-        end
 
         println("  Validation Set (early stopping):")
         println("    Delta MSE: $(round(val_eval["delta_mse"], digits=6)), MAE: $(round(val_eval["delta_mae"], digits=4))")
-        if val_eval["size_mse"] > 0
-            println("    Size  MSE: $(round(val_eval["size_mse"], digits=6)), MAE: $(round(val_eval["size_mae"], digits=4))")
-        end
 
         println("  Test Set:")
         println("    Delta MSE: $(round(test_eval["delta_mse"], digits=6)), MAE: $(round(test_eval["delta_mae"], digits=4))")
-        if test_eval["size_mse"] > 0
-            println("    Size  MSE: $(round(test_eval["size_mse"], digits=6)), MAE: $(round(test_eval["size_mae"], digits=4))")
-        end
     end
     println()
 
@@ -599,7 +544,7 @@ function main()
     println("-" ^ 40)
 
     # Create ML selector
-    ml_selector = if STRATEGY == "condor" && MODEL_MODE != :delta
+    ml_selector = if MODEL_MODE != :delta
         fallback_selector = if MODEL_MODE == :hybrid
             ctx -> begin
                 shorts = VolSurfaceAnalysis._delta_strangle_strikes_asymmetric(
@@ -652,7 +597,7 @@ function main()
             use_logsig=USE_LOGSIG,
             fallback_selector=fallback_selector
         )
-    elseif STRATEGY == "condor"
+    else
         MLCondorStrikeSelector(
             model, feature_means, feature_stds;
             min_delta=0.05f0,
@@ -669,133 +614,79 @@ function main()
             div_yield=DIV_YIELD,
             use_logsig=USE_LOGSIG
         )
-    else
-        MLStrikeSelector(
-            model, feature_means, feature_stds;
-            min_delta=0.05f0,
-            max_delta=0.35f0,
-            rate=RISK_FREE_RATE,
-            div_yield=DIV_YIELD,
-            use_logsig=USE_LOGSIG
-        )
     end
 
     # Create strategies
     schedule = sort(collect(keys(test_surfaces)))
 
-    strategy_ml = if STRATEGY == "condor"
-        IronCondorStrategy(
-            schedule,
-            EXPIRY_INTERVAL,
-            SHORT_SIGMAS,
-            LONG_SIGMAS;
-            rate=RISK_FREE_RATE,
-            div_yield=DIV_YIELD,
-            quantity=QUANTITY,
-            tau_tol=TAU_TOL,
-            debug=false,
-            strike_selector=ml_selector
-        )
-    else
-        ShortStrangleStrategy(
-            schedule,
-            EXPIRY_INTERVAL,
-            1.0;  # sigmas not used when selector provided
-            rate=RISK_FREE_RATE,
-            div_yield=DIV_YIELD,
-            quantity=QUANTITY,
-            tau_tol=TAU_TOL,
-            debug=false,
-            strike_selector=ml_selector
-        )
-    end
+    strategy_ml = IronCondorStrategy(
+        schedule,
+        EXPIRY_INTERVAL,
+        SHORT_SIGMAS,
+        LONG_SIGMAS;
+        rate=RISK_FREE_RATE,
+        div_yield=DIV_YIELD,
+        quantity=QUANTITY,
+        tau_tol=TAU_TOL,
+        debug=false,
+        strike_selector=ml_selector
+    )
 
-    strategy_baseline = if STRATEGY == "condor"
-        baseline_selector = ctx -> begin
-            shorts = VolSurfaceAnalysis._delta_strangle_strikes_asymmetric(
-                ctx,
-                SHORT_DELTA_ABS,
-                SHORT_DELTA_ABS;
-                rate=RISK_FREE_RATE,
-                div_yield=DIV_YIELD
-            )
-            shorts === nothing && return nothing
-            short_put_K, short_call_K = shorts
+    baseline_selector = ctx -> begin
+        shorts = VolSurfaceAnalysis._delta_strangle_strikes_asymmetric(
+            ctx,
+            SHORT_DELTA_ABS,
+            SHORT_DELTA_ABS;
+            rate=RISK_FREE_RATE,
+            div_yield=DIV_YIELD
+        )
+        shorts === nothing && return nothing
+        short_put_K, short_call_K = shorts
 
-            wings = VolSurfaceAnalysis._condor_wings_by_objective(
-                ctx,
-                short_put_K,
-                short_call_K;
-                objective=CONDOR_WING_OBJECTIVE,
-                target_max_loss=(CONDOR_WING_OBJECTIVE == :target_max_loss ? TARGET_MAX_LOSS : nothing),
-                max_loss_min=CONDOR_MAX_LOSS_MIN,
-                max_loss_max=CONDOR_MAX_LOSS_MAX,
-                min_credit=CONDOR_MIN_CREDIT,
-                rate=RISK_FREE_RATE,
-                div_yield=DIV_YIELD,
-                min_delta_gap=MIN_DELTA_GAP,
-                prefer_symmetric=PREFER_SYMMETRIC_WINGS,
-                debug=false
-            )
-            wings === nothing && return nothing
-            long_put_K, long_call_K = wings
-            return (short_put_K, short_call_K, long_put_K, long_call_K)
-        end
-        IronCondorStrategy(
-            schedule,
-            EXPIRY_INTERVAL,
-            SHORT_SIGMAS,
-            LONG_SIGMAS;
+        wings = VolSurfaceAnalysis._condor_wings_by_objective(
+            ctx,
+            short_put_K,
+            short_call_K;
+            objective=CONDOR_WING_OBJECTIVE,
+            target_max_loss=(CONDOR_WING_OBJECTIVE == :target_max_loss ? TARGET_MAX_LOSS : nothing),
+            max_loss_min=CONDOR_MAX_LOSS_MIN,
+            max_loss_max=CONDOR_MAX_LOSS_MAX,
+            min_credit=CONDOR_MIN_CREDIT,
             rate=RISK_FREE_RATE,
             div_yield=DIV_YIELD,
-            quantity=QUANTITY,
-            tau_tol=TAU_TOL,
-            debug=false,
-            strike_selector=baseline_selector
+            min_delta_gap=MIN_DELTA_GAP,
+            prefer_symmetric=PREFER_SYMMETRIC_WINGS,
+            debug=false
         )
-    else
-        baseline_selector = ctx -> VolSurfaceAnalysis._delta_strangle_strikes(
-            ctx, 0.15; rate=RISK_FREE_RATE, div_yield=DIV_YIELD
-        )
-        ShortStrangleStrategy(
-            schedule,
-            EXPIRY_INTERVAL,
-            1.0;
-            rate=RISK_FREE_RATE,
-            div_yield=DIV_YIELD,
-            quantity=QUANTITY,
-            tau_tol=TAU_TOL,
-            debug=false,
-            strike_selector=baseline_selector
-        )
+        wings === nothing && return nothing
+        long_put_K, long_call_K = wings
+        return (short_put_K, short_call_K, long_put_K, long_call_K)
     end
+    strategy_baseline = IronCondorStrategy(
+        schedule,
+        EXPIRY_INTERVAL,
+        SHORT_SIGMAS,
+        LONG_SIGMAS;
+        rate=RISK_FREE_RATE,
+        div_yield=DIV_YIELD,
+        quantity=QUANTITY,
+        tau_tol=TAU_TOL,
+        debug=false,
+        strike_selector=baseline_selector
+    )
 
-    strategy_sigma = if STRATEGY == "condor"
-        IronCondorStrategy(
-            schedule,
-            EXPIRY_INTERVAL,
-            SHORT_SIGMAS,
-            LONG_SIGMAS;
-            rate=RISK_FREE_RATE,
-            div_yield=DIV_YIELD,
-            quantity=QUANTITY,
-            tau_tol=TAU_TOL,
-            debug=false,
-            strike_selector=nothing
-        )
-    else
-        ShortStrangleStrategy(
-            schedule,
-            EXPIRY_INTERVAL,
-            0.8;
-            rate=RISK_FREE_RATE,
-            div_yield=DIV_YIELD,
-            quantity=QUANTITY,
-            tau_tol=TAU_TOL,
-            debug=false,
-            strike_selector=nothing
-        )
-    end
+    strategy_sigma = IronCondorStrategy(
+        schedule,
+        EXPIRY_INTERVAL,
+        SHORT_SIGMAS,
+        LONG_SIGMAS;
+        rate=RISK_FREE_RATE,
+        div_yield=DIV_YIELD,
+        quantity=QUANTITY,
+        tau_tol=TAU_TOL,
+        debug=false,
+        strike_selector=nothing
+    )
 
     # Run backtests
     # Merge minute spots with settlement spots so DictDataSource serves both
@@ -817,16 +708,9 @@ function main()
     println()
 
     # Compute metrics
-    if STRATEGY == "condor"
-        metrics_ml = performance_metrics(pos_ml, pnl_ml; margin_by_key=condor_max_loss_by_key(pos_ml))
-        metrics_baseline = performance_metrics(pos_baseline, pnl_baseline; margin_by_key=condor_max_loss_by_key(pos_baseline))
-        metrics_sigma = performance_metrics(pos_sigma, pnl_sigma; margin_by_key=condor_max_loss_by_key(pos_sigma))
-    else
-        margin = 12000.0
-        metrics_ml = performance_metrics(pos_ml, pnl_ml; margin_per_trade=margin)
-        metrics_baseline = performance_metrics(pos_baseline, pnl_baseline; margin_per_trade=margin)
-        metrics_sigma = performance_metrics(pos_sigma, pnl_sigma; margin_per_trade=margin)
-    end
+    metrics_ml = performance_metrics(pos_ml, pnl_ml; margin_by_key=condor_max_loss_by_key(pos_ml))
+    metrics_baseline = performance_metrics(pos_baseline, pnl_baseline; margin_by_key=condor_max_loss_by_key(pos_baseline))
+    metrics_sigma = performance_metrics(pos_sigma, pnl_sigma; margin_by_key=condor_max_loss_by_key(pos_sigma))
 
     # -------------------------------------------------------------------------
     # Results Summary
@@ -836,28 +720,22 @@ function main()
     println("=" ^ 80)
     println()
     println("Test Period: $TEST_START to $TEST_END (val for early stopping: $VAL_START to $VAL_END)")
-    if STRATEGY == "condor"
-        println("Return basis: per-trade max loss")
-    else
-        println("Margin per trade: \$$(Int(margin))")
-    end
+    println("Return basis: per-trade max loss")
     println()
 
     println("-" ^ 90)
     println("Strategy             | Trades | Total P&L  | Avg ROI  |  Sharpe  | Win Rate |   Avg P&L")
     println("-" ^ 90)
 
-    ml_label = if STRATEGY == "condor" && MODEL_MODE == :score
+    ml_label = if MODEL_MODE == :score
         "ML Condor Score"
-    elseif STRATEGY == "condor" && MODEL_MODE == :hybrid
+    elseif MODEL_MODE == :hybrid
         "ML Condor Hybrid"
-    elseif STRATEGY == "condor"
-        "ML Condor"
     else
-        "ML Selector"
+        "ML Condor"
     end
-    base_label = STRATEGY == "condor" ? "Fixed Delta Condor" : "Fixed 15-Delta"
-    sigma_label = STRATEGY == "condor" ? "Sigma Condor" : "0.8 Sigma"
+    base_label = "Fixed Delta Condor"
+    sigma_label = "Sigma Condor"
 
     function _fmt_row(label, m)
         roi_str = ismissing(m.avg_return) ? "   N/A  " : @sprintf("%7.1f%%", m.avg_return * 100)
@@ -884,55 +762,45 @@ function main()
     CSV.write(results_path, results_df)
     println("Results saved to: $results_path")
 
-    # Condor-specific per-trade report
-    if STRATEGY == "condor"
-        condor_df = condor_trade_table(pos_ml, pnl_ml)
-        condor_path = joinpath(RUN_DIR, "condor_trades.csv")
-        CSV.write(condor_path, condor_df)
-        println("Condor trade report saved to: $condor_path")
+    # Per-trade condor report
+    condor_df = condor_trade_table(pos_ml, pnl_ml)
+    condor_path = joinpath(RUN_DIR, "condor_trades.csv")
+    CSV.write(condor_path, condor_df)
+    println("Condor trade report saved to: $condor_path")
 
-        pnl_vals = collect(skipmissing(condor_df.PnL))
-        max_loss_vals = collect(skipmissing(condor_df.MaxLoss))
-        credit_vals = collect(skipmissing(condor_df.Credit))
-        ror_vals = collect(skipmissing(condor_df.ReturnOnRisk))
+    pnl_vals = collect(skipmissing(condor_df.PnL))
+    max_loss_vals = collect(skipmissing(condor_df.MaxLoss))
+    credit_vals = collect(skipmissing(condor_df.Credit))
+    ror_vals = collect(skipmissing(condor_df.ReturnOnRisk))
 
-        condor_summary = DataFrame(
-            Metric = [
-                "count",
-                "avg_pnl_per_condor",
-                "min_pnl_per_condor",
-                "max_pnl_per_condor",
-                "win_rate",
-                "avg_credit",
-                "avg_max_loss",
-                "avg_return_on_risk"
-            ],
-            Value = [
-                nrow(condor_df),
-                isempty(pnl_vals) ? missing : mean(pnl_vals),
-                isempty(pnl_vals) ? missing : minimum(pnl_vals),
-                isempty(pnl_vals) ? missing : maximum(pnl_vals),
-                isempty(pnl_vals) ? missing : count(x -> x > 0, pnl_vals) / length(pnl_vals),
-                isempty(credit_vals) ? missing : mean(credit_vals),
-                isempty(max_loss_vals) ? missing : mean(max_loss_vals),
-                isempty(ror_vals) ? missing : mean(ror_vals)
-            ]
-        )
-        summary_path = joinpath(RUN_DIR, "condor_summary.csv")
-        CSV.write(summary_path, condor_summary)
-        println("Condor summary saved to: $summary_path")
-    end
+    condor_summary = DataFrame(
+        Metric = [
+            "count",
+            "avg_pnl_per_condor",
+            "min_pnl_per_condor",
+            "max_pnl_per_condor",
+            "win_rate",
+            "avg_credit",
+            "avg_max_loss",
+            "avg_return_on_risk"
+        ],
+        Value = [
+            nrow(condor_df),
+            isempty(pnl_vals) ? missing : mean(pnl_vals),
+            isempty(pnl_vals) ? missing : minimum(pnl_vals),
+            isempty(pnl_vals) ? missing : maximum(pnl_vals),
+            isempty(pnl_vals) ? missing : count(x -> x > 0, pnl_vals) / length(pnl_vals),
+            isempty(credit_vals) ? missing : mean(credit_vals),
+            isempty(max_loss_vals) ? missing : mean(max_loss_vals),
+            isempty(ror_vals) ? missing : mean(ror_vals)
+        ]
+    )
+    summary_path = joinpath(RUN_DIR, "condor_summary.csv")
+    CSV.write(summary_path, condor_summary)
+    println("Condor summary saved to: $summary_path")
 
     # Save training history
-    history_df = if haskey(history, "train_size_loss")
-        DataFrame(
-            Epoch = 1:length(history["train_loss"]),
-            TrainLoss = history["train_loss"],
-            ValLoss = history["val_loss"],
-            TrainDeltaLoss = history["train_delta_loss"],
-            TrainSizeLoss = history["train_size_loss"]
-        )
-    elseif haskey(history, "train_delta_loss")
+    history_df = if haskey(history, "train_delta_loss")
         DataFrame(
             Epoch = 1:length(history["train_loss"]),
             TrainLoss = history["train_loss"],
@@ -951,7 +819,7 @@ function main()
     println("Training history saved to: $history_path")
 
     # Save predicted vs actual deltas and sizes for analysis (test set)
-    predictions_df = if STRATEGY == "condor" && MODEL_MODE != :delta
+    predictions_df = if MODEL_MODE != :delta
         DataFrame(
             Timestamp = test_data.timestamps,
             TrueUtility = test_data.utilities,
@@ -959,7 +827,7 @@ function main()
             CandidatePnL = test_data.pnls,
             CandidateMaxLoss = test_data.max_losses
         )
-    elseif size(test_data.raw_deltas, 1) == 4
+    else
         DataFrame(
             Timestamp = test_data.timestamps,
             TrueShortPutDelta = test_data.raw_deltas[1, :],
@@ -970,17 +838,6 @@ function main()
             PredShortCallDelta = test_eval["pred_deltas"][2, :],
             PredLongPutDelta = test_eval["pred_deltas"][3, :],
             PredLongCallDelta = test_eval["pred_deltas"][4, :],
-            BestPnL = test_data.pnls
-        )
-    else
-        DataFrame(
-            Timestamp = test_data.timestamps,
-            TruePutDelta = test_data.raw_deltas[1, :],
-            TrueCallDelta = test_data.raw_deltas[2, :],
-            PredPutDelta = test_eval["pred_deltas"][1, :],
-            PredCallDelta = test_eval["pred_deltas"][2, :],
-            TrueSize = test_data.size_labels,
-            PredSize = test_eval["pred_sizes"],
             BestPnL = test_data.pnls
         )
     end
@@ -1027,18 +884,18 @@ function main()
             trade_pnls = [pnl_by_key[k] for k in keys_sorted]
 
             plots_dir = joinpath(RUN_DIR, "plots")
-            title_prefix = STRATEGY == "condor" ? "ML Condor" : "ML Strangle"
+            title_prefix = "ML Condor"
 
             save_pnl_and_equity_curve(
                 trade_dates,
                 trade_pnls,
-                joinpath(plots_dir, "ml_$(STRATEGY)_pnl_distribution.png");
+                joinpath(plots_dir, "ml_condor_pnl_distribution.png");
                 title_prefix=title_prefix
             )
             save_profit_curve(
                 trade_dates,
                 trade_pnls,
-                joinpath(plots_dir, "ml_$(STRATEGY)_profit_curve.png");
+                joinpath(plots_dir, "ml_condor_profit_curve.png");
                 title="$title_prefix - Profit per Trade"
             )
         end
@@ -1047,7 +904,7 @@ function main()
             plots_dir = joinpath(RUN_DIR, "plots")
             save_spot_curve(
                 val_entry_spots,
-                joinpath(plots_dir, "ml_$(STRATEGY)_spot_curve.png");
+                joinpath(plots_dir, "ml_condor_spot_curve.png");
                 title="Spot Curve $(symbol)"
             )
         end
