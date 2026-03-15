@@ -1,7 +1,0 @@
-spot_symbol = "SPY"
-spot_multiplier = 10.0
-div_yield = 0.013
-condor_max_loss_min = 50.0
-condor_max_loss_max = 300.0
-condor_min_credit = 1.0
-constrained_super_max_loss_tol = 10.0

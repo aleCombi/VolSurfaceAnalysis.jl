@@ -1,6 +1,0 @@
-spot_symbol = "IWM"
-div_yield = 0.012
-condor_max_loss_min = 2.0
-condor_max_loss_max = 15.0
-condor_min_credit = 0.05
-constrained_super_max_loss_tol = 0.5

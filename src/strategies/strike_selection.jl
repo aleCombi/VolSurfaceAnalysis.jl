@@ -567,3 +567,99 @@ function delta_condor_selector(sp_delta::Float64, sc_delta::Float64,
         )
     end
 end
+
+# =============================================================================
+# Spread helpers
+# =============================================================================
+
+"""
+    _relative_spread(rec::OptionRecord) -> Union{Nothing, Float64}
+
+Compute (ask - bid) / mid for a record. Returns `nothing` if bid/ask missing or mid <= 0.
+"""
+function _relative_spread(rec::OptionRecord)::Union{Nothing,Float64}
+    (ismissing(rec.bid_price) || ismissing(rec.ask_price)) && return nothing
+    bid = Float64(rec.bid_price)
+    ask = Float64(rec.ask_price)
+    mid = (bid + ask) / 2.0
+    mid <= 0.0 && return nothing
+    return (ask - bid) / mid
+end
+
+# =============================================================================
+# Constrained selector
+# =============================================================================
+
+"""
+    constrained_delta_selector(put_delta, call_delta;
+        rate=0.0, div_yield=0.0, max_loss, max_spread_rel=Inf,
+        min_delta_gap=0.08, prefer_symmetric=true)
+
+Return a callable `ctx -> (sp_K, sc_K, lp_K, lc_K) | nothing` that:
+1. Selects short strikes at the given deltas
+2. Checks relative bid-ask spread on the short strikes against `max_spread_rel`
+3. Finds wings where max loss ≤ `max_loss` (USD), maximizing ROI within that constraint
+
+Emits `@warn` and returns `nothing` when constraints cannot be met.
+"""
+function constrained_delta_selector(put_delta::Float64, call_delta::Float64;
+                                    rate::Float64=0.0,
+                                    div_yield::Float64=0.0,
+                                    max_loss::Float64,
+                                    max_spread_rel::Float64=Inf,
+                                    min_delta_gap::Float64=0.08,
+                                    prefer_symmetric::Bool=true)
+    return function(ctx)
+        tau = _ctx_tau(ctx)
+        tau <= 0.0 && return nothing
+
+        recs = _ctx_recs(ctx)
+        spot = ctx.surface.spot
+        ts = ctx.surface.timestamp
+
+        # Find short strikes by delta
+        shorts = _delta_strangle_strikes_asymmetric(
+            ctx, put_delta, call_delta; rate=rate, div_yield=div_yield
+        )
+        if shorts === nothing
+            @warn "No valid short strikes at deltas ($put_delta, $call_delta)" timestamp=ts
+            return nothing
+        end
+        sp_K, sc_K = shorts
+
+        # Check bid-ask spread on short strikes
+        if isfinite(max_spread_rel)
+            put_recs = filter(r -> r.option_type == Put, recs)
+            call_recs = filter(r -> r.option_type == Call, recs)
+            sp_rec = _find_rec_by_strike(put_recs, sp_K)
+            sc_rec = _find_rec_by_strike(call_recs, sc_K)
+
+            for (label, rec) in [("short put", sp_rec), ("short call", sc_rec)]
+                rec === nothing && continue
+                spread = _relative_spread(rec)
+                if spread !== nothing && spread > max_spread_rel
+                    @warn "Spread too wide on $label" timestamp=ts strike=rec.strike spread=round(spread, digits=3) max=max_spread_rel
+                    return nothing
+                end
+            end
+        end
+
+        # Find wings with max loss constraint, maximizing ROI
+        wings = _condor_wings_by_objective(
+            ctx, sp_K, sc_K;
+            objective=:roi,
+            max_loss_max=max_loss,
+            min_delta_gap=min_delta_gap,
+            prefer_symmetric=prefer_symmetric,
+            rate=rate,
+            div_yield=div_yield
+        )
+        if wings === nothing
+            @warn "No wings satisfying max_loss ≤ $max_loss" timestamp=ts short_put=sp_K short_call=sc_K
+            return nothing
+        end
+        lp_K, lc_K = wings
+
+        return (sp_K, sc_K, lp_K, lc_K)
+    end
+end

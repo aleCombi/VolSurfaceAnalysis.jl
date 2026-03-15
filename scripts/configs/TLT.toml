@@ -1,6 +1,0 @@
-spot_symbol = "TLT"
-div_yield = 0.035
-condor_max_loss_min = 1.0
-condor_max_loss_max = 10.0
-condor_min_credit = 0.03
-constrained_super_max_loss_tol = 0.3

@@ -1,9 +1,0 @@
-Metric,Value
-count,62.0
-avg_pnl_per_condor,-0.02167741935483628
-min_pnl_per_condor,-8.952499999999977
-max_pnl_per_condor,5.093
-win_rate,0.6129032258064516
-avg_credit,2.0394516129032256
-avg_max_loss,4.452483870967743
-avg_return_on_risk,-0.011882840900204179
