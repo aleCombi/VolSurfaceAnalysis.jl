@@ -6,18 +6,11 @@ using Dates, Printf, DataFrames
 # Parameters
 # =============================================================================
 
-SYMBOL          = "SPY"
-SPOT_SYMBOL     = "SPY"
-SPOT_MULTIPLIER = 1.0
 ENTRY_TIME      = Time(10, 0)          # 10:00 ET
 EXPIRY_INTERVAL = Day(1)               # 1DTE
 SPREAD_LAMBDA   = 0.0                  # conservative (widest synthetic spread)
-
-# In-sample / out-of-sample split
-IS_START  = Date(2024, 2, 1)
-IS_END    = Date(2025, 6, 30)
-OOS_START = Date(2025, 7, 1)
-OOS_END   = Date(2026, 3, 13)
+START_DATE      = Date(2024, 2, 1)
+END_DATE        = Date(2026, 3, 13)
 
 # Selector parameters
 PUT_DELTA      = 0.16
@@ -28,29 +21,40 @@ MAX_LOSS       = 5.0       # USD per condor
 MAX_SPREAD_REL = 0.50      # reject if (ask-bid)/mid > 50%
 MIN_DELTA_GAP  = 0.08
 
+# Symbols: (options_symbol, spot_symbol, spot_multiplier)
+SYMBOLS = [
+    ("SPY",  "SPY",  1.0),
+    ("SPXW", "SPY", 10.0),
+    ("QQQ",  "QQQ",  1.0),
+    ("IWM",  "IWM",  1.0),
+]
+
 # =============================================================================
 # Output directory
 # =============================================================================
 
 run_ts = Dates.format(now(), "yyyymmdd_HHMMSS")
-run_dir = joinpath(@__DIR__, "runs", "backtest_spy_iron_condor_$run_ts")
+run_dir = joinpath(@__DIR__, "runs", "backtest_iron_condor_$run_ts")
 mkpath(run_dir)
 println("Output: $run_dir")
 
 # =============================================================================
-# Run one period
+# Run one symbol
 # =============================================================================
 
-function run_period(label, start_date, end_date, run_dir)
+function run_symbol(symbol, spot_symbol, spot_multiplier, run_dir)
     println("\n", "=" ^ 60)
-    println("  $label: $start_date to $end_date")
+    println("  $symbol (spot via $spot_symbol × $spot_multiplier)")
     println("=" ^ 60)
 
+    # Scale max loss by spot multiplier (SPXW is ~10x SPY price level)
+    scaled_max_loss = MAX_LOSS * spot_multiplier
+
     surfaces, _, settlement_spots = load_surfaces_and_spots(
-        start_date, end_date;
-        symbol=SYMBOL,
-        spot_symbol=SPOT_SYMBOL,
-        spot_multiplier=SPOT_MULTIPLIER,
+        START_DATE, END_DATE;
+        symbol=symbol,
+        spot_symbol=spot_symbol,
+        spot_multiplier=spot_multiplier,
         entry_times=ENTRY_TIME,
         spread_lambda=SPREAD_LAMBDA,
         expiry_interval=EXPIRY_INTERVAL
@@ -62,7 +66,7 @@ function run_period(label, start_date, end_date, run_dir)
     selector = constrained_delta_selector(
         PUT_DELTA, CALL_DELTA;
         rate=RATE, div_yield=DIV_YIELD,
-        max_loss=MAX_LOSS,
+        max_loss=scaled_max_loss,
         max_spread_rel=MAX_SPREAD_REL,
         min_delta_gap=MIN_DELTA_GAP
     )
@@ -82,16 +86,16 @@ function run_period(label, start_date, end_date, run_dir)
     # Report
     lines = format_backtest_report(
         metrics;
-        title="$SYMBOL Iron Condor — $label",
+        title="$symbol Iron Condor",
         params=[
-            "Period"       => "$start_date to $end_date",
-            "Underlying"   => SYMBOL,
-            "Entry time"   => "10:00 ET",
-            "Expiry"       => "1DTE",
-            "Deltas"       => "put=$PUT_DELTA, call=$CALL_DELTA",
-            "Max loss"     => "\$$MAX_LOSS",
-            "Max spread"   => "$(Int(MAX_SPREAD_REL * 100))%",
-            "Spread lambda"=> "$SPREAD_LAMBDA"
+            "Period"        => "$START_DATE to $END_DATE",
+            "Spot proxy"    => "$spot_symbol × $spot_multiplier",
+            "Entry time"    => "10:00 ET",
+            "Expiry"        => "1DTE",
+            "Deltas"        => "put=$PUT_DELTA, call=$CALL_DELTA",
+            "Max loss"      => "\$$scaled_max_loss",
+            "Max spread"    => "$(Int(MAX_SPREAD_REL * 100))%",
+            "Spread lambda" => "$SPREAD_LAMBDA"
         ],
         realized_pnls=realized_pnls,
         n_scheduled=length(schedule),
@@ -101,14 +105,14 @@ function run_period(label, start_date, end_date, run_dir)
         margin_description="per-condor max loss"
     )
 
-    # Print and save report
     for l in lines; println(l); end
-    prefix = joinpath(run_dir, lowercase(replace(label, " " => "_")))
+
+    # Save outputs
+    prefix = joinpath(run_dir, lowercase(symbol))
     open(prefix * "_report.txt", "w") do io
         for l in lines; println(io, l); end
     end
 
-    # Save CSVs
     df_metrics = metrics_to_dataframe(metrics)
     df_pnl = pnl_results_dataframe(result.positions, result.pnl)
     df_trades = condor_trade_table(result.positions, result.pnl)
@@ -131,27 +135,33 @@ function run_period(label, start_date, end_date, run_dir)
         end
     end
 
-    # Save plots
     plots_dir = joinpath(run_dir, "plots")
     mkpath(plots_dir)
     save_pnl_and_equity_curve(realized_dates, realized_pnls,
-        joinpath(plots_dir, "$(lowercase(replace(label, " " => "_")))_equity.png");
-        title_prefix="$SYMBOL $label")
+        joinpath(plots_dir, "$(lowercase(symbol))_equity.png");
+        title_prefix=symbol)
 
-    println("  Saved to $prefix*")
-    return metrics
+    return (symbol=symbol, metrics=metrics)
 end
 
 # =============================================================================
 # Main
 # =============================================================================
 
-is_metrics  = run_period("In-Sample",      IS_START,  IS_END,  run_dir)
-oos_metrics = run_period("Out-of-Sample",  OOS_START, OOS_END, run_dir)
+results = [run_symbol(sym, spot, mult, run_dir) for (sym, spot, mult) in SYMBOLS]
 
-println("\n", "=" ^ 60)
-println("  COMPARISON")
-println("=" ^ 60)
-println("  In-sample  ROI: $(fmt_metric(is_metrics.total_roi; pct=true))  Sharpe: $(fmt_ratio(is_metrics.sharpe))  Win: $(fmt_pct(is_metrics.win_rate))")
-println("  OOS        ROI: $(fmt_metric(oos_metrics.total_roi; pct=true))  Sharpe: $(fmt_ratio(oos_metrics.sharpe))  Win: $(fmt_pct(oos_metrics.win_rate))")
-println("=" ^ 60)
+println("\n", "=" ^ 70)
+println("  SUMMARY")
+println("=" ^ 70)
+@printf("  %-6s  %8s  %8s  %8s  %8s  %5s\n", "Symbol", "Trades", "ROI", "Sharpe", "Sortino", "Win%")
+println("  ", "-" ^ 62)
+for r in results
+    m = r.metrics
+    @printf("  %-6s  %8d  %8s  %8s  %8s  %5s\n",
+        r.symbol, m.count,
+        fmt_metric(m.total_roi; pct=true),
+        fmt_ratio(m.sharpe),
+        fmt_ratio(m.sortino),
+        fmt_pct(m.win_rate))
+end
+println("=" ^ 70)
