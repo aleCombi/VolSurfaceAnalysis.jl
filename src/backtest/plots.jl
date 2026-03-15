@@ -16,11 +16,6 @@ function _clean_pnls(pnls)::Vector{Float64}
     return vals
 end
 
-function _paired_series(dates, pnls)
-    xs, ys = profit_curve(dates, pnls)
-    return collect(zip(xs, ys))
-end
-
 """
     save_pnl_distribution(pnls, path; bins=30, title="P&L Distribution")
 

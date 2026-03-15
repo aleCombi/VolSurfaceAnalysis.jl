@@ -9,16 +9,6 @@ function _nearest_strike(strikes::Vector{Float64}, target::Float64)::Float64
     return strikes[argmin(distances)]
 end
 
-function _pick_otm_strike(
-    strikes::Vector{Float64},
-    spot::Float64,
-    target::Float64;
-    side::Symbol
-)::Float64
-    otm = side == :put ? filter(s -> s < spot, strikes) : filter(s -> s > spot, strikes)
-    return !isempty(otm) ? _nearest_strike(otm, target) : _nearest_strike(strikes, target)
-end
-
 function _select_expiry(
     expiry_interval::Period,
     surface::VolatilitySurface

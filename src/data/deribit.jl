@@ -47,22 +47,6 @@ struct DeribitQuote
     timestamp::DateTime
 end
 
-"""
-    DeribitDelivery
-
-A delivery/settlement price record from Deribit.
-
-# Fields
-- `underlying::Underlying`: The underlying asset
-- `delivery_price::Float64`: The 30-minute TWAP settlement price
-- `timestamp::DateTime`: Delivery timestamp (08:00 UTC on expiry day)
-"""
-struct DeribitDelivery
-    underlying::Underlying
-    delivery_price::Float64
-    timestamp::DateTime
-end
-
 # ============================================================================
 # DataFrame Conversions (for DuckDB query results)
 # ============================================================================

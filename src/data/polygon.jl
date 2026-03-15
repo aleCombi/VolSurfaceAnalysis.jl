@@ -266,21 +266,6 @@ end
 # Spot Parquet Readers
 # ============================================================================
 
-function _find_parquet_files(path::AbstractString)::Vector{String}
-    files = String[]
-    if isfile(path) && endswith(lowercase(String(path)), ".parquet")
-        push!(files, String(path))
-    elseif isdir(path)
-        for (root, _, filenames) in walkdir(path)
-            for f in filenames
-                endswith(f, ".parquet") && push!(files, joinpath(root, f))
-            end
-        end
-    end
-    sort!(files)
-    return files
-end
-
 """
     read_polygon_spot_parquet(path; where="", price_col=:close, ts_col=:timestamp, underlying=nothing)
         -> Vector{SpotPrice}
@@ -374,43 +359,6 @@ function read_polygon_spot_prices_for_timestamps(
             price_col=price_col,
             ts_col=ts_col,
             underlying=sym
-        )
-        merge!(spots, dict)
-    end
-
-    return spots
-end
-
-"""
-    read_polygon_spot_prices_dir(root; symbol=nothing, where="", price_col=:close, ts_col=:timestamp)
-        -> Dict{DateTime,Float64}
-
-Load Polygon spot data from all parquet files under a root directory.
-Optionally filters to `symbol=...` subfolders.
-"""
-function read_polygon_spot_prices_dir(
-    root::AbstractString;
-    symbol::Union{Nothing,Underlying,AbstractString}=nothing,
-    where::AbstractString="",
-    price_col::Symbol=:close,
-    ts_col::Symbol=:timestamp
-)::Dict{DateTime,Float64}
-    files = _find_parquet_files(root)
-
-    if symbol !== nothing
-        sym = symbol isa Underlying ? ticker(symbol) : uppercase(String(symbol))
-        needle = "symbol=$(sym)"
-        files = filter(f -> occursin(lowercase(needle), lowercase(f)), files)
-    end
-
-    spots = Dict{DateTime,Float64}()
-    for f in files
-        dict = read_polygon_spot_prices(
-            f;
-            where=where,
-            price_col=price_col,
-            ts_col=ts_col,
-            underlying=symbol
         )
         merge!(spots, dict)
     end

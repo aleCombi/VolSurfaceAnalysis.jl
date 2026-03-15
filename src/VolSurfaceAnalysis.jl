@@ -3,8 +3,7 @@ module VolSurfaceAnalysis
 using Dates
 using Distributions: Normal, cdf, pdf
 using Roots: Brent, find_zero
-using Statistics: mean, std, median
-using Random
+using Statistics: mean, std
 
 # ============================================================================
 # Core Types & Models
@@ -49,7 +48,7 @@ export OptionType, Call, Put
 export Underlying, ticker
 
 # Source types (match parquet schemas)
-export DeribitQuote, PolygonBar, DeribitDelivery
+export DeribitQuote, PolygonBar
 export SpotPrice
 
 # Internal type (unified)
@@ -61,11 +60,10 @@ export OptionRecord
 export parse_polygon_ticker
 export to_option_record
 export read_deribit_parquet, read_deribit_option_records
-export read_deribit_spot_parquet, read_deribit_spot_prices
+export read_deribit_spot_prices
 export read_polygon_parquet, read_polygon_option_records
 export read_polygon_spot_parquet, read_polygon_spot_prices
 export read_polygon_spot_prices_for_timestamps
-export read_polygon_spot_prices_dir
 export et_to_utc
 export spot_dict
 
