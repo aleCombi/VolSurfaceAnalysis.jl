@@ -55,7 +55,7 @@ function entry_positions(
     end
     expiry = expiry_info[1]
 
-    ctx = (surface=surface, expiry=expiry, history=history)
+    ctx = StrikeSelectionContext(surface, expiry, history)
 
     selector_result = strategy.strike_selector(ctx)
 

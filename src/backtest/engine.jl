@@ -56,6 +56,41 @@ entry_positions(s::ScheduledStrategy, surface::VolatilitySurface, ::BacktestData
     entry_positions(s, surface)
 
 """
+    each_entry(f, source, expiry_interval, schedule)
+
+Iterate over scheduled entry timestamps, resolving each to a surface and expiry.
+Calls `f(ctx::StrikeSelectionContext, settlement)` for each valid entry.
+`settlement` is `Union{Float64, Missing}`.
+
+This is the shared iteration core used by both `backtest_strategy` and
+training data generation.
+"""
+function each_entry(
+    f,
+    source::BacktestDataSource,
+    expiry_interval::Period,
+    schedule::Vector{DateTime}
+)
+    ts = available_timestamps(source)
+    for entry_time in schedule
+        idx = findfirst(t -> t >= entry_time, ts)
+        idx === nothing && continue
+
+        surface = get_surface(source, ts[idx])
+        surface === nothing && continue
+
+        expiry_info = _select_expiry(expiry_interval, surface)
+        expiry_info === nothing && continue
+        expiry = expiry_info[1]
+
+        history = HistoricalView(source, ts[idx])
+        ctx = StrikeSelectionContext(surface, expiry, history)
+        settlement = get_settlement_spot(source, expiry)
+        f(ctx, settlement)
+    end
+end
+
+"""
     backtest_strategy(strategy, source::BacktestDataSource) -> BacktestResult
 
 Event-driven backtest for scheduled strategies. For each scheduled entry time,

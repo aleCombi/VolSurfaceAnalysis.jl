@@ -2,6 +2,8 @@ module VolSurfaceAnalysis
 
 using Dates
 using Distributions: Normal, cdf, pdf
+using Flux
+using Random: randperm
 using Roots: Brent, find_zero
 using Statistics: mean, std
 
@@ -34,6 +36,13 @@ include("backtest/engine.jl")      # Minimal backtest engine
 include("backtest/metrics.jl")     # Backtest metrics
 include("backtest/plots.jl")       # Backtest plots
 include("strategies.jl")           # Strategy implementations
+
+# ============================================================================
+# ML Module
+# ============================================================================
+include("ml/features.jl")         # Feature types & implementations
+include("ml/model.jl")            # Flux MLP + scoring
+include("ml/training.jl")         # Data gen, training, MLCondorSelector
 
 # ============================================================================
 # Data helpers (for scripts)
@@ -105,7 +114,7 @@ export Position, open_position, entry_cost, settle
 # Engine
 export ScheduledStrategy, BacktestResult
 export entry_schedule, entry_positions
-export backtest_strategy
+export backtest_strategy, each_entry
 
 # Data sources
 export BacktestDataSource, DictDataSource, ParquetDataSource, HistoricalView
@@ -120,10 +129,24 @@ export format_backtest_report
 export save_pnl_distribution, save_equity_curve, save_pnl_and_equity_curve, save_profit_curve, save_spot_curve
 
 # Strategies
-export IronCondorStrategy
+export IronCondorStrategy, StrikeSelectionContext
 export sigma_selector, delta_selector, delta_condor_selector, constrained_delta_selector
 
 # Strike selection helpers (used by scripts)
 export _delta_strangle_strikes_asymmetric
+
+# ML features
+export Feature, CandidateFeature
+export ATMImpliedVol, DeltaSkew, RiskReversal, Butterfly, TermSlope
+export ATMSpread, DeltaSpread, TotalVolume, PutCallVolumeRatio, HourOfDay, DayOfWeek
+export ShortPutDelta, ShortCallDelta, EntryCredit, MaxLoss, CreditToMaxLoss
+export DEFAULT_SURFACE_FEATURES, DEFAULT_CANDIDATE_FEATURES
+export default_surface_features, default_candidate_features
+
+# ML model & training
+export roi_utility, pnl_utility
+export create_scoring_model, score_candidates
+export generate_training_data, train_scoring_model!, TrainingExample
+export MLCondorSelector
 
 end # module

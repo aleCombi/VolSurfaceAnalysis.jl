@@ -1,7 +1,22 @@
 # Strike selection primitives and selector factories for iron condors.
-#
-# The selector ctx is a minimal named tuple: (surface, expiry, history).
-# Internal helpers derive tau and records from these.
+
+# =============================================================================
+# StrikeSelectionContext
+# =============================================================================
+
+"""
+    StrikeSelectionContext
+
+Formalized context passed to strike selectors. Contains the volatility surface,
+target expiry, and a look-ahead-safe historical view.
+
+Selectors are callables: `f(ctx::StrikeSelectionContext) -> (sp_K, sc_K, lp_K, lc_K) | nothing`
+"""
+struct StrikeSelectionContext
+    surface::VolatilitySurface
+    expiry::DateTime
+    history::BacktestDataSource
+end
 
 # =============================================================================
 # Primitives
