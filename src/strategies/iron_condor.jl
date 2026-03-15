@@ -10,7 +10,8 @@ Scheduled iron condor strategy with pluggable strike selection.
 # Fields
 - `schedule::Vector{DateTime}`: Entry timestamps
 - `expiry_interval::Period`: Time from entry to expiry (e.g., Day(1))
-- `strike_selector`: Callable `f(ctx) -> (sp_K, sc_K, lp_K, lc_K) | nothing`
+- `strike_selector`: Callable `f(ctx) -> (sp_K, sc_K, lp_K, lc_K) | nothing`.
+  `ctx` is a named tuple `(surface, expiry, history)`.
 - `quantity::Float64`: Contracts per leg
 - `debug::Bool`: Emit diagnostics when entries fail
 """
@@ -52,35 +53,9 @@ function entry_positions(
         end
         return Position[]
     end
-    expiry, _tau_target, tau_closest = expiry_info
+    expiry = expiry_info[1]
 
-    recs = filter(r -> r.expiry == expiry, surface.records)
-    if isempty(recs)
-        if strategy.debug
-            println("No entry: no records for expiry (timestamp=$(surface.timestamp), expiry=$(expiry))")
-        end
-        return Position[]
-    end
-
-    put_strikes = sort(unique(r.strike for r in recs if r.option_type == Put))
-    call_strikes = sort(unique(r.strike for r in recs if r.option_type == Call))
-
-    if isempty(put_strikes) || isempty(call_strikes)
-        if strategy.debug
-            println("No entry: missing puts or calls for expiry (timestamp=$(surface.timestamp), expiry=$(expiry))")
-        end
-        return Position[]
-    end
-
-    ctx = (
-        surface=surface,
-        expiry=expiry,
-        tau=tau_closest,
-        recs=recs,
-        put_strikes=put_strikes,
-        call_strikes=call_strikes,
-        history=history
-    )
+    ctx = (surface=surface, expiry=expiry, history=history)
 
     selector_result = strategy.strike_selector(ctx)
 

@@ -1,4 +1,7 @@
 # Strike selection primitives and selector factories for iron condors.
+#
+# The selector ctx is a minimal named tuple: (surface, expiry, history).
+# Internal helpers derive tau and records from these.
 
 # =============================================================================
 # Primitives
@@ -27,6 +30,20 @@ function _select_expiry(
 
     return (expiry, tau_target, tau_closest)
 end
+
+"""
+    _ctx_tau(ctx) -> Float64
+
+Derive time-to-expiry from a selector context.
+"""
+_ctx_tau(ctx) = time_to_expiry(ctx.expiry, ctx.surface.timestamp)
+
+"""
+    _ctx_recs(ctx) -> Vector{OptionRecord}
+
+Derive option records for the target expiry from a selector context.
+"""
+_ctx_recs(ctx) = filter(r -> r.expiry == ctx.expiry, ctx.surface.records)
 
 # =============================================================================
 # Record helpers
@@ -147,11 +164,12 @@ function _delta_strangle_strikes_asymmetric(
     div_yield::Float64=0.0,
     debug::Bool=false
 )::Union{Nothing,Tuple{Float64,Float64}}
-    tau = ctx.tau
+    tau = _ctx_tau(ctx)
     tau <= 0.0 && return nothing
 
-    put_recs = filter(r -> r.option_type == Put, ctx.recs)
-    call_recs = filter(r -> r.option_type == Call, ctx.recs)
+    recs = _ctx_recs(ctx)
+    put_recs = filter(r -> r.option_type == Put, recs)
+    call_recs = filter(r -> r.option_type == Call, recs)
     isempty(put_recs) && return nothing
     isempty(call_recs) && return nothing
 
@@ -183,11 +201,12 @@ function _sigma_condor_strikes(
     div_yield::Float64;
     debug::Bool=false
 )::Union{Nothing,Tuple{Float64,Float64,Float64,Float64}}
-    tau = ctx.tau
+    tau = _ctx_tau(ctx)
     tau <= 0.0 && return nothing
 
+    recs = _ctx_recs(ctx)
     atm_iv = _atm_iv_from_records(
-        ctx.recs, ctx.surface.spot, tau, rate, div_yield;
+        recs, ctx.surface.spot, tau, rate, div_yield;
         debug=debug, timestamp=ctx.surface.timestamp
     )
     atm_iv === nothing && return nothing
@@ -204,8 +223,8 @@ function _sigma_condor_strikes(
     long_put_pct = 1.0 - long_sigmas * sigma_move
     long_call_pct = 1.0 + long_sigmas * sigma_move
 
-    put_strikes = ctx.put_strikes
-    call_strikes = ctx.call_strikes
+    put_strikes = sort(unique(r.strike for r in recs if r.option_type == Put))
+    call_strikes = sort(unique(r.strike for r in recs if r.option_type == Call))
     if isempty(put_strikes) || isempty(call_strikes)
         return nothing
     end
@@ -277,7 +296,7 @@ function _condor_wings_by_objective(
     div_yield::Float64=0.0,
     debug::Bool=false
 )::Union{Nothing,Tuple{Float64,Float64}}
-    tau = ctx.tau
+    tau = _ctx_tau(ctx)
     tau <= 0.0 && return nothing
 
     objective in (:target_max_loss, :roi, :pnl) || error("Unknown condor wing objective: $objective")
@@ -286,6 +305,7 @@ function _condor_wings_by_objective(
     end
     max_loss_max < max_loss_min && return nothing
 
+    recs = _ctx_recs(ctx)
     spot = ctx.surface.spot
     target_max_loss_norm = target_max_loss === nothing ? nothing : target_max_loss / spot
     max_loss_min_norm = max(0.0, max_loss_min / spot)
@@ -293,8 +313,8 @@ function _condor_wings_by_objective(
     min_credit_norm = min_credit / spot
 
     F = spot * exp((rate - div_yield) * tau)
-    put_recs = filter(r -> r.option_type == Put, ctx.recs)
-    call_recs = filter(r -> r.option_type == Call, ctx.recs)
+    put_recs = filter(r -> r.option_type == Put, recs)
+    call_recs = filter(r -> r.option_type == Call, recs)
 
     short_put_rec = _find_rec_by_strike(put_recs, short_put_K)
     short_call_rec = _find_rec_by_strike(call_recs, short_call_K)
@@ -440,16 +460,17 @@ function _delta_condor_strikes(
     min_delta_gap::Float64=0.08,
     debug::Bool=false
 )::Union{Nothing,Tuple{Float64,Float64,Float64,Float64}}
-    tau = ctx.tau
+    tau = _ctx_tau(ctx)
     tau <= 0.0 && return nothing
 
     long_put_target = min(long_put_delta_abs, short_put_delta_abs - min_delta_gap)
     long_call_target = min(long_call_delta_abs, short_call_delta_abs - min_delta_gap)
     (long_put_target <= 0.0 || long_call_target <= 0.0) && return nothing
 
+    recs = _ctx_recs(ctx)
     F = ctx.surface.spot * exp((rate - div_yield) * tau)
-    put_recs = filter(r -> r.option_type == Put, ctx.recs)
-    call_recs = filter(r -> r.option_type == Call, ctx.recs)
+    put_recs = filter(r -> r.option_type == Put, recs)
+    call_recs = filter(r -> r.option_type == Call, recs)
     isempty(put_recs) && return nothing
     isempty(call_recs) && return nothing
 
