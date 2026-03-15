@@ -61,7 +61,7 @@ julia --project=scripts scripts/evaluate_condor_prediction_vs_baseline.jl
   - `ml/features.jl` -- `extract_features`, `SurfaceFeatures`, path signatures via ChenSignatures; `prev_surface` kwarg for surface dynamics; `LOGSIG_DEAD_INDICES`, `pruned_logsig_dim()` for dead feature pruning
   - `ml/model.jl` -- `create_strike_model`, `create_scoring_model` (Flux MLP)
   - `ml/training.jl` -- training data generation, training loops, evaluation
-  - `ml/strike_selector.jl` -- `MLStrikeSelector`, `MLCondorStrikeSelector`, `MLCondorScoreSelector`
+  - `ml/strike_selector.jl` -- `MLCondorStrikeSelector`, `MLCondorScoreSelector`
 
 ### Key Patterns
 
@@ -101,10 +101,9 @@ Scripts use `scripts/Project.toml` via `Pkg.activate(@__DIR__)`.
 
 ### Remaining Duplication
 
-1. **`src/ml/training.jl`** (~1,400 lines):
-   - `simulate_strangle_pnl()` vs `simulate_condor_pnl()` share only ~14% code (wing logic fundamentally different)
-   - `generate_*` and `train_*` pairs already share core abstractions (`_generate_delta_training_data_core`, `_train_loop!`)
-   - Rate/div_yield defaults now use `DEFAULT_RATE`/`DEFAULT_DIV_YIELD` constants
+1. **`src/ml/training.jl`** (~1,280 lines):
+   - `simulate_condor_pnl` (2-delta) and `simulate_condor_pnl_4d` (4-delta) share structure but differ in wing selection
+   - `_train_loop!` is shared by `train_model!` and `train_scoring_model!`
 
 2. **`src/strategies/helpers.jl`**: `_best_delta_strike()` loop pattern repeated 8+ times
 
