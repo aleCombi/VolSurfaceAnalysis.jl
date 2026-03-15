@@ -237,7 +237,7 @@ end
 
 # build_condor_ctx, condor_metrics_from_strikes, and resolve_condor_from_deltas
 # are now imported from VolSurfaceAnalysis (src/ml/training.jl).
-# The script's RISK_FREE_RATE/DIV_YIELD match src DEFAULT_RATE/DEFAULT_DIV_YIELD.
+# rate and div_yield must be passed explicitly to all training/selector functions.
 
 # Wrap resolve_condor_from_deltas to use script-specific defaults
 function _resolve_condor(

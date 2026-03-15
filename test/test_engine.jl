@@ -171,7 +171,9 @@ using DuckDB
     # ============================================================
     # 5. Run backtest
     # ============================================================
-    positions, pnl = backtest_strategy(BuyTheOnlyCall(), surfaces, settlement_spots)
+    result = backtest_strategy(BuyTheOnlyCall(), surfaces, settlement_spots)
+    positions = result.positions
+    pnl = result.pnl
 
     @testset "Position entry" begin
         @test length(positions) == 1
@@ -207,13 +209,13 @@ using DuckDB
         @test get_settlement_spot(source, expiry_ts) == settlement_spot
         @test ismissing(get_settlement_spot(source, DateTime(2099, 1, 1)))
 
-        pos2, pnl2 = backtest_strategy(BuyTheOnlyCall(), source)
+        result2 = backtest_strategy(BuyTheOnlyCall(), source)
 
-        @test length(pos2) == length(positions)
-        @test length(pnl2) == length(pnl)
-        @test pos2[1].trade.strike == positions[1].trade.strike
-        @test pos2[1].entry_price  == positions[1].entry_price
-        @test pnl2[1] ≈ pnl[1]
+        @test length(result2.positions) == length(positions)
+        @test length(result2.pnl) == length(pnl)
+        @test result2.positions[1].trade.strike == positions[1].trade.strike
+        @test result2.positions[1].entry_price  == positions[1].entry_price
+        @test result2.pnl[1] ≈ pnl[1]
     end
 
     # ============================================================

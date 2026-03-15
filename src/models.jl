@@ -246,6 +246,7 @@ function price_to_iv(price::Float64, F::Float64, K::Float64, T::Float64,
                      tol::Float64=1e-8, max_iter::Int=100)::Float64
     # Handle edge cases
     if T <= 0.0
+        @debug "price_to_iv: T ≤ 0" F K T option_type
         return NaN
     end
 
@@ -269,12 +270,14 @@ function price_to_iv(price::Float64, F::Float64, K::Float64, T::Float64,
     f_low = f(σ_min)
     f_high = f(σ_max)
     if f_low > 0.0 || f_high < 0.0
+        @debug "price_to_iv: no bracket" F K T option_type price σ_min σ_max f_low f_high
         return NaN
     end
 
     try
         return find_zero(f, (σ_min, σ_max), Brent(); atol=tol, rtol=0.0, maxiters=max_iter)
-    catch
+    catch e
+        @debug "price_to_iv: solver failed" F K T option_type price exception=e
         return NaN
     end
 

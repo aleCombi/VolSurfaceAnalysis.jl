@@ -114,7 +114,7 @@ export Trade, price, payoff, find_vol
 export Position, open_position, entry_cost, settle
 
 # Engine
-export ScheduledStrategy
+export ScheduledStrategy, BacktestResult
 export entry_schedule, entry_positions
 export backtest_strategy
 
@@ -138,7 +138,7 @@ export ShortStrangleStrategy
 # Exports: Machine Learning
 # ============================================================================
 # Feature extraction
-export SurfaceFeatures, SpotHistory, N_FEATURES, N_BASE_FEATURES, SIGNATURE_LEVEL, SIGNATURE_DIM, LOGSIGNATURE_DIM
+export SurfaceFeatures, SpotHistory, N_FEATURES, SIGNATURE_LEVEL, SIGNATURE_DIM, LOGSIGNATURE_DIM
 export LOGSIG_DEAD_INDICES
 export path_feature_dim, pruned_logsig_dim, n_features, N_CONDOR_CANDIDATE_FEATURES, n_condor_scoring_features
 export extract_features, features_to_vector
@@ -148,13 +148,12 @@ export normalize_features, apply_normalization
 # Model
 export create_strike_model, scale_deltas, unscale_deltas
 export scale_deltas_4d, unscale_deltas_4d, predict_condor_deltas
-export SHORT_MIN_DELTA, SHORT_MAX_DELTA, LONG_MIN_DELTA, LONG_MAX_DELTA
 export create_scoring_model
 export delta_loss, predict_deltas
 export predict_with_sizing, combined_loss
 
 # Training
-export TrainingDataset, DELTA_GRID, LONG_DELTA_GRID
+export TrainingDataset, DELTA_GRID
 export CondorScoringDataset
 export simulate_strangle_pnl, find_optimal_deltas
 export generate_training_data, train_model!, evaluate_model

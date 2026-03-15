@@ -11,6 +11,20 @@ Abstract strategy with a fixed entry schedule. Implement `entry_schedule` and
 abstract type ScheduledStrategy end
 
 """
+    BacktestResult
+
+Result container from `backtest_strategy`.
+
+# Fields
+- `positions::Vector{Position}`: all entered positions
+- `pnl::Vector{Union{Missing, Float64}}`: realized P&L per position; `missing` if no settlement data
+"""
+struct BacktestResult
+    positions::Vector{Position}
+    pnl::Vector{Union{Missing, Float64}}
+end
+
+"""
     entry_schedule(strategy) -> Vector{DateTime}
 
 Return the list of timestamps at which this strategy should enter trades.
@@ -42,7 +56,7 @@ entry_positions(s::ScheduledStrategy, surface::VolatilitySurface, ::BacktestData
     entry_positions(s, surface)
 
 """
-    backtest_strategy(strategy, source::BacktestDataSource) -> (positions, pnl)
+    backtest_strategy(strategy, source::BacktestDataSource) -> BacktestResult
 
 Event-driven backtest for scheduled strategies. For each scheduled entry time,
 the strategy is executed at the next available surface (first timestamp >= entry time).
@@ -53,8 +67,7 @@ Positions are settled at their expiry using `get_settlement_spot`.
 - `source`: A `BacktestDataSource` providing surfaces and settlement spots
 
 # Returns
-- `positions::Vector{Position}`: all entered positions
-- `pnl::Vector{Union{Missing, Float64}}`: realized P&L per position; `missing` if no settlement data
+- `BacktestResult` with `positions` and `pnl` fields
 """
 function backtest_strategy(
     strategy::ScheduledStrategy,
@@ -84,11 +97,11 @@ function backtest_strategy(
         end
     end
 
-    return all_positions, all_pnl
+    return BacktestResult(all_positions, all_pnl)
 end
 
 """
-    backtest_strategy(strategy, surfaces, spots) -> (positions, pnl)
+    backtest_strategy(strategy, surfaces, spots) -> BacktestResult
 
 Convenience method: wraps pre-loaded dictionaries in a `DictDataSource`.
 """

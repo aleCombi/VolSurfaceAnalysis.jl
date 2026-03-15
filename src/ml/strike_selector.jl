@@ -77,8 +77,8 @@ function MLStrikeSelector(
     feature_stds::Vector{Float32};
     min_delta::Float32=0.05f0,
     max_delta::Float32=0.35f0,
-    rate::Float64=0.045,
-    div_yield::Float64=0.013,
+    rate::Float64,
+    div_yield::Float64,
     return_sizing::Bool=true,
     use_logsig::Bool=false
 )
@@ -211,8 +211,8 @@ function MLCondorStrikeSelector(
     max_delta::Float32=0.35f0,
     long_min_delta::Float32=LONG_MIN_DELTA,
     long_max_delta::Float32=LONG_MAX_DELTA,
-    rate::Float64=0.045,
-    div_yield::Float64=0.013,
+    rate::Float64,
+    div_yield::Float64,
     return_sizing::Bool=false,
     use_logsig::Bool=false
 )
@@ -417,8 +417,8 @@ function MLCondorScoreSelector(
     min_credit::Float32=0.0f0,
     min_delta_gap::Float32=0.08f0,
     prefer_symmetric::Bool=true,
-    rate::Float64=0.045,
-    div_yield::Float64=0.013,
+    rate::Float64,
+    div_yield::Float64,
     use_logsig::Bool=false,
     fallback_selector=nothing
 )
@@ -550,8 +550,8 @@ Load a trained ML selector from a BSON file.
 """
 function load_ml_selector(
     path::String;
-    rate::Float64=0.045,
-    div_yield::Float64=0.013,
+    rate::Float64,
+    div_yield::Float64,
     return_sizing::Bool=false,
     use_logsig::Bool=false
 )::MLStrikeSelector

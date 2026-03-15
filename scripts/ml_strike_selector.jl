@@ -804,13 +804,16 @@ function main()
     test_source = DictDataSource(test_surfaces, all_spots)
 
     println("  Running ML strategy backtest...")
-    pos_ml, pnl_ml = backtest_strategy(strategy_ml, test_source)
+    result_ml = backtest_strategy(strategy_ml, test_source)
+    pos_ml, pnl_ml = result_ml.positions, result_ml.pnl
 
     println("  Running baseline (fixed delta) backtest...")
-    pos_baseline, pnl_baseline = backtest_strategy(strategy_baseline, test_source)
+    result_baseline = backtest_strategy(strategy_baseline, test_source)
+    pos_baseline, pnl_baseline = result_baseline.positions, result_baseline.pnl
 
     println("  Running baseline (0.8 sigma) backtest...")
-    pos_sigma, pnl_sigma = backtest_strategy(strategy_sigma, test_source)
+    result_sigma = backtest_strategy(strategy_sigma, test_source)
+    pos_sigma, pnl_sigma = result_sigma.positions, result_sigma.pnl
     println()
 
     # Compute metrics
