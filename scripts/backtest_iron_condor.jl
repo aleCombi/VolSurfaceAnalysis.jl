@@ -8,7 +8,7 @@ using Dates, Printf, DataFrames
 
 ENTRY_TIME      = Time(10, 0)          # 10:00 ET
 EXPIRY_INTERVAL = Day(1)               # 1DTE
-SPREAD_LAMBDA   = 0.0                  # conservative (widest synthetic spread)
+SPREAD_LAMBDA   = 0.5                  # moderate synthetic spread
 START_DATE      = Date(2024, 2, 1)
 END_DATE        = Date(2025, 12, 31)
 
