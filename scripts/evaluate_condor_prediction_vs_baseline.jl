@@ -151,10 +151,10 @@ function feature_names(; use_logsig::Bool=USE_LOGSIG, include_candidate_features
     # Use pruned logsig dimension (dead features removed)
     if use_logsig
         n_path = pruned_logsig_dim()
-        all_indices = setdiff(1:path_feature_dim(; use_logsig=true), LOGSIG_DEAD_INDICES)
+        all_indices = setdiff(1:VolSurfaceAnalysis._path_feature_dim(; use_logsig=true), LOGSIG_DEAD_INDICES)
         path = ["logsig_$(i)" for i in all_indices]
     else
-        n_path = path_feature_dim(; use_logsig=false)
+        n_path = VolSurfaceAnalysis._path_feature_dim(; use_logsig=false)
         path = ["sig_$(i)" for i in 1:n_path]
     end
     names = vcat(base, path)
