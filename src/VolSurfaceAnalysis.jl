@@ -5,9 +5,6 @@ using Distributions: Normal, cdf, pdf
 using Roots: Brent, find_zero
 using Statistics: mean, std, median
 using Random
-using Flux
-using BSON
-using ChenSignatures: sig, logsig, prepare, sig_leadlag, logsig_leadlag
 
 # ============================================================================
 # Core Types & Models
@@ -32,7 +29,7 @@ include("trades.jl")               # Trade representation and pricing
 # ============================================================================
 # Backtesting
 # ============================================================================
-include("backtest/portfolio.jl")   # Position management (pure)
+include("backtest/positions.jl")   # Position management (pure)
 include("backtest/data_source.jl") # BacktestDataSource protocol
 include("backtest/engine.jl")      # Minimal backtest engine
 include("backtest/metrics.jl")     # Backtest metrics
@@ -40,13 +37,9 @@ include("backtest/plots.jl")       # Backtest plots
 include("strategies.jl")           # Strategy implementations
 
 # ============================================================================
-# Machine Learning Module
+# Data helpers (for scripts)
 # ============================================================================
-include("ml/features.jl")          # Feature extraction from vol surfaces
 include("data/helpers.jl")         # Shared data-loading helpers for scripts
-include("ml/model.jl")             # Flux.jl neural network definition
-include("ml/training.jl")          # Training loop and data generation
-include("ml/strike_selector.jl")   # ML-based strike selector
 
 # ============================================================================
 # Exports: Data Types
@@ -61,7 +54,6 @@ export SpotPrice
 
 # Internal type (unified)
 export OptionRecord
-
 
 # ============================================================================
 # Exports: Data Utilities
@@ -84,7 +76,6 @@ export polygon_options_path, polygon_spot_path
 export deribit_history_path, deribit_delivery_path
 export available_polygon_dates, available_deribit_dates
 export build_entry_timestamps, load_minute_spots, load_surfaces_and_spots
-export build_spot_history_dict, build_prev_surfaces_dict
 
 # ============================================================================
 # Exports: Pricing Models
@@ -132,42 +123,9 @@ export save_pnl_distribution, save_equity_curve, save_pnl_and_equity_curve, save
 
 # Strategies
 export IronCondorStrategy
-export ShortStrangleStrategy
+export sigma_selector, delta_selector, delta_condor_selector
 
-# ============================================================================
-# Exports: Machine Learning
-# ============================================================================
-# Feature extraction
-export SurfaceFeatures, SpotHistory, N_FEATURES, SIGNATURE_LEVEL, SIGNATURE_DIM, LOGSIGNATURE_DIM
-export LOGSIG_DEAD_INDICES
-export pruned_logsig_dim, n_features, N_CONDOR_CANDIDATE_FEATURES, n_condor_scoring_features
-export extract_features, features_to_vector
-export normalize_features, apply_normalization
-
-# Model
-export create_strike_model, scale_deltas, unscale_deltas
-export scale_deltas_4d, unscale_deltas_4d, predict_condor_deltas
-export create_scoring_model
-export delta_loss
-
-# Training
-export TrainingDataset, DELTA_GRID
-export CondorScoringDataset
-export simulate_condor_pnl, find_optimal_condor_deltas
-export simulate_condor_pnl_4d, find_optimal_condor_deltas_4d, generate_condor_4d_training_data
-export build_condor_ctx, condor_entry_metrics_from_strikes, condor_metrics_from_strikes
-export resolve_condor_from_deltas
-export enumerate_condor_candidates, condor_scoring_feature_vector
-export condor_realized_utility, generate_condor_candidate_training_data
-export train_model!, evaluate_model
-export train_scoring_model!, evaluate_scoring_model
-
-# Strike selector
-export MLCondorStrikeSelector
-export MLCondorScoreSelector
-export save_ml_selector
-
-# Asymmetric delta helper (also used internally)
+# Strike selection helpers (used by scripts)
 export _delta_strangle_strikes_asymmetric
 
 end # module
