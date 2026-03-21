@@ -42,7 +42,8 @@ include("strategies.jl")           # Strategy implementations
 # ============================================================================
 include("ml/features.jl")         # Feature types & implementations
 include("ml/model.jl")            # Flux MLP + scoring
-include("ml/training.jl")         # Data gen, training, MLCondorSelector
+include("ml/training.jl")         # Data gen, training loop
+include("ml/selectors.jl")        # MLSelector abstract type + implementations
 
 # ============================================================================
 # Data helpers (for scripts)
@@ -139,6 +140,7 @@ export _delta_strangle_strikes_asymmetric
 export Feature, CandidateFeature
 export ATMImpliedVol, DeltaSkew, RiskReversal, Butterfly, TermSlope
 export ATMSpread, DeltaSpread, TotalVolume, PutCallVolumeRatio, HourOfDay, DayOfWeek
+export RealizedVol, VarianceRiskPremium, SpotMomentum, IVChange, IVPercentile
 export ShortPutDelta, ShortCallDelta, EntryCredit, MaxLoss, CreditToMaxLoss
 export DEFAULT_SURFACE_FEATURES, DEFAULT_CANDIDATE_FEATURES
 export default_surface_features, default_candidate_features
@@ -146,7 +148,9 @@ export default_surface_features, default_candidate_features
 # ML model & training
 export roi_utility, pnl_utility
 export create_scoring_model, score_candidates
-export generate_training_data, train_scoring_model!, TrainingExample
-export MLCondorSelector
+export generate_training_data, generate_delta_training_data
+export train_scoring_model!, train_model!
+export TrainingExample, DeltaTrainingExample
+export MLSelector, ScoredCandidateSelector, DirectDeltaSelector, MLCondorSelector
 
 end # module
