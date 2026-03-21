@@ -417,9 +417,9 @@ using Flux
     end
 
     # ================================================================
-    # SizedIronCondorStrategy
+    # IronCondorStrategy with MLSizer
     # ================================================================
-    @testset "SizedIronCondorStrategy" begin
+    @testset "IronCondorStrategy with MLSizer" begin
         ts1 = DateTime(2026, 3, 10, 14, 0, 0)
         settle_ts = DateTime(2026, 3, 11, 16, 0, 0)
 
@@ -438,13 +438,11 @@ using Flux
         mock_model = Chain(Dense(zeros(Float32, 1, 1), Float32[5.0]))
 
         # linear_sizing with threshold=5 → quantity = 5/5 = 1.0
-        strategy = SizedIronCondorStrategy(
-            [ts1], Day(1), fixed_selector,
-            mock_model,
-            Float32[0.0],  # means
-            Float32[1.0];  # stds
-            surface_features=sf,
-            sizing_policy=linear_sizing(; threshold=5.0, max_q=3.0),
+        strategy = IronCondorStrategy(
+            [ts1], Day(1), fixed_selector;
+            sizer=MLSizer(mock_model, Float32[0.0], Float32[1.0];
+                surface_features=sf,
+                policy=linear_sizing(; threshold=5.0, max_q=3.0)),
             debug=false
         )
 
@@ -459,13 +457,11 @@ using Flux
 
         # Test with negative prediction → skip entry
         neg_model = Chain(Dense(zeros(Float32, 1, 1), Float32[-5.0]))
-        neg_strategy = SizedIronCondorStrategy(
-            [ts1], Day(1), fixed_selector,
-            neg_model,
-            Float32[0.0],
-            Float32[1.0];
-            surface_features=sf,
-            sizing_policy=linear_sizing(; threshold=5.0, max_q=3.0, skip_negative=true),
+        neg_strategy = IronCondorStrategy(
+            [ts1], Day(1), fixed_selector;
+            sizer=MLSizer(neg_model, Float32[0.0], Float32[1.0];
+                surface_features=sf,
+                policy=linear_sizing(; threshold=5.0, max_q=3.0, skip_negative=true)),
             debug=false
         )
 

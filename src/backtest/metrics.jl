@@ -6,33 +6,9 @@ using Statistics
 using DataFrames
 using Printf
 
-"""
-    BacktestMetrics
-
-Summary metrics computed from aggregated P&L.
-
-# Fields
-- `count::Int`: number of aggregated trades
-- `missing::Int`: number of missing P&L entries skipped
-- `total_pnl::Float64`: total P&L
-- `avg_pnl::Float64`: average P&L per aggregated trade
-- `min_pnl::Union{Float64,Missing}`: minimum P&L or missing if none
-- `max_pnl::Union{Float64,Missing}`: maximum P&L or missing if none
-- `win_rate::Union{Float64,Missing}`: fraction of wins or missing if none
-- `avg_bid_ask_spread_usd::Union{Float64,Missing}`: mean entry bid-ask spread (USD)
-- `avg_bid_ask_spread_rel::Union{Float64,Missing}`: mean entry bid-ask spread / mid (unitless)
-"""
-struct BacktestMetrics
-    count::Int
-    missing::Int
-    total_pnl::Float64
-    avg_pnl::Float64
-    min_pnl::Union{Float64,Missing}
-    max_pnl::Union{Float64,Missing}
-    win_rate::Union{Float64,Missing}
-    avg_bid_ask_spread_usd::Union{Float64,Missing}
-    avg_bid_ask_spread_rel::Union{Float64,Missing}
-end
+# =============================================================================
+# Struct
+# =============================================================================
 
 """
     PerformanceMetrics
@@ -80,6 +56,10 @@ struct PerformanceMetrics
     duration_years::Union{Float64,Missing}
 end
 
+# =============================================================================
+# Core aggregation
+# =============================================================================
+
 """
     aggregate_pnl(positions, pnls; key=default_key) -> (Dict, missing_count)
 
@@ -105,38 +85,6 @@ function aggregate_pnl(
     end
 
     return pnl_by_key, missing_count
-end
-
-"""
-    average_entry_spread(positions; unit=:usd) -> Union{Float64,Missing}
-
-Compute the mean entry bid-ask spread across positions. Uses entry bid/ask
-when available. If `unit=:usd`, converts spread to USD via entry spot.
-If `unit=:relative`, returns (ask - bid) / mid (unitless).
-"""
-function average_entry_spread(
-    positions::Vector{Position};
-    unit::Symbol=:usd
-)::Union{Float64,Missing}
-    spreads = Float64[]
-    for pos in positions
-        bid = pos.entry_bid
-        ask = pos.entry_ask
-        if ismissing(bid) || ismissing(ask)
-            continue
-        end
-        spread = Float64(ask) - Float64(bid)
-        isfinite(spread) || continue
-        if unit == :usd
-            spread *= pos.entry_spot
-        elseif unit == :relative
-            mid = (Float64(ask) + Float64(bid)) / 2.0
-            mid <= 0.0 && continue
-            spread /= mid
-        end
-        push!(spreads, spread)
-    end
-    return isempty(spreads) ? missing : mean(spreads)
 end
 
 """
@@ -209,103 +157,6 @@ function condor_group_stats(group_positions::Vector{Position})::Union{NamedTuple
 end
 
 """
-    condor_trade_table(positions, pnls; key=default_key) -> DataFrame
-
-Build a per-condor trade table with P&L and max loss metrics.
-"""
-function condor_trade_table(
-    positions::Vector{Position},
-    pnls::Vector{Union{Missing,Float64}};
-    key::Function = pos -> (pos.entry_timestamp, pos.trade.expiry)
-)::DataFrame
-    pnl_by_key, _ = aggregate_pnl(positions, pnls; key=key)
-
-    groups = Dict{Any,Vector{Position}}()
-    for pos in positions
-        k = key(pos)
-        push!(get!(groups, k, Position[]), pos)
-    end
-
-    rows = DataFrame(
-        EntryTimestamp=DateTime[],
-        Expiry=DateTime[],
-        PnL=Union{Missing,Float64}[],
-        Credit=Union{Missing,Float64}[],
-        MaxLoss=Union{Missing,Float64}[],
-        WidthPut=Union{Missing,Float64}[],
-        WidthCall=Union{Missing,Float64}[],
-        ReturnOnRisk=Union{Missing,Float64}[]
-    )
-
-    for k in sort(collect(keys(groups)); by=x -> x[1])
-        group_positions = groups[k]
-        stats = condor_group_stats(group_positions)
-        pnl = get(pnl_by_key, k, missing)
-
-        if stats === missing
-            push!(rows, (k[1], k[2], pnl, missing, missing, missing, missing, missing))
-            continue
-        end
-
-        ror = if ismissing(pnl) || stats.max_loss <= 0
-            missing
-        else
-            pnl / stats.max_loss
-        end
-
-        push!(rows, (
-            k[1],
-            k[2],
-            pnl,
-            stats.credit,
-            stats.max_loss,
-            stats.width_put,
-            stats.width_call,
-            ror
-        ))
-    end
-
-    return rows
-end
-
-"""
-    backtest_metrics(positions, pnls; key=default_key) -> BacktestMetrics
-
-Compute summary statistics from backtest outputs. Aggregates per-position P&L
-using `aggregate_pnl`, then computes totals, averages, extrema, and win rate.
-"""
-function backtest_metrics(
-    positions::Vector{Position},
-    pnls::Vector{Union{Missing,Float64}};
-    key::Function = pos -> (pos.entry_timestamp, pos.trade.expiry)
-)::BacktestMetrics
-    pnl_by_key, missing_count = aggregate_pnl(positions, pnls; key=key)
-    pnl_values = collect(values(pnl_by_key))
-
-    trade_count = length(pnl_values)
-    total = trade_count == 0 ? 0.0 : sum(pnl_values)
-    avg = trade_count == 0 ? 0.0 : total / trade_count
-    min_pnl = trade_count == 0 ? missing : minimum(pnl_values)
-    max_pnl = trade_count == 0 ? missing : maximum(pnl_values)
-    win_rate = trade_count == 0 ? missing : count(x -> x > 0, pnl_values) / trade_count
-
-    avg_spread_usd = average_entry_spread(positions; unit=:usd)
-    avg_spread_rel = average_entry_spread(positions; unit=:relative)
-
-    return BacktestMetrics(
-        trade_count,
-        missing_count,
-        total,
-        avg,
-        min_pnl,
-        max_pnl,
-        win_rate,
-        avg_spread_usd,
-        avg_spread_rel
-    )
-end
-
-"""
     condor_max_loss_by_key(positions; key=default_key) -> Dict{Any,Float64}
 
 Build a dictionary of per-condor max loss by grouped trade key.
@@ -330,6 +181,54 @@ function condor_max_loss_by_key(
     end
 
     return margin_by_key
+end
+
+# =============================================================================
+# Metrics computation
+# =============================================================================
+
+"""
+    _return_metrics(returns, pnl_total, margin_total, duration_years, annualization)
+
+Internal helper: compute ROI, Sharpe, Sortino from a returns vector.
+Returns a NamedTuple with all return-based metric fields.
+"""
+function _return_metrics(returns::Vector{Float64}, pnl_total::Float64, margin_total::Float64,
+                         duration_years, annualization::Int)
+    avg_return = mean(returns)
+    vol = std(returns)
+
+    sharpe = missing
+    if vol > 0
+        sharpe = (avg_return / vol) * sqrt(annualization)
+    end
+
+    semi_dev = sqrt(mean(min.(0, returns) .^ 2))
+    sortino = missing
+    if semi_dev > 0
+        sortino = (avg_return / semi_dev) * sqrt(annualization)
+    end
+
+    total_roi = pnl_total / margin_total
+
+    annualized_roi_simple = missing
+    annualized_roi_cagr = missing
+    if duration_years !== missing && duration_years > 0
+        annualized_roi_simple = total_roi / duration_years
+        if 1 + total_roi > 0
+            annualized_roi_cagr = (1 + total_roi)^(1 / duration_years) - 1
+        end
+    end
+
+    return (
+        total_roi=total_roi,
+        annualized_roi_simple=annualized_roi_simple,
+        annualized_roi_cagr=annualized_roi_cagr,
+        avg_return=avg_return,
+        volatility=vol,
+        sharpe=sharpe,
+        sortino=sortino
+    )
 end
 
 """
@@ -388,18 +287,12 @@ function performance_metrics(
     avg_spread_usd = average_entry_spread(positions; unit=:usd)
     avg_spread_rel = average_entry_spread(positions; unit=:relative)
 
-    total_roi = missing
-    annualized_roi_simple = missing
-    annualized_roi_cagr = missing
-    avg_return = missing
-    volatility = missing
-    sharpe = missing
-    sortino = missing
-
     if margin_per_trade !== nothing && margin_by_key !== nothing
         throw(ArgumentError("Provide either margin_per_trade or margin_by_key, not both"))
     end
 
+    # Compute return-based metrics
+    rm = nothing
     if margin_by_key !== nothing && trade_count > 0
         returns = Float64[]
         pnl_for_returns = 0.0
@@ -421,49 +314,11 @@ function performance_metrics(
         end
 
         if !isempty(returns)
-            avg_return = mean(returns)
-            volatility = std(returns)
-
-            if volatility > 0
-                sharpe = (avg_return / volatility) * sqrt(annualization)
-            end
-
-            semi_dev = sqrt(mean(min.(0, returns) .^ 2))
-            if semi_dev > 0
-                sortino = (avg_return / semi_dev) * sqrt(annualization)
-            end
-
-            total_roi = pnl_for_returns / margin_total
-
-            if duration_years !== missing && duration_years > 0
-                annualized_roi_simple = total_roi / duration_years
-                if 1 + total_roi > 0
-                    annualized_roi_cagr = (1 + total_roi)^(1 / duration_years) - 1
-                end
-            end
+            rm = _return_metrics(returns, pnl_for_returns, margin_total, duration_years, annualization)
         end
     elseif margin_per_trade !== nothing && margin_per_trade > 0 && trade_count > 0
         returns = [v / margin_per_trade for v in pnl_values]
-        avg_return = mean(returns)
-        volatility = std(returns)
-
-        if volatility > 0
-            sharpe = (avg_return / volatility) * sqrt(annualization)
-        end
-
-        semi_dev = sqrt(mean(min.(0, returns) .^ 2))
-        if semi_dev > 0
-            sortino = (avg_return / semi_dev) * sqrt(annualization)
-        end
-
-        total_roi = total / margin_per_trade
-
-        if duration_years !== missing && duration_years > 0
-            annualized_roi_simple = total_roi / duration_years
-            if 1 + total_roi > 0
-                annualized_roi_cagr = (1 + total_roi)^(1 / duration_years) - 1
-            end
-        end
+        rm = _return_metrics(returns, total, margin_per_trade, duration_years, annualization)
     end
 
     return PerformanceMetrics(
@@ -476,16 +331,69 @@ function performance_metrics(
         win_rate,
         avg_spread_usd,
         avg_spread_rel,
-        total_roi,
-        annualized_roi_simple,
-        annualized_roi_cagr,
-        avg_return,
-        volatility,
-        sharpe,
-        sortino,
+        rm === nothing ? missing : rm.total_roi,
+        rm === nothing ? missing : rm.annualized_roi_simple,
+        rm === nothing ? missing : rm.annualized_roi_cagr,
+        rm === nothing ? missing : rm.avg_return,
+        rm === nothing ? missing : rm.volatility,
+        rm === nothing ? missing : rm.sharpe,
+        rm === nothing ? missing : rm.sortino,
         duration_days,
         duration_years
     )
+end
+
+"""
+    performance_metrics(result::BacktestResult; annualization=252)
+
+Convenience method that auto-computes condor max loss margin from a BacktestResult.
+Returns `nothing` if the result is empty or has no valid condor groups.
+"""
+function performance_metrics(result::BacktestResult; annualization::Int=252)
+    isempty(result.positions) && return nothing
+    margin = condor_max_loss_by_key(result.positions)
+    isempty(margin) && return nothing
+    try
+        performance_metrics(result.positions, result.pnl; margin_by_key=margin, annualization=annualization)
+    catch
+        nothing
+    end
+end
+
+# =============================================================================
+# Data preparation
+# =============================================================================
+
+"""
+    average_entry_spread(positions; unit=:usd) -> Union{Float64,Missing}
+
+Compute the mean entry bid-ask spread across positions. Uses entry bid/ask
+when available. If `unit=:usd`, converts spread to USD via entry spot.
+If `unit=:relative`, returns (ask - bid) / mid (unitless).
+"""
+function average_entry_spread(
+    positions::Vector{Position};
+    unit::Symbol=:usd
+)::Union{Float64,Missing}
+    spreads = Float64[]
+    for pos in positions
+        bid = pos.entry_bid
+        ask = pos.entry_ask
+        if ismissing(bid) || ismissing(ask)
+            continue
+        end
+        spread = Float64(ask) - Float64(bid)
+        isfinite(spread) || continue
+        if unit == :usd
+            spread *= pos.entry_spot
+        elseif unit == :relative
+            mid = (Float64(ask) + Float64(bid)) / 2.0
+            mid <= 0.0 && continue
+            spread /= mid
+        end
+        push!(spreads, spread)
+    end
+    return isempty(spreads) ? missing : mean(spreads)
 end
 
 """
@@ -510,160 +418,6 @@ function profit_curve(dates, pnls)::Tuple{Vector{Date}, Vector{Float64}}
     return xs, ys
 end
 
-"""
-    settlement_zone_analysis(positions, settlement_spots; first_year_only=true) -> DataFrame
-
-Analyze where the underlying settled relative to the option strikes for each trade group.
-Groups positions by entry date (all legs on the same day = one condor/strangle).
-
-# Arguments
-- `positions::Vector{Position}`: All positions from the backtest
-- `settlement_spots::AbstractDict{DateTime,Float64}`: Settlement prices by expiry timestamp
-- `first_year_only::Bool`: If true, only analyze the first year of data (default: true)
-
-# Returns
-DataFrame with columns:
-- `entry_date`: Date of entry
-- `expiry`: Expiry timestamp
-- `settlement_spot`: Where the underlying settled
-- `zone`: Settlement zone (String)
-- `short_put`, `long_put`, `short_call`, `long_call`: Strike prices (missing if not applicable)
-"""
-function settlement_zone_analysis(
-    positions::Vector{Position},
-    settlement_spots::AbstractDict{DateTime,Float64};
-    first_year_only::Bool=true
-)::DataFrame
-    # Group positions by (entry_date, expiry)
-    groups = Dict{Tuple{Date,DateTime}, Vector{Position}}()
-    for pos in positions
-        key = (Date(pos.entry_timestamp), pos.trade.expiry)
-        push!(get!(groups, key, Position[]), pos)
-    end
-
-    # Filter to first year if requested
-    all_dates = [k[1] for k in keys(groups)]
-    isempty(all_dates) && return DataFrame()
-
-    min_date = minimum(all_dates)
-    if first_year_only
-        cutoff = min_date + Year(1)
-        groups = filter(kv -> kv[1][1] < cutoff, groups)
-    end
-
-    rows = NamedTuple[]
-
-    for ((entry_date, expiry), group_positions) in sort(collect(groups); by=first)
-        settlement = get(settlement_spots, expiry, missing)
-        ismissing(settlement) && continue
-
-        # Extract strikes by option type and direction
-        short_puts = Float64[]
-        long_puts = Float64[]
-        short_calls = Float64[]
-        long_calls = Float64[]
-
-        for pos in group_positions
-            t = pos.trade
-            if t.option_type == Put
-                if t.direction < 0
-                    push!(short_puts, t.strike)
-                else
-                    push!(long_puts, t.strike)
-                end
-            else  # Call
-                if t.direction < 0
-                    push!(short_calls, t.strike)
-                else
-                    push!(long_calls, t.strike)
-                end
-            end
-        end
-
-        # Determine zone based on structure
-        short_put = isempty(short_puts) ? missing : maximum(short_puts)
-        long_put = isempty(long_puts) ? missing : minimum(long_puts)
-        short_call = isempty(short_calls) ? missing : minimum(short_calls)
-        long_call = isempty(long_calls) ? missing : maximum(long_calls)
-
-        zone = _determine_zone(settlement, short_put, long_put, short_call, long_call)
-
-        push!(rows, (
-            entry_date = entry_date,
-            expiry = expiry,
-            settlement_spot = settlement,
-            zone = zone,
-            short_put = short_put,
-            long_put = long_put,
-            short_call = short_call,
-            long_call = long_call
-        ))
-    end
-
-    return DataFrame(rows)
-end
-
-"""Determine the settlement zone based on spot and strikes."""
-function _determine_zone(
-    spot::Float64,
-    short_put::Union{Float64,Missing},
-    long_put::Union{Float64,Missing},
-    short_call::Union{Float64,Missing},
-    long_call::Union{Float64,Missing}
-)::String
-    # Iron condor (all 4 legs)
-    if !ismissing(short_put) && !ismissing(long_put) && !ismissing(short_call) && !ismissing(long_call)
-        if spot < long_put
-            return "below_long_put"
-        elseif spot < short_put
-            return "between_puts"
-        elseif spot <= short_call
-            return "max_profit"
-        elseif spot <= long_call
-            return "between_calls"
-        else
-            return "above_long_call"
-        end
-    end
-
-    # Strangle (short put + short call, no longs)
-    if !ismissing(short_put) && !ismissing(short_call) && ismissing(long_put) && ismissing(long_call)
-        if spot < short_put
-            return "below_short_put"
-        elseif spot <= short_call
-            return "max_profit"
-        else
-            return "above_short_call"
-        end
-    end
-
-    return "unknown"
-end
-
-"""
-    settlement_zone_summary(zone_df::DataFrame) -> DataFrame
-
-Summarize settlement zone frequencies from zone analysis.
-
-# Returns
-DataFrame with columns: zone, count, percentage
-"""
-function settlement_zone_summary(zone_df::DataFrame)::DataFrame
-    isempty(zone_df) && return DataFrame(zone=String[], count=Int[], percentage=Float64[])
-
-    total = nrow(zone_df)
-    zone_counts = combine(groupby(zone_df, :zone), nrow => :count)
-    zone_counts.percentage = round.(zone_counts.count ./ total .* 100, digits=1)
-
-    # Sort by a logical order
-    zone_order = ["below_long_put", "between_puts", "below_short_put",
-                  "max_profit",
-                  "between_calls", "above_short_call", "above_long_call", "unknown"]
-    sort!(zone_counts, :zone, by=z -> findfirst(==(z), zone_order))
-
-    return zone_counts
-end
-
 # =============================================================================
 # Formatting helpers
 # =============================================================================
@@ -686,6 +440,66 @@ fmt_metric(v; pct::Bool=false) = ismissing(v) ? "n/a" : pct ? "$(round(v * 100, 
 # =============================================================================
 # DataFrame serialization
 # =============================================================================
+
+"""
+    condor_trade_table(positions, pnls; key=default_key) -> DataFrame
+
+Build a per-condor trade table with P&L and max loss metrics.
+"""
+function condor_trade_table(
+    positions::Vector{Position},
+    pnls::Vector{Union{Missing,Float64}};
+    key::Function = pos -> (pos.entry_timestamp, pos.trade.expiry)
+)::DataFrame
+    pnl_by_key, _ = aggregate_pnl(positions, pnls; key=key)
+
+    groups = Dict{Any,Vector{Position}}()
+    for pos in positions
+        k = key(pos)
+        push!(get!(groups, k, Position[]), pos)
+    end
+
+    rows = DataFrame(
+        EntryTimestamp=DateTime[],
+        Expiry=DateTime[],
+        PnL=Union{Missing,Float64}[],
+        Credit=Union{Missing,Float64}[],
+        MaxLoss=Union{Missing,Float64}[],
+        WidthPut=Union{Missing,Float64}[],
+        WidthCall=Union{Missing,Float64}[],
+        ReturnOnRisk=Union{Missing,Float64}[]
+    )
+
+    for k in sort(collect(keys(groups)); by=x -> x[1])
+        group_positions = groups[k]
+        stats = condor_group_stats(group_positions)
+        pnl = get(pnl_by_key, k, missing)
+
+        if stats === missing
+            push!(rows, (k[1], k[2], pnl, missing, missing, missing, missing, missing))
+            continue
+        end
+
+        ror = if ismissing(pnl) || stats.max_loss <= 0
+            missing
+        else
+            pnl / stats.max_loss
+        end
+
+        push!(rows, (
+            k[1],
+            k[2],
+            pnl,
+            stats.credit,
+            stats.max_loss,
+            stats.width_put,
+            stats.width_call,
+            ror
+        ))
+    end
+
+    return rows
+end
 
 """
     metrics_to_dataframe(m::PerformanceMetrics) -> DataFrame

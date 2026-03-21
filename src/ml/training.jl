@@ -1,4 +1,4 @@
-# ML Training — data generation, training loop, and MLCondorSelector
+# ML Training — data generation, training loop, and ScoredCandidateSelector
 
 # =============================================================================
 # Utility functions (training labels)
@@ -98,7 +98,7 @@ end
     _enumerate_condor_candidates(ctx, delta_grid, candidate_features; kwargs...)
 
 Enumerate candidate condors from a delta grid, returning `(strikes, feature_vec)` tuples.
-Shared by `generate_training_data` and `MLCondorSelector`.
+Shared by `generate_training_data` and `ScoredCandidateSelector`.
 
 Returns `Vector{Tuple{NTuple{4,Float64}, Vector{Float32}}}`.
 """
@@ -410,14 +410,29 @@ function generate_delta_training_data(
 end
 
 # =============================================================================
+# Element-wise loss functions
+# =============================================================================
+
+"""Element-wise squared error: `(ŷ .- y) .^ 2`."""
+mse_loss(ŷ, y) = (ŷ .- y) .^ 2
+
+"""Element-wise logit binary cross-entropy (numerically stable, applies sigmoid internally)."""
+bce_loss(ŷ, y) = Flux.logitbinarycrossentropy.(ŷ, y)
+
+# =============================================================================
 # Generic training loop (works with any X → Y matrices)
 # =============================================================================
 
 """
-    train_model!(model, X, Y; epochs=100, lr=1e-3, batch_size=64, val_fraction=0.2, patience=10)
+    train_model!(model, X, Y; loss_fn, sample_weight_fn, epochs, lr, batch_size, val_fraction, patience)
 
 Train a Flux model on feature matrix X (dims × samples) and target matrix Y
-(output_dim × samples) with MSE loss.
+(output_dim × samples).
+
+# Keyword Arguments
+- `loss_fn`: element-wise loss `(ŷ, y) -> array` (default `mse_loss`)
+- `sample_weight_fn`: optional `Y_train -> W_train` for class balancing (default `nothing`)
+- `epochs`, `lr`, `batch_size`, `val_fraction`, `patience`: training hyperparameters
 
 Returns `(model, feature_means, feature_stds, history)`.
 """
@@ -425,6 +440,8 @@ function train_model!(
     model,
     X::Matrix{Float32},
     Y::Matrix{Float32};
+    loss_fn=mse_loss,
+    sample_weight_fn=nothing,
     epochs::Int=100,
     lr::Float64=1e-3,
     batch_size::Int=64,
@@ -446,90 +463,8 @@ function train_model!(
     X_train_norm = (X_train .- feature_means) ./ safe_stds
     X_val_norm = (X_val .- feature_means) ./ safe_stds
 
-    opt_state = Flux.setup(Adam(lr), model)
-
-    train_losses = Float64[]
-    val_losses = Float64[]
-    best_val_loss = Inf
-    best_epoch = 0
-
-    for epoch in 1:epochs
-        perm_train = randperm(n_train)
-        epoch_loss = 0.0
-        n_batches = 0
-
-        for start in 1:batch_size:n_train
-            stop = min(start + batch_size - 1, n_train)
-            batch_idx = perm_train[start:stop]
-            X_batch = X_train_norm[:, batch_idx]
-            Y_batch = Y_train[:, batch_idx]
-
-            loss, grads = Flux.withgradient(model) do m
-                Flux.mse(m(X_batch), Y_batch)
-            end
-
-            Flux.update!(opt_state, model, grads[1])
-            epoch_loss += loss
-            n_batches += 1
-        end
-
-        push!(train_losses, epoch_loss / n_batches)
-
-        val_loss = Flux.mse(model(X_val_norm), Y_val)
-        push!(val_losses, val_loss)
-
-        if val_loss < best_val_loss
-            best_val_loss = val_loss
-            best_epoch = epoch
-        elseif epoch - best_epoch >= patience
-            break
-        end
-    end
-
-    return (model, feature_means, feature_stds,
-            (train_loss=train_losses, val_loss=val_losses))
-end
-
-"""
-    train_classifier!(model, X, Y; epochs=100, lr=1e-3, batch_size=64, val_fraction=0.2, patience=10, pos_weight=1.0)
-
-Train a binary classifier on feature matrix X and binary labels Y ∈ {0, 1}
-(1 × samples) with logit binary cross-entropy loss.
-
-Model should output raw logits (no sigmoid) — BCE loss applies sigmoid internally.
-`pos_weight` upweights the positive class (>1 penalizes missing winners less,
-<1 penalizes false positives more — i.e. trading when you shouldn't).
-
-Returns `(model, feature_means, feature_stds, history)`.
-"""
-function train_classifier!(
-    model,
-    X::Matrix{Float32},
-    Y::Matrix{Float32};
-    epochs::Int=100,
-    lr::Float64=1e-3,
-    batch_size::Int=64,
-    val_fraction::Float64=0.2,
-    patience::Int=10,
-    pos_weight::Float64=1.0
-)
-    n = size(X, 2)
-    n_val = max(1, round(Int, n * val_fraction))
-    n_train = n - n_val
-
-    perm = randperm(n)
-    X_train, Y_train = X[:, perm[1:n_train]], Y[:, perm[1:n_train]]
-    X_val, Y_val = X[:, perm[n_train+1:end]], Y[:, perm[n_train+1:end]]
-
-    feature_means = vec(mean(X_train; dims=2))
-    feature_stds = vec(std(X_train; dims=2))
-    safe_stds = max.(feature_stds, Float32(1e-8))
-
-    X_train_norm = (X_train .- feature_means) ./ safe_stds
-    X_val_norm = (X_val .- feature_means) ./ safe_stds
-
-    # Per-sample weights: pos_weight for positive labels, 1.0 for negative
-    W_train = Float32.(1.0 .+ (pos_weight - 1.0) .* Y_train)
+    W_train = sample_weight_fn !== nothing ?
+        sample_weight_fn(Y_train) : ones(Float32, size(Y_train))
 
     opt_state = Flux.setup(Adam(lr), model)
 
@@ -551,9 +486,8 @@ function train_classifier!(
             W_batch = W_train[:, batch_idx]
 
             loss, grads = Flux.withgradient(model) do m
-                logits = m(X_batch)
-                bce = Flux.logitbinarycrossentropy.(logits, Y_batch)
-                sum(W_batch .* bce) / sum(W_batch)
+                element_losses = loss_fn(m(X_batch), Y_batch)
+                sum(W_batch .* element_losses) / sum(W_batch)
             end
 
             Flux.update!(opt_state, model, grads[1])
@@ -563,8 +497,8 @@ function train_classifier!(
 
         push!(train_losses, epoch_loss / n_batches)
 
-        val_logits = model(X_val_norm)
-        val_loss = mean(Flux.logitbinarycrossentropy.(val_logits, Y_val))
+        # Validation: always unweighted mean
+        val_loss = mean(loss_fn(model(X_val_norm), Y_val))
         push!(val_losses, val_loss)
 
         if val_loss < best_val_loss
@@ -579,109 +513,62 @@ function train_classifier!(
             (train_loss=train_losses, val_loss=val_losses))
 end
 
+"""
+    train_classifier!(model, X, Y; pos_weight=1.0, kwargs...)
+
+Train a binary classifier with logit BCE loss and class-balanced weighting.
+Thin wrapper around `train_model!`.
+
+`pos_weight` upweights the positive class: samples with Y=1 get weight `pos_weight`,
+samples with Y=0 get weight 1.0.
+
+Returns `(model, feature_means, feature_stds, history)`.
+"""
+function train_classifier!(
+    model,
+    X::Matrix{Float32},
+    Y::Matrix{Float32};
+    pos_weight::Float64=1.0,
+    kwargs...
+)
+    weight_fn = Y_train -> Float32.(1.0 .+ (pos_weight - 1.0) .* Y_train)
+    train_model!(model, X, Y;
+        loss_fn=bce_loss,
+        sample_weight_fn=weight_fn,
+        kwargs...
+    )
+end
+
 # =============================================================================
 # Training loop (TrainingExample-based, for ScoredCandidateSelector)
 # =============================================================================
 
 """
-    train_scoring_model!(model, data; epochs=100, lr=1e-3, batch_size=64, val_fraction=0.2)
+    train_scoring_model!(model, data; kwargs...)
 
 Train a scoring model on `TrainingExample` data with MSE loss.
+Builds X/Y matrices from the examples, then delegates to `train_model!`.
 
-Returns `(model, feature_means, feature_stds, history)` where `history` is a
-NamedTuple with `train_loss` and `val_loss` vectors.
+Returns `(model, feature_means, feature_stds, history)`.
 """
 function train_scoring_model!(
     model,
     data::Vector{TrainingExample};
-    epochs::Int=100,
-    lr::Float64=1e-3,
-    batch_size::Int=64,
-    val_fraction::Float64=0.2,
-    patience::Int=10
+    kwargs...
 )
     n = length(data)
-    n_val = max(1, round(Int, n * val_fraction))
-    n_train = n - n_val
+    sf_dim = length(data[1].surface_features)
+    cf_dim = length(data[1].candidate_features)
+    total_dim = sf_dim + cf_dim
 
-    # Shuffle
-    perm = randperm(n)
-    train_idx = perm[1:n_train]
-    val_idx = perm[n_train+1:end]
-
-    # Build feature matrices
-    function build_matrix(indices)
-        sf_dim = length(data[1].surface_features)
-        cf_dim = length(data[1].candidate_features)
-        total_dim = sf_dim + cf_dim
-        X = Matrix{Float32}(undef, total_dim, length(indices))
-        Y = Vector{Float32}(undef, length(indices))
-        for (j, i) in enumerate(indices)
-            X[1:sf_dim, j] = data[i].surface_features
-            X[sf_dim+1:end, j] = data[i].candidate_features
-            Y[j] = data[i].label
-        end
-        return X, Y
+    X = Matrix{Float32}(undef, total_dim, n)
+    Y = Matrix{Float32}(undef, 1, n)
+    for (j, ex) in enumerate(data)
+        X[1:sf_dim, j] = ex.surface_features
+        X[sf_dim+1:end, j] = ex.candidate_features
+        Y[1, j] = ex.label
     end
 
-    X_train, Y_train = build_matrix(train_idx)
-    X_val, Y_val = build_matrix(val_idx)
-
-    # Compute normalization stats from training set
-    feature_means = vec(mean(X_train; dims=2))
-    feature_stds = vec(std(X_train; dims=2))
-    safe_stds = max.(feature_stds, Float32(1e-8))
-
-    # Normalize
-    X_train_norm = (X_train .- feature_means) ./ safe_stds
-    X_val_norm = (X_val .- feature_means) ./ safe_stds
-
-    opt_state = Flux.setup(Adam(lr), model)
-
-    train_losses = Float64[]
-    val_losses = Float64[]
-    best_val_loss = Inf
-    best_epoch = 0
-
-    for epoch in 1:epochs
-        # Mini-batch training
-        perm_train = randperm(n_train)
-        epoch_loss = 0.0
-        n_batches = 0
-
-        for start in 1:batch_size:n_train
-            stop = min(start + batch_size - 1, n_train)
-            batch_idx = perm_train[start:stop]
-            X_batch = X_train_norm[:, batch_idx]
-            Y_batch = Y_train[batch_idx]
-
-            loss, grads = Flux.withgradient(model) do m
-                pred = vec(m(X_batch))
-                Flux.mse(pred, Y_batch)
-            end
-
-            Flux.update!(opt_state, model, grads[1])
-            epoch_loss += loss
-            n_batches += 1
-        end
-
-        avg_train_loss = epoch_loss / n_batches
-        push!(train_losses, avg_train_loss)
-
-        # Validation loss
-        val_pred = vec(model(X_val_norm))
-        val_loss = Flux.mse(val_pred, Y_val)
-        push!(val_losses, val_loss)
-
-        if val_loss < best_val_loss
-            best_val_loss = val_loss
-            best_epoch = epoch
-        elseif epoch - best_epoch >= patience
-            break
-        end
-    end
-
-    return (model, feature_means, feature_stds,
-            (train_loss=train_losses, val_loss=val_losses))
+    return train_model!(model, X, Y; kwargs...)
 end
 

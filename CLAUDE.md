@@ -47,17 +47,18 @@ julia --project=. -e "using Pkg; Pkg.test()"
 - **ML module**
   - `ml/features.jl` -- `Feature` and `CandidateFeature` abstract types, callable feature structs (ATMImpliedVol, DeltaSkew, RiskReversal, Butterfly, TermSlope, ATMSpread, DeltaSpread, TotalVolume, PutCallVolumeRatio, HourOfDay, DayOfWeek, ShortPutDelta, ShortCallDelta, EntryCredit, MaxLoss, CreditToMaxLoss), default feature sets
   - `ml/model.jl` -- `create_scoring_model` (Flux MLP), `score_candidates`
-  - `ml/training.jl` -- `generate_training_data` (uses `each_entry`), `train_scoring_model!`, `MLCondorSelector` (trained selector callable), `roi_utility`, `pnl_utility`
+  - `ml/training.jl` -- `generate_training_data` (uses `each_entry`), `train_scoring_model!`, `roi_utility`, `pnl_utility`
+  - `ml/selectors.jl` -- `ScoredCandidateSelector` (enumerate + score candidates), `DirectDeltaSelector` (predict optimal delta), `MLSizer` (ML-modulated trade sizing)
 
 ### Key Patterns
 
 - **Strategy interface**: Implement `ScheduledStrategy` with `entry_schedule()` and `entry_positions()`. The engine calls `backtest_strategy(strategy, source::BacktestDataSource)` returning `BacktestResult`. A convenience `backtest_strategy(strategy, surfaces, spots)` wraps dicts in `DictDataSource`.
 - **Data source protocol**: `BacktestDataSource` is the abstract type with methods: `available_timestamps(source)`, `get_surface(source, ts)`, `get_settlement_spot(source, ts)`. `DictDataSource` wraps pre-loaded dicts. `ParquetDataSource` loads lazily from parquet with caching.
-- **Strike selectors**: Callable `f(ctx::StrikeSelectionContext) -> (sp_K, sc_K, lp_K, lc_K) | nothing`. `StrikeSelectionContext` has fields `surface`, `expiry`, `history`. Helpers `_ctx_tau(ctx)` and `_ctx_recs(ctx)` derive tau and records. Selector factories: `sigma_selector`, `delta_selector`, `delta_condor_selector`, `constrained_delta_selector`. `MLCondorSelector` is the trained ML selector.
+- **Strike selectors**: Callable `f(ctx::StrikeSelectionContext) -> (sp_K, sc_K, lp_K, lc_K) | nothing`. `StrikeSelectionContext` has fields `surface`, `expiry`, `history`. Helpers `_ctx_tau(ctx)` and `_ctx_recs(ctx)` derive tau and records. Selector factories: `sigma_selector`, `delta_selector`, `delta_condor_selector`, `constrained_delta_selector`. `ScoredCandidateSelector` is the candidate-scoring ML selector. `DirectDeltaSelector` predicts optimal delta.
 - **each_entry**: Shared iteration function in `engine.jl` that resolves timestamps → surfaces → expiries → settlement. Used by both `backtest_strategy` and `generate_training_data`.
-- **IronCondorStrategy**: Takes `(schedule, expiry_interval, strike_selector; quantity, debug)`. Rate/div_yield live in the selector, not the strategy.
+- **IronCondorStrategy**: Takes `(schedule, expiry_interval, strike_selector; sizer=FixedSize(1.0), debug)`. The `sizer` is a callable `f(ctx) -> quantity`. Use `MLSizer(model, means, stds; policy=binary_sizing())` for ML-modulated sizing. Rate/div_yield live in the selector, not the strategy.
 - **Pricing convention**: Prices in `OptionRecord` are fractions of spot (Deribit convention). Multiply by `surface.spot` for USD. The backtest uses bid for sells, ask for buys.
-- **ROI evaluation**: `performance_metrics(positions, pnls; margin_by_key=condor_max_loss_by_key(positions))` computes ROI using per-condor max loss as margin.
+- **ROI evaluation**: `performance_metrics(result::BacktestResult)` auto-computes condor max loss margin. Also available as `performance_metrics(positions, pnls; margin_by_key=...)` for custom margin.
 
 ### Data Layout
 
@@ -76,6 +77,9 @@ root/
 ### Scripts
 
 Scripts use `scripts/Project.toml` via `Pkg.activate(@__DIR__)`.
+
+- **`scripts/sizing_filter.jl`** -- Configurable experiment runner. Replaces 9 prior scripts by parameterizing symbols, feature sets, and ML variants. Config block at top; supports `Sizing` (binary/linear/sigmoid), `Classifier` (loss prediction + skip), and `DeltaRegression` variants. Shared infrastructure in `scripts/lib/experiment.jl`.
+- **`scripts/strike_selector.jl`** -- Separate: `ScoredCandidateSelector` pipeline (candidate enumeration + scoring), fundamentally different training data generation.
 
 ## Known Technical Debt
 

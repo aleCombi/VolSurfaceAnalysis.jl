@@ -121,17 +121,16 @@ export backtest_strategy, each_entry
 # Data sources
 export BacktestDataSource, DictDataSource, ParquetDataSource, HistoricalView
 export available_timestamps, get_surface, get_settlement_spot, get_spot, get_spots
-export BacktestMetrics, PerformanceMetrics
-export aggregate_pnl, backtest_metrics, performance_metrics, profit_curve, average_entry_spread
+export PerformanceMetrics
+export aggregate_pnl, performance_metrics, profit_curve, average_entry_spread
 export condor_group_stats, condor_trade_table, condor_max_loss_by_key
-export settlement_zone_analysis, settlement_zone_summary
 export fmt_pnl, fmt_ratio, fmt_pct, fmt_currency, fmt_metric
 export metrics_to_dataframe, pnl_results_dataframe
 export format_backtest_report
 export save_pnl_distribution, save_equity_curve, save_pnl_and_equity_curve, save_profit_curve, save_spot_curve
 
 # Strategies
-export IronCondorStrategy, SizedIronCondorStrategy, StrikeSelectionContext
+export IronCondorStrategy, FixedSize, StrikeSelectionContext
 export sigma_selector, delta_selector, delta_condor_selector, constrained_delta_selector
 
 # Strike selection helpers (used by scripts)
@@ -156,6 +155,7 @@ export train_scoring_model!, train_model!
 export TrainingExample, DeltaTrainingExample, SizingTrainingExample
 export linear_sizing, binary_sizing, probability_sizing, sigmoid_sizing
 export train_classifier!
-export MLSelector, ScoredCandidateSelector, DirectDeltaSelector, MLCondorSelector
+export mse_loss, bce_loss
+export MLSelector, ScoredCandidateSelector, DirectDeltaSelector, MLSizer
 
 end # module

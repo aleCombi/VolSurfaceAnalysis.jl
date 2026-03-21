@@ -128,4 +128,19 @@ using DataFrames
         @test any(l -> contains(l, "EMPTY"), lines)
         @test any(l -> contains(l, "Count: 0"), lines)
     end
+
+    @testset "performance_metrics(::BacktestResult)" begin
+        result = BacktestResult(positions, pnls)
+        m = performance_metrics(result)
+
+        @test m isa PerformanceMetrics
+        @test m.count == 2
+        @test m.total_pnl ≈ 0.0  # 2.0 + (-2.0)
+        @test !ismissing(m.total_roi)
+        @test !ismissing(m.sharpe)
+
+        # Empty result returns nothing
+        empty_result = BacktestResult(Position[], Union{Missing,Float64}[])
+        @test performance_metrics(empty_result) === nothing
+    end
 end

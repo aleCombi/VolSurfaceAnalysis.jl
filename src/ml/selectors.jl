@@ -191,107 +191,51 @@ function (sel::DirectDeltaSelector)(ctx::StrikeSelectionContext)
     return (sp_K, sc_K, lp_K, lc_K)
 end
 
-# Backward compat alias
-const MLCondorSelector = ScoredCandidateSelector
-
 # =============================================================================
-# SizedIronCondorStrategy — ML-modulated quantity
+# MLSizer — ML-modulated quantity (plugs into IronCondorStrategy as sizer)
 # =============================================================================
 
 """
-    SizedIronCondorStrategy
+    MLSizer
 
-Iron condor strategy where quantity is modulated by an ML model that predicts
-the baseline condor's PnL from surface features.
+Callable sizing policy that extracts surface features, runs a trained model,
+and applies a policy function to map the prediction to a trade quantity.
+
+Use as the `sizer` argument to `IronCondorStrategy`:
+```julia
+IronCondorStrategy(schedule, interval, selector;
+    sizer=MLSizer(model, means, stds; policy=binary_sizing()))
+```
 
 # Fields
-- `schedule::Vector{DateTime}`: Entry timestamps
-- `expiry_interval::Period`: Time from entry to expiry
-- `strike_selector`: Callable `f(ctx) -> (sp_K, sc_K, lp_K, lc_K) | nothing`
-- `model`: Trained Flux model (surface features → predicted PnL)
+- `model`: Trained Flux model (surface features → predicted value)
 - `feature_means`, `feature_stds`: Normalization parameters
 - `surface_features`: Which surface features to extract
-- `sizing_policy`: Callable `(predicted_pnl) -> quantity`
-- `debug::Bool`: Emit diagnostics
+- `policy`: Callable `(predicted_value) -> quantity`
 """
-struct SizedIronCondorStrategy{F,M,P} <: ScheduledStrategy
-    schedule::Vector{DateTime}
-    expiry_interval::Period
-    strike_selector::F
+struct MLSizer{M,P}
     model::M
     feature_means::Vector{Float32}
     feature_stds::Vector{Float32}
     surface_features::Vector{<:Feature}
-    sizing_policy::P
-    debug::Bool
+    policy::P
 end
 
-function SizedIronCondorStrategy(
-    schedule::Vector{DateTime},
-    expiry_interval::Period,
-    strike_selector,
+function MLSizer(
     model,
     feature_means::Vector{Float32},
     feature_stds::Vector{Float32};
     surface_features::Vector{<:Feature}=default_surface_features(),
-    sizing_policy=linear_sizing(),
-    debug::Bool=false
+    policy=linear_sizing()
 )
-    return SizedIronCondorStrategy(
-        schedule, expiry_interval, strike_selector,
-        model, feature_means, feature_stds, surface_features,
-        sizing_policy, debug
-    )
+    return MLSizer(model, feature_means, feature_stds, surface_features, policy)
 end
 
-entry_schedule(strategy::SizedIronCondorStrategy)::Vector{DateTime} = strategy.schedule
-
-function entry_positions(
-    strategy::SizedIronCondorStrategy,
-    surface::VolatilitySurface,
-    history::BacktestDataSource=DictDataSource(Dict{DateTime,VolatilitySurface}(), Dict{DateTime,Float64}())
-)::Vector{Position}
-    expiry_info = _select_expiry(strategy.expiry_interval, surface)
-    if expiry_info === nothing
-        strategy.debug && println("No entry: no valid expiry for timestamp=$(surface.timestamp)")
-        return Position[]
-    end
-    expiry = expiry_info[1]
-
-    ctx = StrikeSelectionContext(surface, expiry, history)
-
-    # 1. Select strikes via baseline selector
-    selector_result = strategy.strike_selector(ctx)
-    if selector_result === nothing
-        strategy.debug && println("No entry: invalid condor strikes (timestamp=$(surface.timestamp))")
-        return Position[]
-    end
-    sp_K, sc_K, lp_K, lc_K = selector_result
-
-    # 2. Extract surface features → normalize → predict PnL
-    sf_vec = extract_surface_features(ctx, strategy.surface_features)
-    if sf_vec === nothing
-        strategy.debug && println("No entry: feature extraction failed (timestamp=$(surface.timestamp))")
-        return Position[]
-    end
-
-    safe_stds = max.(strategy.feature_stds, Float32(1e-8))
-    x_norm = (sf_vec .- strategy.feature_means) ./ safe_stds
-    predicted_pnl = Float64(vec(strategy.model(reshape(x_norm, :, 1)))[1])
-
-    # 3. Apply sizing policy
-    quantity = strategy.sizing_policy(predicted_pnl)
-    if quantity <= 0.0
-        strategy.debug && println("No entry: sizing policy returned q=$(quantity) (pred_pnl=$(predicted_pnl))")
-        return Position[]
-    end
-
-    trades = Trade[
-        Trade(surface.underlying, sp_K, expiry, Put; direction=-1, quantity=quantity),
-        Trade(surface.underlying, sc_K, expiry, Call; direction=-1, quantity=quantity),
-        Trade(surface.underlying, lp_K, expiry, Put; direction=1, quantity=quantity),
-        Trade(surface.underlying, lc_K, expiry, Call; direction=1, quantity=quantity),
-    ]
-
-    return _open_positions(trades, surface; debug=strategy.debug)
+function (s::MLSizer)(ctx::StrikeSelectionContext)::Float64
+    sf_vec = extract_surface_features(ctx, s.surface_features)
+    sf_vec === nothing && return 0.0
+    safe_stds = max.(s.feature_stds, Float32(1e-8))
+    x_norm = (sf_vec .- s.feature_means) ./ safe_stds
+    predicted = Float64(vec(s.model(reshape(x_norm, :, 1)))[1])
+    return s.policy(predicted)
 end
