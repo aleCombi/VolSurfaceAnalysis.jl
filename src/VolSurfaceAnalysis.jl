@@ -154,7 +154,8 @@ export create_scoring_model, score_candidates
 export generate_training_data, generate_delta_training_data, generate_sizing_training_data
 export train_scoring_model!, train_model!
 export TrainingExample, DeltaTrainingExample, SizingTrainingExample
-export linear_sizing, binary_sizing, sigmoid_sizing
+export linear_sizing, binary_sizing, probability_sizing, sigmoid_sizing
+export train_classifier!
 export MLSelector, ScoredCandidateSelector, DirectDeltaSelector, MLCondorSelector
 
 end # module

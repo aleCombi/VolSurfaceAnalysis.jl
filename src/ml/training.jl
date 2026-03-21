@@ -43,6 +43,19 @@ function binary_sizing(; threshold::Float64=0.0, quantity::Float64=1.0)
 end
 
 """
+    probability_sizing(; threshold=0.5, quantity=1.0)
+
+Returns a sizing policy for classifier models that output logits.
+Applies sigmoid to get probability, trades `quantity` when P(win) > threshold.
+"""
+function probability_sizing(; threshold::Float64=0.5, quantity::Float64=1.0)
+    return function(logit::Float64)
+        prob = 1.0 / (1.0 + exp(-logit))
+        return prob > threshold ? quantity : 0.0
+    end
+end
+
+"""
     sigmoid_sizing(; scale=1.0, max_q=3.0)
 
 Returns a smooth sizing policy `(predicted_pnl) -> quantity`.
@@ -463,6 +476,95 @@ function train_model!(
         push!(train_losses, epoch_loss / n_batches)
 
         val_loss = Flux.mse(model(X_val_norm), Y_val)
+        push!(val_losses, val_loss)
+
+        if val_loss < best_val_loss
+            best_val_loss = val_loss
+            best_epoch = epoch
+        elseif epoch - best_epoch >= patience
+            break
+        end
+    end
+
+    return (model, feature_means, feature_stds,
+            (train_loss=train_losses, val_loss=val_losses))
+end
+
+"""
+    train_classifier!(model, X, Y; epochs=100, lr=1e-3, batch_size=64, val_fraction=0.2, patience=10, pos_weight=1.0)
+
+Train a binary classifier on feature matrix X and binary labels Y ∈ {0, 1}
+(1 × samples) with logit binary cross-entropy loss.
+
+Model should output raw logits (no sigmoid) — BCE loss applies sigmoid internally.
+`pos_weight` upweights the positive class (>1 penalizes missing winners less,
+<1 penalizes false positives more — i.e. trading when you shouldn't).
+
+Returns `(model, feature_means, feature_stds, history)`.
+"""
+function train_classifier!(
+    model,
+    X::Matrix{Float32},
+    Y::Matrix{Float32};
+    epochs::Int=100,
+    lr::Float64=1e-3,
+    batch_size::Int=64,
+    val_fraction::Float64=0.2,
+    patience::Int=10,
+    pos_weight::Float64=1.0
+)
+    n = size(X, 2)
+    n_val = max(1, round(Int, n * val_fraction))
+    n_train = n - n_val
+
+    perm = randperm(n)
+    X_train, Y_train = X[:, perm[1:n_train]], Y[:, perm[1:n_train]]
+    X_val, Y_val = X[:, perm[n_train+1:end]], Y[:, perm[n_train+1:end]]
+
+    feature_means = vec(mean(X_train; dims=2))
+    feature_stds = vec(std(X_train; dims=2))
+    safe_stds = max.(feature_stds, Float32(1e-8))
+
+    X_train_norm = (X_train .- feature_means) ./ safe_stds
+    X_val_norm = (X_val .- feature_means) ./ safe_stds
+
+    # Per-sample weights: pos_weight for positive labels, 1.0 for negative
+    W_train = Float32.(1.0 .+ (pos_weight - 1.0) .* Y_train)
+
+    opt_state = Flux.setup(Adam(lr), model)
+
+    train_losses = Float64[]
+    val_losses = Float64[]
+    best_val_loss = Inf
+    best_epoch = 0
+
+    for epoch in 1:epochs
+        perm_train = randperm(n_train)
+        epoch_loss = 0.0
+        n_batches = 0
+
+        for start in 1:batch_size:n_train
+            stop = min(start + batch_size - 1, n_train)
+            batch_idx = perm_train[start:stop]
+            X_batch = X_train_norm[:, batch_idx]
+            Y_batch = Y_train[:, batch_idx]
+            W_batch = W_train[:, batch_idx]
+
+            loss, grads = Flux.withgradient(model) do m
+                logits = m(X_batch)
+                bce = Flux.logitbinarycrossentropy.(logits, Y_batch)
+                sum(W_batch .* bce) / sum(W_batch)
+            end
+
+            Flux.update!(opt_state, model, grads[1])
+            epoch_loss += loss
+            n_batches += 1
+        end
+
+        push!(train_losses, epoch_loss / n_batches)
+
+        val_logits = model(X_val_norm)
+        val_loss = mean(Flux.logitbinarycrossentropy.(val_logits, Y_val))
         push!(val_losses, val_loss)
 
         if val_loss < best_val_loss
