@@ -6,6 +6,7 @@ using Flux
 using Random: randperm
 using Roots: Brent, find_zero
 using Statistics: mean, std
+using ChenSignatures: logsig, prepare
 
 # ============================================================================
 # Core Types & Models
@@ -130,7 +131,7 @@ export format_backtest_report
 export save_pnl_distribution, save_equity_curve, save_pnl_and_equity_curve, save_profit_curve, save_spot_curve
 
 # Strategies
-export IronCondorStrategy, StrikeSelectionContext
+export IronCondorStrategy, SizedIronCondorStrategy, StrikeSelectionContext
 export sigma_selector, delta_selector, delta_condor_selector, constrained_delta_selector
 
 # Strike selection helpers (used by scripts)
@@ -141,16 +142,19 @@ export Feature, CandidateFeature
 export ATMImpliedVol, DeltaSkew, RiskReversal, Butterfly, TermSlope
 export ATMSpread, DeltaSpread, TotalVolume, PutCallVolumeRatio, HourOfDay, DayOfWeek
 export RealizedVol, VarianceRiskPremium, SpotMomentum, IVChange, IVPercentile
+export SpotLogSig, SpotMinuteLogSig, logsig_dim
+export extract_surface_features, surface_feature_dim
 export ShortPutDelta, ShortCallDelta, EntryCredit, MaxLoss, CreditToMaxLoss
 export DEFAULT_SURFACE_FEATURES, DEFAULT_CANDIDATE_FEATURES
 export default_surface_features, default_candidate_features
 
 # ML model & training
-export roi_utility, pnl_utility
+export roi_utility, pnl_utility, risk_adjusted_utility
 export create_scoring_model, score_candidates
-export generate_training_data, generate_delta_training_data
+export generate_training_data, generate_delta_training_data, generate_sizing_training_data
 export train_scoring_model!, train_model!
-export TrainingExample, DeltaTrainingExample
+export TrainingExample, DeltaTrainingExample, SizingTrainingExample
+export linear_sizing, binary_sizing, sigmoid_sizing
 export MLSelector, ScoredCandidateSelector, DirectDeltaSelector, MLCondorSelector
 
 end # module

@@ -9,7 +9,7 @@ using Dates, Printf, Flux, Statistics
 ENTRY_TIME      = Time(10, 0)           # backtest entry time
 TRAIN_ENTRY_TIMES = [Time(10, 0), Time(12, 0), Time(14, 0)]  # extra entries for training only
 EXPIRY_INTERVAL = Day(1)
-SPREAD_LAMBDA   = 0.5
+SPREAD_LAMBDA   = 0.7
 
 # Train/test split
 TRAIN_START = Date(2024, 2, 1)
@@ -98,13 +98,21 @@ println("  Test:  $(length(test_schedule)) timestamps (1 entry/day)")
 # =============================================================================
 
 println("\n--- Generating delta training data (train period only) ---")
-sf = default_surface_features(; rate=RATE, div_yield=DIV_YIELD)
+sf = Feature[
+    # Surface snapshot
+    ATMImpliedVol(; rate=RATE, div_yield=DIV_YIELD),
+    DeltaSkew(0.25, :put; rate=RATE, div_yield=DIV_YIELD),
+    ATMSpread(),
+    # Path signature (replaces all backward-looking features)
+    SpotLogSig(; lookback=20, depth=3),
+]
+println("  Features: 3 snapshot + 5 logsig = $(surface_feature_dim(sf)) total")
 
 examples = generate_delta_training_data(
     source, EXPIRY_INTERVAL, train_schedule;
     delta_grid=DELTA_GRID,
     rate=RATE, div_yield=DIV_YIELD,
-    utility=roi_utility,
+    utility=risk_adjusted_utility(1.0),
     surface_features=sf,
     wing_objective=:roi,
     symmetric=true,
@@ -225,6 +233,53 @@ print_comparison(ml_is.metrics, base_is.metrics,
 
 # =============================================================================
 # 6. Save model and results
+# =============================================================================
+
+# =============================================================================
+# 6. Predicted deltas over time
+# =============================================================================
+
+println("\n--- Predicted deltas over time (OOS) ---")
+pred_timestamps = DateTime[]
+pred_deltas = Float64[]
+safe_stds = max.(feat_stds, Float32(1e-8))
+
+each_entry(source, EXPIRY_INTERVAL, test_schedule) do ctx, settlement
+    sf_vec = extract_surface_features(ctx, sf)
+    sf_vec === nothing && return
+    x_norm = (sf_vec .- feat_means) ./ safe_stds
+    raw = vec(rescaled_model(reshape(x_norm, :, 1)))
+    pred_delta = clamp(Float64(raw[1]), delta_lo, delta_hi)
+    push!(pred_timestamps, ctx.surface.timestamp)
+    push!(pred_deltas, pred_delta)
+end
+
+# Save CSV
+pred_path = joinpath(run_dir, "predicted_deltas.csv")
+open(pred_path, "w") do io
+    println(io, "timestamp,predicted_delta")
+    for (ts, d) in zip(pred_timestamps, pred_deltas)
+        @printf(io, "%s,%.4f\n", ts, d)
+    end
+end
+println("  Saved to: $pred_path")
+
+# Print summary + table
+if !isempty(pred_deltas)
+    @printf("  n=%d  mean=%.3f  std=%.3f  min=%.3f  max=%.3f\n",
+        length(pred_deltas), mean(pred_deltas), std(pred_deltas),
+        minimum(pred_deltas), maximum(pred_deltas))
+    @printf("  Baseline fixed delta: %.3f\n", PUT_DELTA)
+    println("\n  Date                 Delta   vs 0.16")
+    println("  ", "-" ^ 42)
+    for (ts, d) in zip(pred_timestamps, pred_deltas)
+        diff = d - PUT_DELTA
+        @printf("  %-22s %.4f  %+.4f\n", ts, d, diff)
+    end
+end
+
+# =============================================================================
+# 7. Save model and results
 # =============================================================================
 
 using BSON

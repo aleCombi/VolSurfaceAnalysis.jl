@@ -11,6 +11,62 @@ roi_utility(pnl::Float64, max_loss::Float64) = pnl / max_loss
 pnl_utility(pnl::Float64, max_loss::Float64) = pnl
 
 # =============================================================================
+# Sizing policies
+# =============================================================================
+
+"""
+    linear_sizing(; threshold=1.0, max_q=3.0, skip_negative=true)
+
+Returns a sizing policy `(predicted_pnl) -> quantity`.
+Linearly scales from 0 to `max_q` based on `predicted_pnl / threshold`.
+If `skip_negative`, returns 0 when predicted PnL ≤ 0.
+"""
+function linear_sizing(; threshold::Float64=1.0, max_q::Float64=3.0, skip_negative::Bool=true)
+    return function(predicted_pnl::Float64)
+        if skip_negative && predicted_pnl <= 0.0
+            return 0.0
+        end
+        return clamp(predicted_pnl / threshold, 0.0, max_q)
+    end
+end
+
+"""
+    binary_sizing(; threshold=0.0, quantity=1.0)
+
+Returns a sizing policy that trades `quantity` when predicted PnL > threshold, else 0.
+Simple regime filter: trade or don't trade.
+"""
+function binary_sizing(; threshold::Float64=0.0, quantity::Float64=1.0)
+    return function(predicted_pnl::Float64)
+        return predicted_pnl > threshold ? quantity : 0.0
+    end
+end
+
+"""
+    sigmoid_sizing(; scale=1.0, max_q=3.0)
+
+Returns a smooth sizing policy `(predicted_pnl) -> quantity`.
+Always trades (never returns 0): `max_q / (1 + exp(-pnl/scale))`.
+"""
+function sigmoid_sizing(; scale::Float64=1.0, max_q::Float64=3.0)
+    return function(predicted_pnl::Float64)
+        return max_q / (1.0 + exp(-predicted_pnl / scale))
+    end
+end
+
+"""
+    risk_adjusted_utility(λ=1.0)
+
+Returns a utility function `(pnl, max_loss) -> roi - λ * roi²`.
+Penalizes extreme returns (positive or negative), favoring consistency.
+Higher λ = more penalty on variance.
+"""
+risk_adjusted_utility(λ::Float64=1.0) = (pnl::Float64, max_loss::Float64) -> begin
+    roi = pnl / max_loss
+    roi - λ * roi^2
+end
+
+# =============================================================================
 # Training data
 # =============================================================================
 
@@ -122,10 +178,9 @@ function generate_training_data(
     each_entry(source, expiry_interval, schedule) do ctx, settlement
         ismissing(settlement) && return
 
-        # Extract surface features
-        sf = map(f -> f(ctx), surface_features)
-        any(isnothing, sf) && return
-        sf_vec = Float32.(sf)
+        # Extract surface features (handles multi-output features like SpotLogSig)
+        sf_vec = extract_surface_features(ctx, surface_features)
+        sf_vec === nothing && return
 
         candidates = _enumerate_condor_candidates(
             ctx, delta_grid, candidate_features;
@@ -156,6 +211,74 @@ function generate_training_data(
             label = utility(pnl, max_loss)
             push!(examples, TrainingExample(sf_vec, cf_vec, Float32(label)))
         end
+    end
+
+    return examples
+end
+
+# =============================================================================
+# Sizing training data
+# =============================================================================
+
+"""
+    SizingTrainingExample
+
+A single (surface_features, pnl) pair for training the sizing model.
+One example per entry: the PnL of the baseline condor at that surface state.
+"""
+struct SizingTrainingExample
+    surface_features::Vector{Float32}
+    pnl::Float32
+end
+
+"""
+    generate_sizing_training_data(source, expiry_interval, schedule, strike_selector; kwargs...)
+
+Generate sizing training data: run the baseline `strike_selector` at each entry,
+open positions, settle, and record `(surface_features, pnl)`.
+
+Returns `Vector{SizingTrainingExample}`.
+
+# Keyword Arguments
+- `rate`, `div_yield`: pricing parameters
+- `surface_features`: vector of `Feature` instances
+"""
+function generate_sizing_training_data(
+    source::BacktestDataSource,
+    expiry_interval::Period,
+    schedule::Vector{DateTime},
+    strike_selector;
+    rate::Float64=0.0,
+    div_yield::Float64=0.0,
+    surface_features::Vector{<:Feature}=default_surface_features(; rate, div_yield)
+)
+    examples = SizingTrainingExample[]
+
+    each_entry(source, expiry_interval, schedule) do ctx, settlement
+        ismissing(settlement) && return
+
+        # Extract surface features
+        sf_vec = extract_surface_features(ctx, surface_features)
+        sf_vec === nothing && return
+
+        # Run baseline selector
+        selector_result = strike_selector(ctx)
+        selector_result === nothing && return
+        sp_K, sc_K, lp_K, lc_K = selector_result
+
+        # Build trades and open positions
+        trades = Trade[
+            Trade(ctx.surface.underlying, sp_K, ctx.expiry, Put; direction=-1, quantity=1.0),
+            Trade(ctx.surface.underlying, sc_K, ctx.expiry, Call; direction=-1, quantity=1.0),
+            Trade(ctx.surface.underlying, lp_K, ctx.expiry, Put; direction=1, quantity=1.0),
+            Trade(ctx.surface.underlying, lc_K, ctx.expiry, Call; direction=1, quantity=1.0),
+        ]
+
+        positions = _open_positions(trades, ctx.surface)
+        isempty(positions) && return
+
+        pnl = settle(positions, Float64(settlement))
+        push!(examples, SizingTrainingExample(sf_vec, Float32(pnl)))
     end
 
     return examples
@@ -213,10 +336,9 @@ function generate_delta_training_data(
     each_entry(source, expiry_interval, schedule) do ctx, settlement
         ismissing(settlement) && return
 
-        # Extract surface features
-        sf = map(f -> f(ctx), surface_features)
-        any(isnothing, sf) && return
-        sf_vec = Float32.(sf)
+        # Extract surface features (handles multi-output features like SpotLogSig)
+        sf_vec = extract_surface_features(ctx, surface_features)
+        sf_vec === nothing && return
 
         best_utility = -Inf
         best_pd = 0.0
