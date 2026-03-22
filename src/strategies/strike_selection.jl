@@ -112,7 +112,6 @@ function _best_delta_strike(
     F::Float64,
     tau::Float64,
     rate::Float64;
-    debug::Bool=false
 )::Union{Nothing,Float64}
     candidates = if side == :put
         filter(r -> r.strike < spot, recs)
@@ -135,9 +134,7 @@ function _best_delta_strike(
         end
     end
 
-    if debug && best_strike !== nothing
-        println("  target delta=$(round(target, digits=2)) -> strike=$(round(best_strike, digits=2)) delta=$(round(best_delta, digits=3))")
-    end
+    best_strike !== nothing && @debug "  target delta=$(round(target, digits=2)) -> strike=$(round(best_strike, digits=2)) delta=$(round(best_delta, digits=3))"
 
     return best_strike
 end
@@ -148,25 +145,20 @@ function _atm_iv_from_records(
     tau::Float64,
     rate::Float64,
     div_yield::Float64;
-    debug::Bool=false,
     timestamp::Union{Nothing,DateTime}=nothing
 )::Union{Nothing,Float64}
     isempty(recs) && return nothing
 
     atm_rec = recs[argmin([abs(r.strike - spot) for r in recs])]
     if ismissing(atm_rec.mark_price)
-        if debug && timestamp !== nothing
-            println("No entry: ATM record has no mark_price (timestamp=$(timestamp))")
-        end
+        timestamp !== nothing && @debug "No entry: ATM record has no mark_price (timestamp=$(timestamp))"
         return nothing
     end
 
     F_atm = spot * exp((rate - div_yield) * tau)
     atm_iv = price_to_iv(atm_rec.mark_price, F_atm, atm_rec.strike, tau, atm_rec.option_type; r=rate)
     if isnan(atm_iv) || atm_iv <= 0.0
-        if debug && timestamp !== nothing
-            println("No entry: could not compute ATM IV (timestamp=$(timestamp))")
-        end
+        timestamp !== nothing && @debug "No entry: could not compute ATM IV (timestamp=$(timestamp))"
         return nothing
     end
 
@@ -178,7 +170,7 @@ end
 # =============================================================================
 
 """
-    _delta_strangle_strikes_asymmetric(ctx, put_delta_abs, call_delta_abs; rate, div_yield, debug)
+    _delta_strangle_strikes_asymmetric(ctx, put_delta_abs, call_delta_abs; rate, div_yield)
         -> Union{Nothing, Tuple{Float64, Float64}}
 
 Select strangle strikes with potentially different deltas for put and call legs.
@@ -188,8 +180,7 @@ function _delta_strangle_strikes_asymmetric(
     put_delta_abs::Float64,
     call_delta_abs::Float64;
     rate::Float64=0.0,
-    div_yield::Float64=0.0,
-    debug::Bool=false
+    div_yield::Float64=0.0
 )::Union{Nothing,Tuple{Float64,Float64}}
     tau = _ctx_tau(ctx)
     tau <= 0.0 && return nothing
@@ -203,10 +194,10 @@ function _delta_strangle_strikes_asymmetric(
     F = ctx.surface.spot * exp((rate - div_yield) * tau)
 
     short_put = _best_delta_strike(
-        put_recs, -abs(put_delta_abs), ctx.surface.spot, :put, F, tau, rate; debug=debug
+        put_recs, -abs(put_delta_abs), ctx.surface.spot, :put, F, tau, rate
     )
     short_call = _best_delta_strike(
-        call_recs, abs(call_delta_abs), ctx.surface.spot, :call, F, tau, rate; debug=debug
+        call_recs, abs(call_delta_abs), ctx.surface.spot, :call, F, tau, rate
     )
 
     if short_put === nothing || short_call === nothing
@@ -225,8 +216,7 @@ function _sigma_condor_strikes(
     short_sigmas::Float64,
     long_sigmas::Float64,
     rate::Float64,
-    div_yield::Float64;
-    debug::Bool=false
+    div_yield::Float64
 )::Union{Nothing,Tuple{Float64,Float64,Float64,Float64}}
     tau = _ctx_tau(ctx)
     tau <= 0.0 && return nothing
@@ -234,16 +224,14 @@ function _sigma_condor_strikes(
     recs = _ctx_recs(ctx)
     atm_iv = _atm_iv_from_records(
         recs, ctx.surface.spot, tau, rate, div_yield;
-        debug=debug, timestamp=ctx.surface.timestamp
+        timestamp=ctx.surface.timestamp
     )
     atm_iv === nothing && return nothing
 
     sigma_move = atm_iv * sqrt(tau)
-    if debug
-        println("  ATM IV=$(round(atm_iv * 100; digits=1))%, sigma=$(round(sigma_move * 100; digits=2))%, " *
-              "shorts +/-$(round(short_sigmas * sigma_move * 100; digits=2))%, " *
-              "longs +/-$(round(long_sigmas * sigma_move * 100; digits=2))%")
-    end
+    @debug "  ATM IV=$(round(atm_iv * 100; digits=1))%, sigma=$(round(sigma_move * 100; digits=2))%, " *
+          "shorts +/-$(round(short_sigmas * sigma_move * 100; digits=2))%, " *
+          "longs +/-$(round(long_sigmas * sigma_move * 100; digits=2))%"
 
     short_put_pct = 1.0 - short_sigmas * sigma_move
     short_call_pct = 1.0 + short_sigmas * sigma_move
@@ -297,158 +285,75 @@ end
 # =============================================================================
 
 """
-    _condor_wings_by_objective(ctx, short_put_K, short_call_K; objective, ...)
+    _select_condor_wings(ctx, short_put_K, short_call_K; max_loss, max_spread_rel, rate, div_yield)
         -> Union{Nothing, Tuple{Float64, Float64}}
 
-Select wing strikes (long put and long call) for an iron condor using a configurable objective.
+Select wing strikes (long put and long call) for an iron condor.
+Picks the widest liquid wings that keep max loss within the cap.
 
-Supported objectives:
-- `:target_max_loss`: match a target max loss
-- `:roi`: maximize entry credit / max loss
-- `:pnl`: maximize entry credit
+Candidates are sorted widest-first; the first valid combo is returned.
+Wings with bid-ask spread exceeding `max_spread_rel` are skipped.
 """
-function _condor_wings_by_objective(
+function _select_condor_wings(
     ctx,
     short_put_K::Float64,
     short_call_K::Float64;
-    objective::Symbol=:target_max_loss,
-    target_max_loss::Union{Nothing,Float64}=nothing,
-    max_loss_min::Float64=0.0,
-    max_loss_max::Float64=Inf,
-    min_credit::Float64=0.0,
-    min_delta_gap::Float64=0.08,
-    prefer_symmetric::Bool=true,
-    roi_eps::Float64=1e-6,
+    max_loss::Float64=Inf,
+    max_spread_rel::Float64=Inf,
     rate::Float64=0.0,
     div_yield::Float64=0.0,
-    debug::Bool=false
 )::Union{Nothing,Tuple{Float64,Float64}}
-    tau = _ctx_tau(ctx)
-    tau <= 0.0 && return nothing
-
-    objective in (:target_max_loss, :roi, :pnl) || error("Unknown condor wing objective: $objective")
-    if objective == :target_max_loss && target_max_loss === nothing
-        return nothing
-    end
-    max_loss_max < max_loss_min && return nothing
-
     recs = _ctx_recs(ctx)
     spot = ctx.surface.spot
-    target_max_loss_norm = target_max_loss === nothing ? nothing : target_max_loss / spot
-    max_loss_min_norm = max(0.0, max_loss_min / spot)
-    max_loss_max_norm = isfinite(max_loss_max) ? max_loss_max / spot : Inf
-    min_credit_norm = min_credit / spot
+    max_loss_norm = isfinite(max_loss) ? max_loss / spot : Inf
 
-    F = spot * exp((rate - div_yield) * tau)
     put_recs = filter(r -> r.option_type == Put, recs)
     call_recs = filter(r -> r.option_type == Call, recs)
 
-    short_put_rec = _find_rec_by_strike(put_recs, short_put_K)
-    short_call_rec = _find_rec_by_strike(call_recs, short_call_K)
-    (short_put_rec === nothing || short_call_rec === nothing) && return nothing
+    short_put_price = let rec = _find_rec_by_strike(put_recs, short_put_K)
+        rec === nothing ? nothing : _extract_price(rec, :bid)
+    end
+    short_call_price = let rec = _find_rec_by_strike(call_recs, short_call_K)
+        rec === nothing ? nothing : _extract_price(rec, :bid)
+    end
+    (short_put_price === nothing || short_call_price === nothing) && return nothing
 
-    short_put_price = _extract_price(short_put_rec, :bid)
-    short_put_price === nothing && return nothing
-    short_call_price = _extract_price(short_call_rec, :bid)
-    short_call_price === nothing && return nothing
-
-    long_put_candidates = filter(r -> r.strike < short_put_K &&
-                                      (!ismissing(r.ask_price) || !ismissing(r.mark_price)),
-                                 put_recs)
-    long_call_candidates = filter(r -> r.strike > short_call_K &&
-                                       (!ismissing(r.ask_price) || !ismissing(r.mark_price)),
-                                  call_recs)
+    # Candidates: have a price, pass spread filter. Sorted widest-first.
+    long_put_candidates = sort(
+        filter(r -> r.strike < short_put_K &&
+                    _extract_price(r, :ask) !== nothing &&
+                    _passes_spread(r, max_spread_rel),
+               put_recs);
+        by=r -> r.strike  # ascending = widest first (lowest strike)
+    )
+    long_call_candidates = sort(
+        filter(r -> r.strike > short_call_K &&
+                    _extract_price(r, :ask) !== nothing &&
+                    _passes_spread(r, max_spread_rel),
+               call_recs);
+        by=r -> -r.strike  # descending = widest first (highest strike)
+    )
     isempty(long_put_candidates) && return nothing
     isempty(long_call_candidates) && return nothing
 
-    if min_delta_gap > 0.0
-        short_put_delta = _delta_from_record(short_put_rec, F, tau, rate)
-        short_call_delta = _delta_from_record(short_call_rec, F, tau, rate)
-
-        if short_put_delta !== missing && short_call_delta !== missing
-            max_long_put_delta = abs(short_put_delta) - min_delta_gap
-            max_long_call_delta = abs(short_call_delta) - min_delta_gap
-
-            long_put_candidates = [r for r in long_put_candidates
-                                   if (_delta_from_record(r, F, tau, rate) |>
-                                       (d -> d === missing || abs(d) <= max_long_put_delta))]
-            long_call_candidates = [r for r in long_call_candidates
-                                    if (_delta_from_record(r, F, tau, rate) |>
-                                        (d -> d === missing || abs(d) <= max_long_call_delta))]
-        end
-    end
-    isempty(long_put_candidates) && return nothing
-    isempty(long_call_candidates) && return nothing
-
-    best_combo = nothing
-    best_score = -Inf
-
-    for long_put_rec in long_put_candidates
-        for long_call_rec in long_call_candidates
-            long_put_price = _extract_price(long_put_rec, :ask)
-            long_put_price === nothing && continue
-            long_call_price = _extract_price(long_call_rec, :ask)
-            long_call_price === nothing && continue
-
-            put_spread_width = (short_put_K - long_put_rec.strike) / spot
-            call_spread_width = (long_call_rec.strike - short_call_K) / spot
-            net_credit = (short_put_price + short_call_price) - (long_put_price + long_call_price)
-            put_max_loss = put_spread_width - net_credit
-            call_max_loss = call_spread_width - net_credit
-            max_loss = max(put_max_loss, call_max_loss)
-
-            max_loss > 0.0 || continue
-            max_loss < max_loss_min_norm && continue
-            max_loss > max_loss_max_norm && continue
-            net_credit < min_credit_norm && continue
-
-            width_diff = abs(put_spread_width - call_spread_width)
-            penalty = prefer_symmetric ? width_diff * 0.5 : 0.0
-
-            score = if objective == :target_max_loss
-                -(abs(max_loss - target_max_loss_norm) + penalty)
-            elseif objective == :roi
-                (net_credit / max(max_loss, roi_eps)) - penalty
-            else
-                net_credit - penalty
-            end
-
-            if score > best_score
-                best_score = score
-                best_combo = (
-                    long_put_rec.strike,
-                    long_call_rec.strike,
-                    max_loss,
-                    net_credit,
-                    put_spread_width,
-                    call_spread_width
-                )
-            end
+    for lp_rec in long_put_candidates
+        for lc_rec in long_call_candidates
+            put_width = (short_put_K - lp_rec.strike) / spot
+            call_width = (lc_rec.strike - short_call_K) / spot
+            credit = (short_put_price + short_call_price) -
+                     (_extract_price(lp_rec, :ask) + _extract_price(lc_rec, :ask))
+            ml = max(put_width, call_width) - credit
+            ml > 0.0 || continue
+            ml <= max_loss_norm && return (lp_rec.strike, lc_rec.strike)
         end
     end
 
-    best_combo === nothing && return nothing
-    long_put_K, long_call_K, achieved_max_loss, net_credit, put_width, call_width = best_combo
-
-    if !(long_put_K < short_put_K < spot < short_call_K < long_call_K)
-        return nothing
-    end
-
-    if debug
-        if objective == :target_max_loss
-            println("  Objective=target_max_loss, target=$(round(target_max_loss_norm * 100, digits=2)), achieved=$(round(achieved_max_loss * 100, digits=2))")
-        elseif objective == :roi
-            roi = net_credit / max(achieved_max_loss, roi_eps)
-            println("  Objective=roi, achieved ROI=$(round(roi, digits=4)), max_loss=$(round(achieved_max_loss * 100, digits=2))")
-        else
-            println("  Objective=pnl, credit=$(round(net_credit * 100, digits=2)), max_loss=$(round(achieved_max_loss * 100, digits=2))")
-        end
-        println("  Put width=$(round(put_width * 100, digits=2))%, call width=$(round(call_width * 100, digits=2))%")
-        println("  Wings: put=$(round(long_put_K, digits=2)), call=$(round(long_call_K, digits=2))")
-    end
-
-    return (long_put_K, long_call_K)
+    return nothing
 end
+
+"""Check that a record's bid-ask spread is within threshold."""
+_passes_spread(rec, max_spread_rel) =
+    !isfinite(max_spread_rel) || let s = _relative_spread(rec); s === nothing || s <= max_spread_rel end
 
 # =============================================================================
 # Delta-based condor strikes
@@ -462,8 +367,7 @@ function _delta_condor_strikes(
     long_call_delta_abs::Float64;
     rate::Float64=0.0,
     div_yield::Float64=0.0,
-    min_delta_gap::Float64=0.08,
-    debug::Bool=false
+    min_delta_gap::Float64=0.08
 )::Union{Nothing,Tuple{Float64,Float64,Float64,Float64}}
     tau = _ctx_tau(ctx)
     tau <= 0.0 && return nothing
@@ -480,10 +384,10 @@ function _delta_condor_strikes(
     isempty(call_recs) && return nothing
 
     short_put = _best_delta_strike(
-        put_recs, -short_put_delta_abs, ctx.surface.spot, :put, F, tau, rate; debug=debug
+        put_recs, -short_put_delta_abs, ctx.surface.spot, :put, F, tau, rate
     )
     short_call = _best_delta_strike(
-        call_recs, short_call_delta_abs, ctx.surface.spot, :call, F, tau, rate; debug=debug
+        call_recs, short_call_delta_abs, ctx.surface.spot, :call, F, tau, rate
     )
     (short_put === nothing || short_call === nothing) && return nothing
 
@@ -493,10 +397,10 @@ function _delta_condor_strikes(
     isempty(long_call_recs) && return nothing
 
     long_put = _best_delta_strike(
-        long_put_recs, -long_put_target, ctx.surface.spot, :put, F, tau, rate; debug=debug
+        long_put_recs, -long_put_target, ctx.surface.spot, :put, F, tau, rate
     )
     long_call = _best_delta_strike(
-        long_call_recs, long_call_target, ctx.surface.spot, :call, F, tau, rate; debug=debug
+        long_call_recs, long_call_target, ctx.surface.spot, :call, F, tau, rate
     )
     (long_put === nothing || long_call === nothing) && return nothing
 
@@ -525,15 +429,14 @@ function sigma_selector(short_sigmas::Float64, long_sigmas::Float64;
 end
 
 """
-    delta_selector(short_delta; rate=0.0, div_yield=0.0, wing_objective=:roi, kwargs...)
+    delta_selector(short_delta; rate=0.0, div_yield=0.0, kwargs...)
 
 Return a callable `ctx -> (sp_K, sc_K, lp_K, lc_K) | nothing` that selects
-short strikes by delta and optimizes wings using `_condor_wings_by_objective`.
+short strikes by delta and picks the widest valid wings.
 """
 function delta_selector(short_delta::Float64;
                         rate::Float64=0.0,
                         div_yield::Float64=0.0,
-                        wing_objective::Symbol=:roi,
                         wing_kwargs...)
     return function(ctx)
         shorts = _delta_strangle_strikes_asymmetric(
@@ -541,12 +444,9 @@ function delta_selector(short_delta::Float64;
         )
         shorts === nothing && return nothing
         sp_K, sc_K = shorts
-        wings = _condor_wings_by_objective(
+        wings = _select_condor_wings(
             ctx, sp_K, sc_K;
-            objective=wing_objective,
-            rate=rate,
-            div_yield=div_yield,
-            wing_kwargs...
+            rate=rate, div_yield=div_yield, wing_kwargs...
         )
         wings === nothing && return nothing
         lp_K, lc_K = wings
@@ -610,8 +510,7 @@ end
 
 """
     constrained_delta_selector(put_delta, call_delta;
-        rate=0.0, div_yield=0.0, max_loss, max_spread_rel=Inf,
-        min_delta_gap=0.08, prefer_symmetric=true)
+        rate=0.0, div_yield=0.0, max_loss, max_spread_rel=Inf)
 
 Return a callable `ctx -> (sp_K, sc_K, lp_K, lc_K) | nothing` that:
 1. Selects short strikes at the given deltas
@@ -624,18 +523,10 @@ function constrained_delta_selector(put_delta::Float64, call_delta::Float64;
                                     rate::Float64=0.0,
                                     div_yield::Float64=0.0,
                                     max_loss::Float64,
-                                    max_spread_rel::Float64=Inf,
-                                    min_delta_gap::Float64=0.08,
-                                    prefer_symmetric::Bool=true)
+                                    max_spread_rel::Float64=Inf)
     return function(ctx)
-        tau = _ctx_tau(ctx)
-        tau <= 0.0 && return nothing
-
-        recs = _ctx_recs(ctx)
-        spot = ctx.surface.spot
         ts = ctx.surface.timestamp
 
-        # Find short strikes by delta
         shorts = _delta_strangle_strikes_asymmetric(
             ctx, put_delta, call_delta; rate=rate, div_yield=div_yield
         )
@@ -645,32 +536,15 @@ function constrained_delta_selector(put_delta::Float64, call_delta::Float64;
         end
         sp_K, sc_K = shorts
 
-        # Check bid-ask spread on short strikes
-        if isfinite(max_spread_rel)
-            put_recs = filter(r -> r.option_type == Put, recs)
-            call_recs = filter(r -> r.option_type == Call, recs)
-            sp_rec = _find_rec_by_strike(put_recs, sp_K)
-            sc_rec = _find_rec_by_strike(call_recs, sc_K)
-
-            for (label, rec) in [("short put", sp_rec), ("short call", sc_rec)]
-                rec === nothing && continue
-                spread = _relative_spread(rec)
-                if spread !== nothing && spread > max_spread_rel
-                    @warn "Spread too wide on $label" timestamp=ts strike=rec.strike spread=round(spread, digits=3) max=max_spread_rel
-                    return nothing
-                end
-            end
+        _check_short_spreads(ctx, sp_K, sc_K, max_spread_rel) || begin
+            @warn "Spread too wide on short legs" timestamp=ts
+            return nothing
         end
 
-        # Find wings with max loss constraint, maximizing ROI
-        wings = _condor_wings_by_objective(
+        wings = _select_condor_wings(
             ctx, sp_K, sc_K;
-            objective=:roi,
-            max_loss_max=max_loss,
-            min_delta_gap=min_delta_gap,
-            prefer_symmetric=prefer_symmetric,
-            rate=rate,
-            div_yield=div_yield
+            max_loss=max_loss, max_spread_rel=max_spread_rel,
+            rate=rate, div_yield=div_yield
         )
         if wings === nothing
             @warn "No wings satisfying max_loss ≤ $max_loss" timestamp=ts short_put=sp_K short_call=sc_K

@@ -443,7 +443,6 @@ using Flux
             sizer=MLSizer(mock_model, Float32[0.0], Float32[1.0];
                 surface_features=sf,
                 policy=linear_sizing(; threshold=5.0, max_q=3.0)),
-            debug=false
         )
 
         result = backtest_strategy(strategy, source)
@@ -462,7 +461,6 @@ using Flux
             sizer=MLSizer(neg_model, Float32[0.0], Float32[1.0];
                 surface_features=sf,
                 policy=linear_sizing(; threshold=5.0, max_q=3.0, skip_negative=true)),
-            debug=false
         )
 
         neg_result = backtest_strategy(neg_strategy, source)

@@ -143,8 +143,7 @@ baseline_selector = constrained_delta_selector(
     PUT_DELTA, CALL_DELTA;
     rate=RATE, div_yield=DIV_YIELD,
     max_loss=MAX_LOSS,
-    max_spread_rel=MAX_SPREAD_REL,
-    min_delta_gap=MIN_DELTA_GAP
+    max_spread_rel=MAX_SPREAD_REL
 )
 
 # =============================================================================

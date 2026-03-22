@@ -70,24 +70,21 @@ function open_position(trade::Trade, surface::VolatilitySurface)::Position
 end
 
 """
-    _open_positions(trades, surface; debug=false) -> Vector{Position}
+    _open_positions(trades, surface) -> Vector{Position}
 
 Create positions for a vector of trades. Returns an empty vector if any trade
-cannot be opened (missing record or bid/ask). When `debug=true`, prints the failure.
+cannot be opened (missing record or bid/ask).
 """
 function _open_positions(
     trades::Vector{Trade},
-    surface::VolatilitySurface;
-    debug::Bool=false
+    surface::VolatilitySurface
 )::Vector{Position}
     positions = Position[]
     for t in trades
         try
             push!(positions, open_position(t, surface))
         catch e
-            if debug
-                println("No entry: open_position failed for $(t.option_type) strike=$(t.strike) expiry=$(t.expiry) error=$(e)")
-            end
+            @debug "No entry: open_position failed for $(t.option_type) strike=$(t.strike) expiry=$(t.expiry) error=$(e)"
             return Position[]
         end
     end

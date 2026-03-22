@@ -25,14 +25,12 @@ Scheduled iron condor strategy with pluggable strike selection and sizing.
   `ctx` is a `StrikeSelectionContext(surface, expiry, history)`.
 - `sizer`: Callable `f(ctx) -> Float64` returning the quantity to trade.
   Defaults to `FixedSize(1.0)`. Use `MLSizer` for ML-modulated sizing.
-- `debug::Bool`: Emit diagnostics when entries fail
 """
 struct IronCondorStrategy{F,S} <: ScheduledStrategy
     schedule::Vector{DateTime}
     expiry_interval::Period
     strike_selector::F
     sizer::S
-    debug::Bool
 end
 
 entry_schedule(strategy::IronCondorStrategy)::Vector{DateTime} = strategy.schedule
@@ -41,15 +39,13 @@ function IronCondorStrategy(
     schedule::Vector{DateTime},
     expiry_interval::Period,
     strike_selector;
-    sizer=FixedSize(1.0),
-    debug::Bool=false
+    sizer=FixedSize(1.0)
 )
     return IronCondorStrategy(
         schedule,
         expiry_interval,
         strike_selector,
-        sizer,
-        debug
+        sizer
     )
 end
 
@@ -60,7 +56,7 @@ function entry_positions(
 )::Vector{Position}
     expiry_info = _select_expiry(strategy.expiry_interval, surface)
     if expiry_info === nothing
-        strategy.debug && println("No entry: no valid expiry for timestamp=$(surface.timestamp)")
+        @debug "No entry: no valid expiry for timestamp=$(surface.timestamp)"
         return Position[]
     end
     expiry = expiry_info[1]
@@ -69,14 +65,14 @@ function entry_positions(
 
     selector_result = strategy.strike_selector(ctx)
     if selector_result === nothing
-        strategy.debug && println("No entry: invalid condor strikes (timestamp=$(surface.timestamp), spot=$(surface.spot))")
+        @debug "No entry: invalid condor strikes (timestamp=$(surface.timestamp), spot=$(surface.spot))"
         return Position[]
     end
     sp_K, sc_K, lp_K, lc_K = selector_result
 
     quantity = strategy.sizer(ctx)
     if quantity <= 0.0
-        strategy.debug && println("No entry: sizer returned q=$(quantity) (timestamp=$(surface.timestamp))")
+        @debug "No entry: sizer returned q=$(quantity) (timestamp=$(surface.timestamp))"
         return Position[]
     end
 
@@ -87,5 +83,5 @@ function entry_positions(
         Trade(surface.underlying, lc_K, expiry, Call; direction=1, quantity=quantity),
     ]
 
-    return _open_positions(trades, surface; debug=strategy.debug)
+    return _open_positions(trades, surface)
 end

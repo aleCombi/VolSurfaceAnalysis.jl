@@ -107,7 +107,7 @@ function run_symbol(symbol, spot_sym, mult)
     # Baseline
     baseline_sel = constrained_delta_selector(PUT_DELTA, CALL_DELTA;
         rate=RATE, div_yield=DIV_YIELD, max_loss=scaled_ml,
-        max_spread_rel=MAX_SPREAD_REL, min_delta_gap=MIN_DELTA_GAP)
+        max_spread_rel=MAX_SPREAD_REL)
 
     bm = performance_metrics(backtest_strategy(
         IronCondorStrategy(test_sched, EXPIRY_INTERVAL, baseline_sel), source))

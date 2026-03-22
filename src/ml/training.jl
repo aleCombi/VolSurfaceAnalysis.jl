@@ -139,7 +139,6 @@ function _enumerate_condor_candidates(
     candidate_features::Vector{<:CandidateFeature};
     rate::Float64=0.0,
     div_yield::Float64=0.0,
-    wing_objective::Symbol=:roi,
     max_spread_rel::Float64=Inf,
     wing_kwargs...
 )
@@ -155,12 +154,10 @@ function _enumerate_condor_candidates(
 
         _check_short_spreads(ctx, sp_K, sc_K, max_spread_rel) || continue
 
-        wings = _condor_wings_by_objective(
+        wings = _select_condor_wings(
             ctx, sp_K, sc_K;
-            objective=wing_objective,
-            rate=rate,
-            div_yield=div_yield,
-            wing_kwargs...
+            max_spread_rel=max_spread_rel,
+            rate=rate, div_yield=div_yield, wing_kwargs...
         )
         wings === nothing && continue
         lp_K, lc_K = wings
@@ -185,8 +182,7 @@ candidate condors from a delta grid. Uses `each_entry` for the timestamp/expiry 
 - `utility`: label function `(pnl, max_loss) -> Float64` (default `roi_utility`)
 - `surface_features`: vector of `Feature` instances
 - `candidate_features`: vector of `CandidateFeature` instances
-- `wing_objective`: objective for wing selection (default `:roi`)
-- `wing_kwargs...`: passed to `_condor_wings_by_objective`
+- `wing_kwargs...`: passed to `_select_condor_wings`
 """
 function generate_training_data(
     source::BacktestDataSource,
@@ -198,7 +194,6 @@ function generate_training_data(
     utility=roi_utility,
     surface_features::Vector{<:Feature}=default_surface_features(; rate, div_yield),
     candidate_features::Vector{<:CandidateFeature}=default_candidate_features(; rate, div_yield),
-    wing_objective::Symbol=:roi,
     wing_kwargs...
 )
     examples = TrainingExample[]
@@ -212,7 +207,7 @@ function generate_training_data(
 
         candidates = _enumerate_condor_candidates(
             ctx, delta_grid, candidate_features;
-            rate=rate, div_yield=div_yield, wing_objective=wing_objective, wing_kwargs...
+            rate=rate, div_yield=div_yield, wing_kwargs...
         )
 
         for ((sp_K, sc_K, lp_K, lc_K), cf_vec) in candidates
@@ -310,7 +305,7 @@ Search delta_pairs for the condor with highest utility. Returns the best
 """
 function _best_delta_pair(
     ctx::StrikeSelectionContext, delta_pairs, settlement::Float64, utility;
-    rate::Float64=0.0, div_yield::Float64=0.0, wing_objective::Symbol=:roi, wing_kwargs...
+    rate::Float64=0.0, div_yield::Float64=0.0, wing_kwargs...
 )
     best_utility = -Inf
     best_pd = 0.0
@@ -323,9 +318,9 @@ function _best_delta_pair(
         shorts === nothing && continue
         sp_K, sc_K = shorts
 
-        wings = _condor_wings_by_objective(
+        wings = _select_condor_wings(
             ctx, sp_K, sc_K;
-            objective=wing_objective, rate=rate, div_yield=div_yield, wing_kwargs...
+            rate=rate, div_yield=div_yield, wing_kwargs...
         )
         wings === nothing && continue
         lp_K, lc_K = wings
@@ -356,9 +351,8 @@ all candidate condors, evaluate their ROI, and record the delta pair of the best
 - `rate`, `div_yield`: pricing parameters
 - `utility`: label function `(pnl, max_loss) -> Float64` (default `roi_utility`)
 - `surface_features`: vector of `Feature` instances
-- `wing_objective`: objective for wing selection (default `:roi`)
 - `symmetric`: if true, only consider pd == cd pairs (1D search) (default false)
-- `wing_kwargs...`: passed to `_condor_wings_by_objective`
+- `wing_kwargs...`: passed to `_select_condor_wings`
 """
 function generate_delta_training_data(
     source::BacktestDataSource,
@@ -369,7 +363,6 @@ function generate_delta_training_data(
     div_yield::Float64=0.0,
     utility=roi_utility,
     surface_features::Vector{<:Feature}=default_surface_features(; rate, div_yield),
-    wing_objective::Symbol=:roi,
     symmetric::Bool=false,
     wing_kwargs...
 )
@@ -386,7 +379,7 @@ function generate_delta_training_data(
         sf_vec === nothing && return
 
         best = _best_delta_pair(ctx, delta_pairs, Float64(settlement), utility;
-            rate=rate, div_yield=div_yield, wing_objective=wing_objective, wing_kwargs...)
+            rate=rate, div_yield=div_yield, wing_kwargs...)
         best === nothing && return
 
         push!(examples, DeltaTrainingExample(sf_vec, Float32(best[1]), Float32(best[2])))

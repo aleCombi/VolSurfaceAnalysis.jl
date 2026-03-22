@@ -163,10 +163,10 @@ function (sel::DirectDeltaSelector)(ctx::StrikeSelectionContext)
     _check_short_spreads(ctx, sp_K, sc_K, sel.max_spread_rel) || return nothing
 
     # 5. Select wings
-    wings = _condor_wings_by_objective(
+    wings = _select_condor_wings(
         ctx, sp_K, sc_K;
-        objective=:roi,
-        max_loss_max=sel.max_loss,
+        max_loss=sel.max_loss,
+        max_spread_rel=sel.max_spread_rel,
         rate=sel.rate,
         div_yield=sel.div_yield
     )
