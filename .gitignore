@@ -1,4 +1,4 @@
 Manifest*.toml
-scratch/plots/
+scratch/
 /data/
 scripts/runs/
