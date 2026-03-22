@@ -3,6 +3,9 @@
 # Creates a small neural network that predicts utility (e.g., ROI) for a
 # candidate condor given surface + candidate features.
 
+"""Normalize features: `(x .- means) ./ max.(stds, ε)`. Works on vectors or matrices."""
+_normalize(x, means, stds) = (x .- means) ./ max.(stds, Float32(1e-8))
+
 """
     create_scoring_model(; input_dim, hidden_dims=[64, 32])
 
@@ -47,9 +50,7 @@ function score_candidates(
     sf_matrix = repeat(surface_feats, 1, n_candidates)
     features = vcat(sf_matrix, candidate_feats_matrix)
 
-    # Normalize
-    safe_stds = max.(feature_stds, Float32(1e-8))
-    normalized = (features .- feature_means) ./ safe_stds
+    normalized = _normalize(features, feature_means, feature_stds)
 
     # Forward pass
     scores = model(normalized)

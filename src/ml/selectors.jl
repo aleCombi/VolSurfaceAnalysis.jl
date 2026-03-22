@@ -145,8 +145,7 @@ function (sel::DirectDeltaSelector)(ctx::StrikeSelectionContext)
     sf_vec === nothing && return nothing
 
     # 2. Normalize and predict deltas
-    safe_stds = max.(sel.feature_stds, Float32(1e-8))
-    x_norm = (sf_vec .- sel.feature_means) ./ safe_stds
+    x_norm = _normalize(sf_vec, sel.feature_means, sel.feature_stds)
     raw_output = vec(sel.model(reshape(x_norm, :, 1)))
 
     # Clamp to valid delta range
@@ -234,8 +233,7 @@ end
 function (s::MLSizer)(ctx::StrikeSelectionContext)::Float64
     sf_vec = extract_surface_features(ctx, s.surface_features)
     sf_vec === nothing && return 0.0
-    safe_stds = max.(s.feature_stds, Float32(1e-8))
-    x_norm = (sf_vec .- s.feature_means) ./ safe_stds
+    x_norm = _normalize(sf_vec, s.feature_means, s.feature_stds)
     predicted = Float64(vec(s.model(reshape(x_norm, :, 1)))[1])
     return s.policy(predicted)
 end

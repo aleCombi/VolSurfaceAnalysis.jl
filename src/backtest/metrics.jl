@@ -3,6 +3,18 @@
 
 using Dates
 using Statistics
+
+"""Default grouping key for positions: `(entry_timestamp, expiry)`."""
+const DEFAULT_POSITION_KEY = pos -> (pos.entry_timestamp, pos.trade.expiry)
+
+"""Group positions by key into `Dict{Any, Vector{Position}}`."""
+function _group_positions(positions::Vector{Position}; key::Function=DEFAULT_POSITION_KEY)
+    groups = Dict{Any,Vector{Position}}()
+    for pos in positions
+        push!(get!(groups, key(pos), Position[]), pos)
+    end
+    return groups
+end
 using DataFrames
 using Printf
 
@@ -70,7 +82,7 @@ Missing P&L entries are skipped and counted.
 function aggregate_pnl(
     positions::Vector{Position},
     pnls::Vector{Union{Missing,Float64}};
-    key::Function = pos -> (pos.entry_timestamp, pos.trade.expiry)
+    key::Function = DEFAULT_POSITION_KEY
 )
     pnl_by_key = Dict{Any,Float64}()
     missing_count = 0
@@ -164,13 +176,9 @@ Only groups that can be parsed as condors and have positive max loss are include
 """
 function condor_max_loss_by_key(
     positions::Vector{Position};
-    key::Function = pos -> (pos.entry_timestamp, pos.trade.expiry)
+    key::Function = DEFAULT_POSITION_KEY
 )::Dict{Any,Float64}
-    groups = Dict{Any,Vector{Position}}()
-    for pos in positions
-        k = key(pos)
-        push!(get!(groups, k, Position[]), pos)
-    end
+    groups = _group_positions(positions; key=key)
 
     margin_by_key = Dict{Any,Float64}()
     for (k, group_positions) in groups
@@ -248,7 +256,7 @@ function performance_metrics(
     margin_per_trade::Union{Nothing,Float64}=nothing,
     margin_by_key::Union{Nothing,AbstractDict}=nothing,
     annualization::Int=252,
-    key::Function = pos -> (pos.entry_timestamp, pos.trade.expiry)
+    key::Function = DEFAULT_POSITION_KEY
 )::PerformanceMetrics
     pnl_by_key = Dict{Any,Float64}()
     date_by_key = Dict{Any,Date}()
@@ -449,15 +457,11 @@ Build a per-condor trade table with P&L and max loss metrics.
 function condor_trade_table(
     positions::Vector{Position},
     pnls::Vector{Union{Missing,Float64}};
-    key::Function = pos -> (pos.entry_timestamp, pos.trade.expiry)
+    key::Function = DEFAULT_POSITION_KEY
 )::DataFrame
     pnl_by_key, _ = aggregate_pnl(positions, pnls; key=key)
 
-    groups = Dict{Any,Vector{Position}}()
-    for pos in positions
-        k = key(pos)
-        push!(get!(groups, k, Position[]), pos)
-    end
+    groups = _group_positions(positions; key=key)
 
     rows = DataFrame(
         EntryTimestamp=DateTime[],
@@ -536,7 +540,7 @@ sorted by entry date.
 function pnl_results_dataframe(
     positions::Vector{Position},
     pnls::Vector{Union{Missing,Float64}};
-    key::Function = pos -> (pos.entry_timestamp, pos.trade.expiry)
+    key::Function = DEFAULT_POSITION_KEY
 )::DataFrame
     pnl_by_key, _ = aggregate_pnl(positions, pnls; key=key)
     realized_keys = sort(collect(keys(pnl_by_key)); by=k -> k[1])

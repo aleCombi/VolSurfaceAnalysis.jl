@@ -80,6 +80,37 @@ risk_adjusted_utility(λ::Float64=1.0) = (pnl::Float64, max_loss::Float64) -> be
 end
 
 # =============================================================================
+# Shared condor settlement helper
+# =============================================================================
+
+"""
+    _settle_condor(ctx, sp_K, sc_K, lp_K, lc_K, settlement) -> NamedTuple | nothing
+
+Build 4 condor trades, open positions, settle, and compute credit/max_loss.
+Returns `nothing` if positions can't be opened.
+Returns `(pnl, credit, max_loss)` otherwise — caller decides whether to filter on max_loss.
+"""
+function _settle_condor(
+    ctx::StrikeSelectionContext, sp_K, sc_K, lp_K, lc_K, settlement::Float64
+)
+    trades = Trade[
+        Trade(ctx.surface.underlying, sp_K, ctx.expiry, Put;  direction=-1, quantity=1.0),
+        Trade(ctx.surface.underlying, sc_K, ctx.expiry, Call; direction=-1, quantity=1.0),
+        Trade(ctx.surface.underlying, lp_K, ctx.expiry, Put;  direction=1, quantity=1.0),
+        Trade(ctx.surface.underlying, lc_K, ctx.expiry, Call; direction=1, quantity=1.0),
+    ]
+
+    positions = _open_positions(trades, ctx.surface)
+    isempty(positions) && return nothing
+
+    pnl = settle(positions, settlement)
+    credit = -sum(entry_cost(p) for p in positions)
+    max_loss = max(sp_K - lp_K, lc_K - sc_K) - credit
+
+    return (pnl=pnl, credit=credit, max_loss=max_loss)
+end
+
+# =============================================================================
 # Training data
 # =============================================================================
 
@@ -201,27 +232,11 @@ function generate_training_data(
         )
 
         for ((sp_K, sc_K, lp_K, lc_K), cf_vec) in candidates
-            # Build trades and open positions
-            trades = Trade[
-                Trade(ctx.surface.underlying, sp_K, ctx.expiry, Put; direction=-1, quantity=1.0),
-                Trade(ctx.surface.underlying, sc_K, ctx.expiry, Call; direction=-1, quantity=1.0),
-                Trade(ctx.surface.underlying, lp_K, ctx.expiry, Put; direction=1, quantity=1.0),
-                Trade(ctx.surface.underlying, lc_K, ctx.expiry, Call; direction=1, quantity=1.0),
-            ]
+            result = _settle_condor(ctx, sp_K, sc_K, lp_K, lc_K, Float64(settlement))
+            result === nothing && continue
+            result.max_loss <= 0.0 && continue
 
-            positions = _open_positions(trades, ctx.surface)
-            isempty(positions) && continue
-
-            pnl = settle(positions, Float64(settlement))
-
-            # Compute max loss from spread widths and credit
-            put_spread_width = (sp_K - lp_K)
-            call_spread_width = (lc_K - sc_K)
-            credit = -sum(entry_cost(p) for p in positions)
-            max_loss = max(put_spread_width, call_spread_width) - credit
-            max_loss <= 0.0 && continue
-
-            label = utility(pnl, max_loss)
+            label = utility(result.pnl, result.max_loss)
             push!(examples, TrainingExample(sf_vec, cf_vec, Float32(label)))
         end
     end
@@ -279,19 +294,10 @@ function generate_sizing_training_data(
         selector_result === nothing && return
         sp_K, sc_K, lp_K, lc_K = selector_result
 
-        # Build trades and open positions
-        trades = Trade[
-            Trade(ctx.surface.underlying, sp_K, ctx.expiry, Put; direction=-1, quantity=1.0),
-            Trade(ctx.surface.underlying, sc_K, ctx.expiry, Call; direction=-1, quantity=1.0),
-            Trade(ctx.surface.underlying, lp_K, ctx.expiry, Put; direction=1, quantity=1.0),
-            Trade(ctx.surface.underlying, lc_K, ctx.expiry, Call; direction=1, quantity=1.0),
-        ]
+        result = _settle_condor(ctx, sp_K, sc_K, lp_K, lc_K, Float64(settlement))
+        result === nothing && return
 
-        positions = _open_positions(trades, ctx.surface)
-        isempty(positions) && return
-
-        pnl = settle(positions, Float64(settlement))
-        push!(examples, SizingTrainingExample(sf_vec, Float32(pnl)))
+        push!(examples, SizingTrainingExample(sf_vec, Float32(result.pnl)))
     end
 
     return examples
@@ -310,6 +316,49 @@ struct DeltaTrainingExample
     surface_features::Vector{Float32}
     put_delta::Float32
     call_delta::Float32
+end
+
+"""
+    _best_delta_pair(ctx, delta_pairs, settlement, utility; kwargs...) -> (pd, cd) | nothing
+
+Search delta_pairs for the condor with highest utility. Returns the best
+(put_delta, call_delta) or `nothing` if no valid condor found.
+"""
+function _best_delta_pair(
+    ctx::StrikeSelectionContext, delta_pairs, settlement::Float64, utility;
+    rate::Float64=0.0, div_yield::Float64=0.0, wing_objective::Symbol=:roi, wing_kwargs...
+)
+    best_utility = -Inf
+    best_pd = 0.0
+    best_cd = 0.0
+
+    for (pd, cd) in delta_pairs
+        shorts = _delta_strangle_strikes_asymmetric(
+            ctx, Float64(pd), Float64(cd); rate=rate, div_yield=div_yield
+        )
+        shorts === nothing && continue
+        sp_K, sc_K = shorts
+
+        wings = _condor_wings_by_objective(
+            ctx, sp_K, sc_K;
+            objective=wing_objective, rate=rate, div_yield=div_yield, wing_kwargs...
+        )
+        wings === nothing && continue
+        lp_K, lc_K = wings
+
+        result = _settle_condor(ctx, sp_K, sc_K, lp_K, lc_K, settlement)
+        result === nothing && continue
+        result.max_loss <= 0.0 && continue
+
+        u = utility(result.pnl, result.max_loss)
+        if u > best_utility
+            best_utility = u
+            best_pd = pd
+            best_cd = cd
+        end
+    end
+
+    return isfinite(best_utility) ? (best_pd, best_cd) : nothing
 end
 
 """
@@ -349,61 +398,14 @@ function generate_delta_training_data(
     each_entry(source, expiry_interval, schedule) do ctx, settlement
         ismissing(settlement) && return
 
-        # Extract surface features (handles multi-output features like SpotLogSig)
         sf_vec = extract_surface_features(ctx, surface_features)
         sf_vec === nothing && return
 
-        best_utility = -Inf
-        best_pd = 0.0
-        best_cd = 0.0
+        best = _best_delta_pair(ctx, delta_pairs, Float64(settlement), utility;
+            rate=rate, div_yield=div_yield, wing_objective=wing_objective, wing_kwargs...)
+        best === nothing && return
 
-        for (pd, cd) in delta_pairs
-            shorts = _delta_strangle_strikes_asymmetric(
-                ctx, Float64(pd), Float64(cd); rate=rate, div_yield=div_yield
-            )
-            shorts === nothing && continue
-            sp_K, sc_K = shorts
-
-            wings = _condor_wings_by_objective(
-                ctx, sp_K, sc_K;
-                objective=wing_objective,
-                rate=rate,
-                div_yield=div_yield,
-                wing_kwargs...
-            )
-            wings === nothing && continue
-            lp_K, lc_K = wings
-
-            # Build trades and open positions
-            trades = Trade[
-                Trade(ctx.surface.underlying, sp_K, ctx.expiry, Put; direction=-1, quantity=1.0),
-                Trade(ctx.surface.underlying, sc_K, ctx.expiry, Call; direction=-1, quantity=1.0),
-                Trade(ctx.surface.underlying, lp_K, ctx.expiry, Put; direction=1, quantity=1.0),
-                Trade(ctx.surface.underlying, lc_K, ctx.expiry, Call; direction=1, quantity=1.0),
-            ]
-
-            positions = _open_positions(trades, ctx.surface)
-            isempty(positions) && continue
-
-            pnl = settle(positions, Float64(settlement))
-
-            put_spread_width = (sp_K - lp_K)
-            call_spread_width = (lc_K - sc_K)
-            credit = -sum(entry_cost(p) for p in positions)
-            max_loss = max(put_spread_width, call_spread_width) - credit
-            max_loss <= 0.0 && continue
-
-            u = utility(pnl, max_loss)
-            if u > best_utility
-                best_utility = u
-                best_pd = pd
-                best_cd = cd
-            end
-        end
-
-        if isfinite(best_utility)
-            push!(examples, DeltaTrainingExample(sf_vec, Float32(best_pd), Float32(best_cd)))
-        end
+        push!(examples, DeltaTrainingExample(sf_vec, Float32(best[1]), Float32(best[2])))
     end
 
     return examples
@@ -458,10 +460,9 @@ function train_model!(
 
     feature_means = vec(mean(X_train; dims=2))
     feature_stds = vec(std(X_train; dims=2))
-    safe_stds = max.(feature_stds, Float32(1e-8))
 
-    X_train_norm = (X_train .- feature_means) ./ safe_stds
-    X_val_norm = (X_val .- feature_means) ./ safe_stds
+    X_train_norm = _normalize(X_train, feature_means, feature_stds)
+    X_val_norm = _normalize(X_val, feature_means, feature_stds)
 
     W_train = sample_weight_fn !== nothing ?
         sample_weight_fn(Y_train) : ones(Float32, size(Y_train))
