@@ -73,7 +73,7 @@ function (sel::ScoredCandidateSelector)(ctx::StrikeSelectionContext)
         ctx, sel.delta_grid, sel.candidate_features;
         rate=sel.rate, div_yield=sel.div_yield,
         max_spread_rel=sel.max_spread_rel,
-        max_loss_max=sel.max_loss
+        max_loss=sel.max_loss
     )
     isempty(candidates) && return nothing
 

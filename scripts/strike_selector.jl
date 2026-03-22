@@ -98,8 +98,7 @@ examples = generate_training_data(
     utility=roi_utility,
     surface_features=sf,
     candidate_features=cf,
-    wing_objective=:roi,
-    max_loss_max=MAX_LOSS
+    max_loss=MAX_LOSS
 )
 println("  $(length(examples)) training examples generated")
 
