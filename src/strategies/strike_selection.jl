@@ -1,6 +1,18 @@
 # Strike selection primitives and selector factories for iron condors.
 
 # =============================================================================
+# Price extraction helper
+# =============================================================================
+
+"""Extract bid or ask price from record, falling back to mark_price. Returns `nothing` if neither available."""
+function _extract_price(rec, side::Symbol)
+    primary = side == :bid ? rec.bid_price : rec.ask_price
+    !ismissing(primary) && return primary
+    !ismissing(rec.mark_price) && return rec.mark_price
+    return nothing
+end
+
+# =============================================================================
 # StrikeSelectionContext
 # =============================================================================
 
@@ -335,21 +347,10 @@ function _condor_wings_by_objective(
     short_call_rec = _find_rec_by_strike(call_recs, short_call_K)
     (short_put_rec === nothing || short_call_rec === nothing) && return nothing
 
-    short_put_price = if !ismissing(short_put_rec.bid_price)
-        short_put_rec.bid_price
-    elseif !ismissing(short_put_rec.mark_price)
-        short_put_rec.mark_price
-    else
-        return nothing
-    end
-
-    short_call_price = if !ismissing(short_call_rec.bid_price)
-        short_call_rec.bid_price
-    elseif !ismissing(short_call_rec.mark_price)
-        short_call_rec.mark_price
-    else
-        return nothing
-    end
+    short_put_price = _extract_price(short_put_rec, :bid)
+    short_put_price === nothing && return nothing
+    short_call_price = _extract_price(short_call_rec, :bid)
+    short_call_price === nothing && return nothing
 
     long_put_candidates = filter(r -> r.strike < short_put_K &&
                                       (!ismissing(r.ask_price) || !ismissing(r.mark_price)),
@@ -384,21 +385,10 @@ function _condor_wings_by_objective(
 
     for long_put_rec in long_put_candidates
         for long_call_rec in long_call_candidates
-            long_put_price = if !ismissing(long_put_rec.ask_price)
-                long_put_rec.ask_price
-            elseif !ismissing(long_put_rec.mark_price)
-                long_put_rec.mark_price
-            else
-                continue
-            end
-
-            long_call_price = if !ismissing(long_call_rec.ask_price)
-                long_call_rec.ask_price
-            elseif !ismissing(long_call_rec.mark_price)
-                long_call_rec.mark_price
-            else
-                continue
-            end
+            long_put_price = _extract_price(long_put_rec, :ask)
+            long_put_price === nothing && continue
+            long_call_price = _extract_price(long_call_rec, :ask)
+            long_call_price === nothing && continue
 
             put_spread_width = (short_put_K - long_put_rec.strike) / spot
             call_spread_width = (long_call_rec.strike - short_call_K) / spot
@@ -599,6 +589,19 @@ function _relative_spread(rec::OptionRecord)::Union{Nothing,Float64}
     mid = (bid + ask) / 2.0
     mid <= 0.0 && return nothing
     return (ask - bid) / mid
+end
+
+"""Check that short leg bid-ask spreads are within `max_spread_rel`. Returns `false` if any leg exceeds the threshold."""
+function _check_short_spreads(ctx::StrikeSelectionContext, sp_K, sc_K, max_spread_rel)
+    isfinite(max_spread_rel) || return true
+    recs = _ctx_recs(ctx)
+    for (opt_type, strike) in ((Put, sp_K), (Call, sc_K))
+        rec = _find_rec_by_strike(filter(r -> r.option_type == opt_type, recs), strike)
+        rec === nothing && continue
+        spread = _relative_spread(rec)
+        spread !== nothing && spread > max_spread_rel && return false
+    end
+    return true
 end
 
 # =============================================================================

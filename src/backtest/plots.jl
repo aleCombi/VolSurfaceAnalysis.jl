@@ -3,6 +3,13 @@
 
 using Dates
 using Plots
+
+"""Save a plot to `path`, creating directories as needed. Returns `path`."""
+function _save_plot(p, path::AbstractString)
+    mkpath(dirname(path))
+    savefig(p, path)
+    return path
+end
 using Statistics
 
 function _clean_pnls(pnls)::Vector{Float64}
@@ -42,9 +49,7 @@ function save_pnl_distribution(
     )
     vline!(p, [0], color=:red, linestyle=:dash, label="Breakeven", linewidth=2)
 
-    mkpath(dirname(path))
-    savefig(p, path)
-    return path
+    return _save_plot(p, path)
 end
 
 """
@@ -74,9 +79,7 @@ function save_equity_curve(
         legend=:topleft
     )
 
-    mkpath(dirname(path))
-    savefig(p, path)
-    return path
+    return _save_plot(p, path)
 end
 
 """
@@ -106,9 +109,7 @@ function save_profit_curve(
     )
     hline!(p, [0], color=:black, linestyle=:dash, label="", linewidth=1)
 
-    mkpath(dirname(path))
-    savefig(p, path)
-    return path
+    return _save_plot(p, path)
 end
 
 """
@@ -139,9 +140,7 @@ function save_spot_curve(
         legend=:topleft
     )
 
-    mkpath(dirname(path))
-    savefig(p, path)
-    return path
+    return _save_plot(p, path)
 end
 
 """
@@ -188,7 +187,5 @@ function save_pnl_and_equity_curve(
 
     p = plot(p_eq, p_dist, layout=(2, 1), size=(800, 800), margin=5Plots.mm)
 
-    mkpath(dirname(path))
-    savefig(p, path)
-    return path
+    return _save_plot(p, path)
 end

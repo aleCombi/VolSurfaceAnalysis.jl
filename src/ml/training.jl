@@ -153,23 +153,7 @@ function _enumerate_condor_candidates(
         shorts === nothing && continue
         sp_K, sc_K = shorts
 
-        # Optional spread filter on short legs
-        if isfinite(max_spread_rel)
-            put_recs = filter(r -> r.option_type == Put, recs)
-            call_recs = filter(r -> r.option_type == Call, recs)
-            sp_rec = _find_rec_by_strike(put_recs, sp_K)
-            sc_rec = _find_rec_by_strike(call_recs, sc_K)
-            skip = false
-            for rec in (sp_rec, sc_rec)
-                rec === nothing && continue
-                spread = _relative_spread(rec)
-                if spread !== nothing && spread > max_spread_rel
-                    skip = true
-                    break
-                end
-            end
-            skip && continue
-        end
+        _check_short_spreads(ctx, sp_K, sc_K, max_spread_rel) || continue
 
         wings = _condor_wings_by_objective(
             ctx, sp_K, sc_K;

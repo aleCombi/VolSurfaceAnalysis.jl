@@ -102,72 +102,23 @@ function vol_to_price(record::OptionRecord)::Union{Float64,Missing}
     return vol_to_price(σ, F, K, T, record.option_type; r=r)
 end
 
-"""
-    price_to_iv(record::OptionRecord) -> Union{Float64, Missing}
-
-Convert an OptionRecord's mark_price to implied volatility.
-Returns missing if mark_price is missing.
-
-"""
-function price_to_iv(record::OptionRecord)::Union{Float64,Missing}
-    ismissing(record.mark_price) && return missing
-
-    price = record.mark_price
-    F = record.spot
-    K = record.strike
+"""Compute IV from a price and record. Returns `missing` if price is missing or IV fails."""
+function _iv_from_price(price, record::OptionRecord)::Union{Float64,Missing}
+    ismissing(price) && return missing
     T = time_to_expiry(record.expiry, record.timestamp)
-
-    if T <= 0.0
-        return missing
-    end
-
-    σ = price_to_iv(price, F, K, T, record.option_type)
-    return isnan(σ) ? missing : σ
+    T <= 0.0 && return missing
+    σ = price_to_iv(price, record.spot, record.strike, T, record.option_type)
+    isnan(σ) ? missing : σ
 end
 
-"""
-    bid_iv(record::OptionRecord) -> Union{Float64, Missing}
+"""Convert an OptionRecord's mark_price to implied volatility."""
+price_to_iv(record::OptionRecord) = _iv_from_price(record.mark_price, record)
 
-Compute implied volatility from an OptionRecord's bid_price.
-Returns missing if bid_price is missing or IV cannot be computed.
-"""
-function bid_iv(record::OptionRecord)::Union{Float64,Missing}
-    ismissing(record.bid_price) && return missing
+"""Compute implied volatility from an OptionRecord's bid_price."""
+bid_iv(record::OptionRecord) = _iv_from_price(record.bid_price, record)
 
-    price = record.bid_price
-    F = record.spot
-    K = record.strike
-    T = time_to_expiry(record.expiry, record.timestamp)
-
-    if T <= 0.0
-        return missing
-    end
-
-    σ = price_to_iv(price, F, K, T, record.option_type)
-    return isnan(σ) ? missing : σ
-end
-
-"""
-    ask_iv(record::OptionRecord) -> Union{Float64, Missing}
-
-Compute implied volatility from an OptionRecord's ask_price.
-Returns missing if ask_price is missing or IV cannot be computed.
-"""
-function ask_iv(record::OptionRecord)::Union{Float64,Missing}
-    ismissing(record.ask_price) && return missing
-
-    price = record.ask_price
-    F = record.spot
-    K = record.strike
-    T = time_to_expiry(record.expiry, record.timestamp)
-
-    if T <= 0.0
-        return missing
-    end
-
-    σ = price_to_iv(price, F, K, T, record.option_type)
-    return isnan(σ) ? missing : σ
-end
+"""Compute implied volatility from an OptionRecord's ask_price."""
+ask_iv(record::OptionRecord) = _iv_from_price(record.ask_price, record)
 
 # ============================================================================
 # Surface Building

@@ -134,11 +134,17 @@ end
 RiskReversal(delta::Float64; rate::Float64=0.0, div_yield::Float64=0.0) =
     RiskReversal(delta, rate, div_yield)
 
-function (f::RiskReversal)(ctx::StrikeSelectionContext)::Union{Float64,Nothing}
-    call_skew = DeltaSkew(f.delta, :call; rate=f.rate, div_yield=f.div_yield)(ctx)
-    put_skew = DeltaSkew(f.delta, :put; rate=f.rate, div_yield=f.div_yield)(ctx)
+"""Compute (call_skew, put_skew) at a given delta. Returns `nothing` if either side fails."""
+function _dual_skew(ctx::StrikeSelectionContext, delta, rate, div_yield)
+    call_skew = DeltaSkew(delta, :call; rate=rate, div_yield=div_yield)(ctx)
+    put_skew = DeltaSkew(delta, :put; rate=rate, div_yield=div_yield)(ctx)
     (call_skew === nothing || put_skew === nothing) && return nothing
-    return call_skew - put_skew
+    return (call_skew, put_skew)
+end
+
+function (f::RiskReversal)(ctx::StrikeSelectionContext)::Union{Float64,Nothing}
+    s = _dual_skew(ctx, f.delta, f.rate, f.div_yield)
+    s === nothing ? nothing : s[1] - s[2]
 end
 
 """Butterfly: average of put and call skew at a given delta."""
@@ -151,10 +157,8 @@ Butterfly(delta::Float64; rate::Float64=0.0, div_yield::Float64=0.0) =
     Butterfly(delta, rate, div_yield)
 
 function (f::Butterfly)(ctx::StrikeSelectionContext)::Union{Float64,Nothing}
-    call_skew = DeltaSkew(f.delta, :call; rate=f.rate, div_yield=f.div_yield)(ctx)
-    put_skew = DeltaSkew(f.delta, :put; rate=f.rate, div_yield=f.div_yield)(ctx)
-    (call_skew === nothing || put_skew === nothing) && return nothing
-    return (put_skew + call_skew) / 2.0
+    s = _dual_skew(ctx, f.delta, f.rate, f.div_yield)
+    s === nothing ? nothing : (s[2] + s[1]) / 2.0
 end
 
 """ATM IV slope across expiries (term structure slope)."""
@@ -513,6 +517,19 @@ const DEFAULT_SURFACE_FEATURES = default_surface_features()
 # Candidate features
 # =============================================================================
 
+"""Compute absolute delta for a single leg given option type and strike."""
+function _short_leg_delta(ctx::StrikeSelectionContext, opt_type::OptionType, strike_K, rate, div_yield)
+    tau = _ctx_tau(ctx)
+    tau <= 0.0 && return nothing
+    recs = _ctx_recs(ctx)
+    F = ctx.surface.spot * exp((rate - div_yield) * tau)
+    rec = _find_rec_by_strike(filter(r -> r.option_type == opt_type, recs), Float64(strike_K))
+    rec === nothing && return nothing
+    d = _delta_from_record(rec, F, tau, rate)
+    d === missing && return nothing
+    return abs(d)
+end
+
 """Absolute delta of the short put leg."""
 struct ShortPutDelta <: CandidateFeature
     rate::Float64
@@ -520,17 +537,8 @@ struct ShortPutDelta <: CandidateFeature
 end
 ShortPutDelta(; rate::Float64=0.0, div_yield::Float64=0.0) = ShortPutDelta(rate, div_yield)
 
-function (f::ShortPutDelta)(ctx::StrikeSelectionContext, sp_K, sc_K, lp_K, lc_K)::Union{Float64,Nothing}
-    tau = _ctx_tau(ctx)
-    tau <= 0.0 && return nothing
-    recs = _ctx_recs(ctx)
-    F = ctx.surface.spot * exp((f.rate - f.div_yield) * tau)
-    rec = _find_rec_by_strike(filter(r -> r.option_type == Put, recs), Float64(sp_K))
-    rec === nothing && return nothing
-    d = _delta_from_record(rec, F, tau, f.rate)
-    d === missing && return nothing
-    return abs(d)
-end
+(f::ShortPutDelta)(ctx::StrikeSelectionContext, sp_K, sc_K, lp_K, lc_K) =
+    _short_leg_delta(ctx, Put, sp_K, f.rate, f.div_yield)
 
 """Absolute delta of the short call leg."""
 struct ShortCallDelta <: CandidateFeature
@@ -539,17 +547,8 @@ struct ShortCallDelta <: CandidateFeature
 end
 ShortCallDelta(; rate::Float64=0.0, div_yield::Float64=0.0) = ShortCallDelta(rate, div_yield)
 
-function (f::ShortCallDelta)(ctx::StrikeSelectionContext, sp_K, sc_K, lp_K, lc_K)::Union{Float64,Nothing}
-    tau = _ctx_tau(ctx)
-    tau <= 0.0 && return nothing
-    recs = _ctx_recs(ctx)
-    F = ctx.surface.spot * exp((f.rate - f.div_yield) * tau)
-    rec = _find_rec_by_strike(filter(r -> r.option_type == Call, recs), Float64(sc_K))
-    rec === nothing && return nothing
-    d = _delta_from_record(rec, F, tau, f.rate)
-    d === missing && return nothing
-    return abs(d)
-end
+(f::ShortCallDelta)(ctx::StrikeSelectionContext, sp_K, sc_K, lp_K, lc_K) =
+    _short_leg_delta(ctx, Call, sc_K, f.rate, f.div_yield)
 
 """Net entry credit as fraction of spot."""
 struct EntryCredit <: CandidateFeature end

@@ -258,17 +258,11 @@ function performance_metrics(
     annualization::Int=252,
     key::Function = DEFAULT_POSITION_KEY
 )::PerformanceMetrics
-    pnl_by_key = Dict{Any,Float64}()
-    date_by_key = Dict{Any,Date}()
-    missing_count = 0
+    pnl_by_key, missing_count = aggregate_pnl(positions, pnls; key=key)
 
-    for (pos, pnl) in zip(positions, pnls)
-        if ismissing(pnl)
-            missing_count += 1
-            continue
-        end
+    date_by_key = Dict{Any,Date}()
+    for pos in positions
         k = key(pos)
-        pnl_by_key[k] = get(pnl_by_key, k, 0.0) + pnl
         if !haskey(date_by_key, k)
             date_by_key[k] = Date(pos.entry_timestamp)
         end

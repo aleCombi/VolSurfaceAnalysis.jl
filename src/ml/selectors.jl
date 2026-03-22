@@ -160,21 +160,7 @@ function (sel::DirectDeltaSelector)(ctx::StrikeSelectionContext)
     shorts === nothing && return nothing
     sp_K, sc_K = shorts
 
-    # 4. Optional spread filter
-    if isfinite(sel.max_spread_rel)
-        recs = _ctx_recs(ctx)
-        put_recs = filter(r -> r.option_type == Put, recs)
-        call_recs = filter(r -> r.option_type == Call, recs)
-        sp_rec = _find_rec_by_strike(put_recs, sp_K)
-        sc_rec = _find_rec_by_strike(call_recs, sc_K)
-        for rec in (sp_rec, sc_rec)
-            rec === nothing && continue
-            spread = _relative_spread(rec)
-            if spread !== nothing && spread > sel.max_spread_rel
-                return nothing
-            end
-        end
-    end
+    _check_short_spreads(ctx, sp_K, sc_K, sel.max_spread_rel) || return nothing
 
     # 5. Select wings
     wings = _condor_wings_by_objective(
