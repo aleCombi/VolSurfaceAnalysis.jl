@@ -1,4 +1,4 @@
-/Manifest*.toml
+Manifest*.toml
 scratch/plots/
 /data/
 scripts/runs/
