@@ -49,6 +49,7 @@ julia --project=. -e "using Pkg; Pkg.test()"
   - `ml/model.jl` -- `create_scoring_model` (Flux MLP), `score_candidates`
   - `ml/training.jl` -- `generate_training_data` (uses `each_entry`), `train_scoring_model!`, `roi_utility`, `pnl_utility`
   - `ml/selectors.jl` -- `ScoredCandidateSelector` (enumerate + score candidates), `DirectDeltaSelector` (predict optimal delta), `MLSizer` (ML-modulated trade sizing)
+  - `ml/glmnet.jl` -- `GLMNetModel`, `train_ridge!`, `train_glmnet_classifier!` (ridge/lasso/elastic net via GLMNet.jl, drop-in replacement for Flux models)
 
 ### Key Patterns
 
@@ -59,6 +60,7 @@ julia --project=. -e "using Pkg; Pkg.test()"
 - **IronCondorStrategy**: Takes `(schedule, expiry_interval, strike_selector; sizer=FixedSize(1.0), debug)`. The `sizer` is a callable `f(ctx) -> quantity`. Use `MLSizer(model, means, stds; policy=binary_sizing())` for ML-modulated sizing. Rate/div_yield live in the selector, not the strategy.
 - **Pricing convention**: Prices in `OptionRecord` are fractions of spot (Deribit convention). Multiply by `surface.spot` for USD. The backtest uses bid for sells, ask for buys.
 - **ROI evaluation**: `performance_metrics(result::BacktestResult)` auto-computes condor max loss margin. Also available as `performance_metrics(positions, pnls; margin_by_key=...)` for custom margin.
+- **ML model interface**: Any callable `model(X::Matrix{Float32}) → (1, N)` works with `MLSizer`. Two backends: Flux `Chain` (neural nets) and `GLMNetModel` (ridge/lasso/elastic net). Training: `train_model!`/`train_classifier!` for Flux, `train_ridge!`/`train_glmnet_classifier!` for GLMNet. All return `(model, means, stds, history)`.
 
 ### Data Layout
 
@@ -79,6 +81,7 @@ root/
 Scripts use `scripts/Project.toml` via `Pkg.activate(@__DIR__)`.
 
 - **`scripts/sizing_filter.jl`** -- Configurable experiment runner. Replaces 9 prior scripts by parameterizing symbols, feature sets, and ML variants. Config block at top; supports `Sizing` (binary/linear/sigmoid), `Classifier` (loss prediction + skip), and `DeltaRegression` variants. Shared infrastructure in `scripts/lib/experiment.jl`.
+- **`scripts/cross_symbol_filter.jl`** -- Cross-symbol training experiment. Trains on SPY+QQQ+IWM+SPXW, tests on SPY. Compares regressor vs classifier, detailed tail risk analysis (CVaR, loss severity buckets, filter forensics).
 - **`scripts/strike_selector.jl`** -- Separate: `ScoredCandidateSelector` pipeline (candidate enumeration + scoring), fundamentally different training data generation.
 
 ## Known Technical Debt

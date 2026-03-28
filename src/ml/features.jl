@@ -56,7 +56,7 @@ multi-output features like SpotLogSig.
 function surface_feature_dim(features::Vector{<:Feature})::Int
     dim = 0
     for f in features
-        if f isa SpotLogSig || f isa SpotMinuteLogSig
+        if f isa SpotLogSig || f isa SpotMinuteLogSig || f isa IntradayLogSig
             dim += logsig_dim(f)
         else
             dim += 1
@@ -486,6 +486,195 @@ function (f::SpotMinuteLogSig)(ctx::StrikeSelectionContext)::Union{Vector{Float6
     for i in 1:n
         path[i, 1] = (i - 1) / (n - 1)
         path[i, 2] = log(prices[i] / prices[1])
+    end
+
+    return Vector{Float64}(logsig(path, f.basis))
+end
+
+# =============================================================================
+# Intraday ATM IV path helper
+# =============================================================================
+
+"""
+    BarCache
+
+Per-date cache of option bars grouped by timestamp. Loads the full day's
+parquet once, then slices in Julia for any time range — no repeated DuckDB queries.
+"""
+struct BarCache
+    store::LocalDataStore
+    data::Dict{Tuple{Date, String}, Dict{DateTime, Vector{PolygonBar}}}
+end
+BarCache(store::LocalDataStore) = BarCache(store, Dict{Tuple{Date,String}, Dict{DateTime, Vector{PolygonBar}}}())
+
+function _get_bars(cache::BarCache, date::Date, underlying::Union{Underlying, AbstractString};
+                   spot_hint::Float64=NaN)
+    sym = underlying isa Underlying ? ticker(underlying) : uppercase(String(underlying))
+    key = (date, sym)
+    if !haskey(cache.data, key)
+        path = polygon_options_path(cache.store, date, sym)
+        by_ts = Dict{DateTime, Vector{PolygonBar}}()
+        if isfile(path)
+            open_utc = et_to_utc(date, Time(9, 30))
+            close_utc = et_to_utc(date, Time(16, 0))
+            from_str = Dates.format(open_utc, "yyyy-mm-dd HH:MM:SS")
+            to_str = Dates.format(close_utc, "yyyy-mm-dd HH:MM:SS")
+            where = "timestamp BETWEEN '$from_str' AND '$to_str'"
+            if !isnan(spot_hint) && spot_hint > 0
+                lo = round(spot_hint * 0.995, digits=0)
+                hi = round(spot_hint * 1.005, digits=0)
+                try
+                    for bar in read_polygon_parquet(path;
+                            where=where * " AND parsed_strike BETWEEN $lo AND $hi")
+                        push!(get!(by_ts, bar.timestamp, PolygonBar[]), bar)
+                    end
+                catch  # parsed_strike column missing in older files
+                    empty!(by_ts)
+                    for bar in read_polygon_parquet(path; where=where)
+                        push!(get!(by_ts, bar.timestamp, PolygonBar[]), bar)
+                    end
+                end
+            else
+                for bar in read_polygon_parquet(path; where=where)
+                    push!(get!(by_ts, bar.timestamp, PolygonBar[]), bar)
+                end
+            end
+        end
+        cache.data[key] = by_ts
+    end
+    return cache.data[key]
+end
+
+"""
+    _bulk_atm_iv(cache, underlying, date, spot_dict, from, to; rate, div_yield)
+
+Compute ATM IV at each minute in [from, to] using cached bars. ONE DuckDB read
+per (date, symbol), reused across all entry times on the same date.
+"""
+function _bulk_atm_iv(
+    cache::BarCache,
+    underlying::Union{Underlying, AbstractString},
+    date::Date,
+    spot_dict::Dict{DateTime, Float64},
+    from::DateTime,
+    to::DateTime;
+    rate::Float64=0.0,
+    div_yield::Float64=0.0,
+    spot_hint::Float64=NaN
+)::Dict{DateTime, Float64}
+    all_bars = _get_bars(cache, date, underlying; spot_hint=spot_hint)
+    isempty(all_bars) && return Dict{DateTime, Float64}()
+
+    ivs = Dict{DateTime, Float64}()
+    for (ts, ts_bars) in all_bars
+        (from <= ts <= to) || continue
+        spot = get(spot_dict, ts, nothing)
+        spot === nothing && continue
+
+        # Pick nearest expiry (shortest positive tau)
+        best_tau = Inf
+        best_expiry = DateTime(0)
+        for bar in ts_bars
+            tau = time_to_expiry(bar.expiry, ts)
+            if 0.0 < tau < best_tau
+                best_tau = tau
+                best_expiry = bar.expiry
+            end
+        end
+        best_tau == Inf && continue
+
+        # Find nearest-ATM bar at that expiry
+        best_bar = nothing
+        best_dist = Inf
+        for bar in ts_bars
+            bar.expiry == best_expiry || continue
+            dist = abs(bar.strike - spot)
+            if dist < best_dist
+                best_dist = dist
+                best_bar = bar
+            end
+        end
+        best_bar === nothing && continue
+
+        # IV from close price (close is USD, divide by spot for fraction)
+        mark_price = best_bar.close / spot
+        F = spot * exp((rate - div_yield) * best_tau)
+        iv = price_to_iv(mark_price, F, best_bar.strike, best_tau, best_bar.option_type; r=rate)
+        (isnan(iv) || iv <= 0.0 || iv > 5.0) && continue
+
+        ivs[ts] = iv
+    end
+    return ivs
+end
+
+# =============================================================================
+# Intraday (time, spot, ATM vol) log-signature
+# =============================================================================
+
+const MARKET_OPEN_ET = Time(9, 30)
+
+"""
+    IntradayLogSig(; depth=3, rate=0.0, div_yield=0.0, min_points=20, store=DEFAULT_STORE)
+
+Log-signature of the intraday 2-channel path (spot, ATM implied vol)
+from market open (9:30 ET) to the current entry timestamp.
+
+# Channels
+1. **spot**: cumulative log-return from market open
+2. **ATM vol**: change in ATM IV from market open (IV_t - IV_0)
+
+# What the signature captures
+- Level 1: net spot return, net IV change
+- Level 2: spot-IV cross-area (leverage effect — does vol rise when spot drops?)
+- Level 3: higher-order dynamics of the spot-vol relationship
+
+For depth=3 with 2 channels: **5 components**.
+"""
+struct IntradayLogSig <: Feature
+    depth::Int
+    rate::Float64
+    div_yield::Float64
+    min_points::Int
+    cache::BarCache
+    basis::Any  # ChenSignatures.BasisCache
+end
+
+function IntradayLogSig(; depth::Int=3, rate::Float64=0.0, div_yield::Float64=0.0,
+                          min_points::Int=20, store::LocalDataStore=DEFAULT_STORE)
+    basis = prepare(2, depth)
+    IntradayLogSig(depth, rate, div_yield, min_points, BarCache(store), basis)
+end
+
+logsig_dim(f::IntradayLogSig) = length(f.basis.lynds)
+
+function (f::IntradayLogSig)(ctx::StrikeSelectionContext)::Union{Vector{Float64},Nothing}
+    ts = ctx.surface.timestamp
+    open_utc = et_to_utc(Date(ts), MARKET_OPEN_ET)
+
+    # Minute spots from history (lazy per-date)
+    spot_dict = get_spots(ctx.history, open_utc, ts)
+    isempty(spot_dict) && return nothing
+
+    # ATM IV: cached per (date, symbol), one DuckDB read per date
+    # Pass spot for strike filtering (only load near-ATM bars)
+    iv_dict = _bulk_atm_iv(f.cache, ctx.surface.underlying, Date(ts), spot_dict,
+                           open_utc, ts; rate=f.rate, div_yield=f.div_yield,
+                           spot_hint=ctx.surface.spot)
+    isempty(iv_dict) && return nothing
+
+    # Timestamps where we have both spot and IV
+    common_ts = sort(intersect(collect(keys(spot_dict)), collect(keys(iv_dict))))
+    length(common_ts) < f.min_points && return nothing
+
+    spots = [spot_dict[t] for t in common_ts]
+    ivs = [iv_dict[t] for t in common_ts]
+
+    # Build 2-channel path: (spot_log_return, iv_change)
+    n = length(common_ts)
+    path = Matrix{Float64}(undef, n, 2)
+    for i in 1:n
+        path[i, 1] = log(spots[i] / spots[1])     # cumulative log return
+        path[i, 2] = ivs[i] - ivs[1]              # IV change from open
     end
 
     return Vector{Float64}(logsig(path, f.basis))

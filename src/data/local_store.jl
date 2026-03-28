@@ -14,9 +14,9 @@ All path derivation lives here — change the layout in one place.
 
 # Layout (relative to root)
 ```
-massive_flatfiles/
-  minute_aggs/date={yyyy-mm-dd}/underlying={SYM}/data.parquet   ← Polygon options
-  spot_1min/  date={yyyy-mm-dd}/symbol={SYM}/data.parquet       ← Polygon spot
+massive/
+  options_1min/date={yyyy-mm-dd}/symbol={SYM}/data.parquet      ← Polygon options
+  spots_1min/  date={yyyy-mm-dd}/symbol={SYM}/data.parquet      ← Polygon spot
 deribit_local/
   history/vols_{yyyymmdd}.parquet                                ← Deribit daily
   recent/vols_current.parquet                                    ← Deribit live
@@ -39,13 +39,13 @@ _sym(symbol::AbstractString) = uppercase(String(symbol))
 # that take a directory root and construct date/symbol paths internally)
 # ============================================================================
 
-"""Return the minute_aggs root (parent of `date=…/underlying=…/data.parquet`)."""
+"""Return the options_1min root (parent of `date=…/symbol=…/data.parquet`)."""
 polygon_options_root(store::LocalDataStore)::String =
-    joinpath(store.root, "massive_flatfiles", "minute_aggs")
+    joinpath(store.root, "massive", "options_1min")
 
 """Return the spot_1min root (parent of `date=…/symbol=…/data.parquet`)."""
 polygon_spot_root(store::LocalDataStore)::String =
-    joinpath(store.root, "massive_flatfiles", "spot_1min")
+    joinpath(store.root, "massive", "spots_1min")
 
 # ============================================================================
 # Path derivation
@@ -63,7 +63,7 @@ function polygon_options_path(
 )::String
     date_str = Dates.format(date, "yyyy-mm-dd")
     joinpath(polygon_options_root(store),
-             "date=$date_str", "underlying=$(_sym(symbol))", "data.parquet")
+             "date=$date_str", "symbol=$(_sym(symbol))", "data.parquet")
 end
 
 """
@@ -122,7 +122,7 @@ function available_polygon_dates(
     for entry in readdir(root)
         m = match(r"^date=(\d{4}-\d{2}-\d{2})$", entry)
         m === nothing && continue
-        path = joinpath(root, entry, "underlying=$sym", "data.parquet")
+        path = joinpath(root, entry, "symbol=$sym", "data.parquet")
         isfile(path) && push!(dates, Date(m[1]))
     end
     return sort(dates)

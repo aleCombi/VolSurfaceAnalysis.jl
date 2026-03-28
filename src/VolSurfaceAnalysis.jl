@@ -45,6 +45,7 @@ include("ml/features.jl")         # Feature types & implementations
 include("ml/model.jl")            # Flux MLP + scoring
 include("ml/training.jl")         # Data gen, training loop
 include("ml/selectors.jl")        # MLSelector abstract type + implementations
+include("ml/glmnet.jl")           # GLMNet ridge/lasso/elastic net
 
 # ============================================================================
 # Data helpers (for scripts)
@@ -141,7 +142,7 @@ export Feature, CandidateFeature
 export ATMImpliedVol, DeltaSkew, RiskReversal, Butterfly, TermSlope
 export ATMSpread, DeltaSpread, TotalVolume, PutCallVolumeRatio, HourOfDay, DayOfWeek
 export RealizedVol, VarianceRiskPremium, SpotMomentum, IVChange, IVPercentile
-export SpotLogSig, SpotMinuteLogSig, logsig_dim
+export SpotLogSig, SpotMinuteLogSig, IntradayLogSig, BarCache, logsig_dim
 export extract_surface_features, surface_feature_dim
 export ShortPutDelta, ShortCallDelta, EntryCredit, MaxLoss, CreditToMaxLoss
 export DEFAULT_SURFACE_FEATURES, DEFAULT_CANDIDATE_FEATURES
@@ -157,5 +158,6 @@ export linear_sizing, binary_sizing, probability_sizing, sigmoid_sizing
 export train_classifier!
 export mse_loss, bce_loss
 export MLSelector, ScoredCandidateSelector, DirectDeltaSelector, MLSizer
+export GLMNetModel, train_ridge!, train_glmnet_classifier!
 
 end # module
