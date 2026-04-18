@@ -3,7 +3,7 @@
 # Drop-in replacement for Flux models in the MLSizer pipeline.
 # Uses GLMNet.jl (wrapper around Fortran glmnet) with built-in CV for lambda selection.
 
-using GLMNet: glmnet, glmnetcv, Binomial, CompressedPredictorMatrix
+using GLMNet: glmnet, Binomial, CompressedPredictorMatrix
 
 # =============================================================================
 # Model wrapper
@@ -37,20 +37,22 @@ end
 # =============================================================================
 
 """
-    train_ridge!(::Nothing, X, Y; alpha=0.0, nfolds=5, val_fraction=0.2, kwargs...)
+    train_ridge!(::Nothing, X, Y; alpha=0.0, val_fraction=0.2, kwargs...)
 
-Train a GLMNet linear model (ridge/lasso/elastic net) with CV-selected lambda.
+Train a GLMNet linear model (ridge/lasso/elastic net) with lambda selected on
+a chronological validation holdout (last `val_fraction` of samples).
+
+Data is assumed to be in temporal order (earliest first). No random shuffling.
 
 # Arguments
 - First argument is ignored (API symmetry with `train_model!`; GLMNet builds its own model).
-- `X::Matrix{Float32}`: features `(dims, samples)`
-- `Y::Matrix{Float32}`: targets `(1, samples)`
+- `X::Matrix{Float32}`: features `(dims, samples)` in temporal order
+- `Y::Matrix{Float32}`: targets `(1, samples)` in temporal order
 
 # Keyword Arguments
 - `alpha`: elastic net mixing (0=ridge, 1=lasso). Clamped to `max(alpha, 1e-4)`.
-- `lambda`: specific lambda value, or `nothing` for CV selection (default).
-- `nfolds`: CV folds (default 5).
-- `val_fraction`: held-out fraction for reporting val loss (default 0.2).
+- `lambda`: specific lambda value, or `nothing` for temporal holdout selection (default).
+- `val_fraction`: fraction of data held out chronologically for lambda selection (default 0.2).
 - Extra kwargs are silently absorbed for drop-in compatibility with `train_model!`.
 
 Returns `(model::GLMNetModel, feature_means, feature_stds, history)`.
@@ -61,7 +63,6 @@ function train_ridge!(
     Y::Matrix{Float32};
     alpha::Float64=0.0,
     lambda::Union{Nothing,Float64}=nothing,
-    nfolds::Int=5,
     val_fraction::Float64=0.2,
     kwargs...  # absorb Flux kwargs (epochs, lr, etc.)
 )
@@ -69,11 +70,11 @@ function train_ridge!(
     n_val = max(1, round(Int, n * val_fraction))
     n_train = n - n_val
 
-    perm = randperm(n)
-    X_train = X[:, perm[1:n_train]]
-    Y_train = Y[:, perm[1:n_train]]
-    X_val = X[:, perm[n_train+1:end]]
-    Y_val = Y[:, perm[n_train+1:end]]
+    # Chronological split: train on first n_train, validate on last n_val
+    X_train = X[:, 1:n_train]
+    Y_train = Y[:, 1:n_train]
+    X_val = X[:, n_train+1:end]
+    Y_val = Y[:, n_train+1:end]
 
     # Normalization (from training set only)
     feature_means = vec(mean(X_train; dims=2))
@@ -88,10 +89,10 @@ function train_ridge!(
     alpha_clamped = max(alpha, 1e-4)
 
     if lambda === nothing
-        cv = glmnetcv(Xt, yt; alpha=alpha_clamped, nfolds=min(nfolds, n_train))
-        best_idx = argmin(cv.meanloss)
-        best_lambda = cv.lambda[best_idx]
-        path = cv.path
+        # Fit full lambda path on training data, select best on chronological val
+        path = glmnet(Xt, yt; alpha=alpha_clamped)
+        best_idx = _select_lambda_mse(path, X_val_norm, Y_val)
+        best_lambda = path.lambda[best_idx]
     else
         path = glmnet(Xt, yt; alpha=alpha_clamped, lambda=[lambda])
         best_idx = 1
@@ -118,15 +119,36 @@ function train_ridge!(
     return (model, feature_means, feature_stds, history)
 end
 
+"""Select lambda index that minimizes MSE on validation data."""
+function _select_lambda_mse(path, X_val_norm, Y_val)
+    y_val = vec(Float64.(Y_val))
+    best_idx = 1
+    best_mse = Inf
+    for i in 1:length(path.lambda)
+        coefs_i = Float32.(Vector(path.betas[:, i]))
+        intercept_i = Float32(path.a0[i])
+        m = GLMNetModel(coefs_i, intercept_i)
+        pred = vec(m(X_val_norm))
+        mse = mean((pred .- y_val) .^ 2)
+        if mse < best_mse
+            best_mse = mse
+            best_idx = i
+        end
+    end
+    return best_idx
+end
+
 # =============================================================================
 # Logistic classifier (elastic net)
 # =============================================================================
 
 """
-    train_glmnet_classifier!(::Nothing, X, Y; alpha=1.0, nfolds=5, val_fraction=0.2, kwargs...)
+    train_glmnet_classifier!(::Nothing, X, Y; alpha=1.0, val_fraction=0.2, kwargs...)
 
-Train a GLMNet logistic regression classifier with CV-selected lambda.
+Train a GLMNet logistic regression classifier with lambda selected on a
+chronological validation holdout (last `val_fraction` of samples).
 
+Data is assumed to be in temporal order (earliest first). No random shuffling.
 The model outputs **logits** (linear predictor), not probabilities — compatible
 with `probability_sizing` which applies sigmoid externally.
 
@@ -145,7 +167,6 @@ function train_glmnet_classifier!(
     Y::Matrix{Float32};
     alpha::Float64=1.0,
     lambda::Union{Nothing,Float64}=nothing,
-    nfolds::Int=5,
     val_fraction::Float64=0.2,
     pos_weight::Float64=1.0,  # absorbed for API compat
     kwargs...
@@ -154,11 +175,11 @@ function train_glmnet_classifier!(
     n_val = max(1, round(Int, n * val_fraction))
     n_train = n - n_val
 
-    perm = randperm(n)
-    X_train = X[:, perm[1:n_train]]
-    Y_train = Y[:, perm[1:n_train]]
-    X_val = X[:, perm[n_train+1:end]]
-    Y_val = Y[:, perm[n_train+1:end]]
+    # Chronological split: train on first n_train, validate on last n_val
+    X_train = X[:, 1:n_train]
+    Y_train = Y[:, 1:n_train]
+    X_val = X[:, n_train+1:end]
+    Y_val = Y[:, n_train+1:end]
 
     feature_means = vec(mean(X_train; dims=2))
     feature_stds = vec(std(X_train; dims=2))
@@ -173,10 +194,10 @@ function train_glmnet_classifier!(
     alpha_clamped = max(alpha, 1e-4)
 
     if lambda === nothing
-        cv = glmnetcv(Xt, Yt_mat, Binomial(); alpha=alpha_clamped, nfolds=min(nfolds, n_train))
-        best_idx = argmin(cv.meanloss)
-        best_lambda = cv.lambda[best_idx]
-        path = cv.path
+        # Fit full lambda path on training data, select best on chronological val
+        path = glmnet(Xt, Yt_mat, Binomial(); alpha=alpha_clamped)
+        best_idx = _select_lambda_bce(path, X_val_norm, Y_val)
+        best_lambda = path.lambda[best_idx]
     else
         path = glmnet(Xt, Yt_mat, Binomial(); alpha=alpha_clamped, lambda=[lambda])
         best_idx = 1
@@ -205,4 +226,27 @@ function train_glmnet_classifier!(
     )
 
     return (model, feature_means, feature_stds, history)
+end
+
+"""Select lambda index that minimizes BCE on validation data."""
+function _select_lambda_bce(path, X_val_norm, Y_val)
+    y_val = vec(Float64.(Y_val))
+    best_idx = 1
+    best_bce = Inf
+    for i in 1:length(path.lambda)
+        coefs_i = Float32.(Vector(path.betas[:, i]))
+        intercept_i = Float32(path.a0[i])
+        m = GLMNetModel(coefs_i, intercept_i)
+        logits = vec(Float64.(m(X_val_norm)))
+        sig = 1.0 ./ (1.0 .+ exp.(-logits))
+        bce = -mean(
+            y_val .* log.(max.(sig, 1e-7)) .+
+            (1.0 .- y_val) .* log.(max.(1.0 .- sig, 1e-7))
+        )
+        if bce < best_bce
+            best_bce = bce
+            best_idx = i
+        end
+    end
+    return best_idx
 end

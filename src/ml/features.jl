@@ -508,7 +508,7 @@ end
 BarCache(store::LocalDataStore) = BarCache(store, Dict{Tuple{Date,String}, Dict{DateTime, Vector{PolygonBar}}}())
 
 function _get_bars(cache::BarCache, date::Date, underlying::Union{Underlying, AbstractString};
-                   spot_hint::Float64=NaN)
+                   spot_hint::Float64=NaN, half_range::Float64=0.06)
     sym = underlying isa Underlying ? ticker(underlying) : uppercase(String(underlying))
     key = (date, sym)
     if !haskey(cache.data, key)
@@ -521,8 +521,8 @@ function _get_bars(cache::BarCache, date::Date, underlying::Union{Underlying, Ab
             to_str = Dates.format(close_utc, "yyyy-mm-dd HH:MM:SS")
             where = "timestamp BETWEEN '$from_str' AND '$to_str'"
             if !isnan(spot_hint) && spot_hint > 0
-                lo = round(spot_hint * 0.995, digits=0)
-                hi = round(spot_hint * 1.005, digits=0)
+                lo = round(spot_hint * (1.0 - half_range), digits=0)
+                hi = round(spot_hint * (1.0 + half_range), digits=0)
                 try
                     for bar in read_polygon_parquet(path;
                             where=where * " AND parsed_strike BETWEEN $lo AND $hi")
@@ -543,6 +543,83 @@ function _get_bars(cache::BarCache, date::Date, underlying::Union{Underlying, Ab
         cache.data[key] = by_ts
     end
     return cache.data[key]
+end
+
+"""
+    _bulk_put_skew(cache, underlying, date, spot_dict, from, to; rate, div_yield, target_moneyness)
+
+Compute put skew (OTM put IV - ATM IV) at each minute in [from, to].
+`target_moneyness` is strike/spot for the OTM put (e.g. 0.95 for 5% OTM).
+Shares the same bar cache as `_bulk_atm_iv` — one DuckDB read per date.
+"""
+function _bulk_put_skew(
+    cache::BarCache,
+    underlying::Union{Underlying, AbstractString},
+    date::Date,
+    spot_dict::Dict{DateTime, Float64},
+    from::DateTime,
+    to::DateTime;
+    rate::Float64=0.0,
+    div_yield::Float64=0.0,
+    spot_hint::Float64=NaN,
+    target_moneyness::Float64=0.95
+)::Dict{DateTime, Float64}
+    all_bars = _get_bars(cache, date, underlying; spot_hint=spot_hint)
+    isempty(all_bars) && return Dict{DateTime, Float64}()
+
+    skews = Dict{DateTime, Float64}()
+    for (ts, ts_bars) in all_bars
+        (from <= ts <= to) || continue
+        spot = get(spot_dict, ts, nothing)
+        spot === nothing && continue
+
+        # Pick nearest expiry (shortest positive tau)
+        best_tau = Inf
+        best_expiry = DateTime(0)
+        for bar in ts_bars
+            tau = time_to_expiry(bar.expiry, ts)
+            if 0.0 < tau < best_tau
+                best_tau = tau
+                best_expiry = bar.expiry
+            end
+        end
+        best_tau == Inf && continue
+
+        F = spot * exp((rate - div_yield) * best_tau)
+        target_strike = spot * target_moneyness
+
+        # Find ATM bar and OTM put bar at that expiry
+        atm_bar = nothing
+        otm_bar = nothing
+        atm_dist = Inf
+        otm_dist = Inf
+        for bar in ts_bars
+            bar.expiry == best_expiry || continue
+            dist_atm = abs(bar.strike - spot)
+            dist_otm = abs(bar.strike - target_strike)
+            if dist_atm < atm_dist
+                atm_dist = dist_atm
+                atm_bar = bar
+            end
+            if bar.option_type == Put && bar.strike < spot && dist_otm < otm_dist
+                otm_dist = dist_otm
+                otm_bar = bar
+            end
+        end
+        (atm_bar === nothing || otm_bar === nothing) && continue
+
+        # Compute IVs
+        atm_price = atm_bar.close / spot
+        atm_iv = price_to_iv(atm_price, F, atm_bar.strike, best_tau, atm_bar.option_type; r=rate)
+        (isnan(atm_iv) || atm_iv <= 0.0 || atm_iv > 5.0) && continue
+
+        otm_price = otm_bar.close / spot
+        otm_iv = price_to_iv(otm_price, F, otm_bar.strike, best_tau, Put; r=rate)
+        (isnan(otm_iv) || otm_iv <= 0.0 || otm_iv > 5.0) && continue
+
+        skews[ts] = otm_iv - atm_iv
+    end
+    return skews
 end
 
 """
@@ -632,17 +709,22 @@ For depth=3 with 2 channels: **5 components**.
 """
 struct IntradayLogSig <: Feature
     depth::Int
+    channels::Int
     rate::Float64
     div_yield::Float64
     min_points::Int
     cache::BarCache
     basis::Any  # ChenSignatures.BasisCache
+    skew_moneyness::Float64  # only used when channels == 3
 end
 
-function IntradayLogSig(; depth::Int=3, rate::Float64=0.0, div_yield::Float64=0.0,
-                          min_points::Int=20, store::LocalDataStore=DEFAULT_STORE)
-    basis = prepare(2, depth)
-    IntradayLogSig(depth, rate, div_yield, min_points, BarCache(store), basis)
+function IntradayLogSig(; depth::Int=3, channels::Int=2,
+                          rate::Float64=0.0, div_yield::Float64=0.0,
+                          min_points::Int=20, store::LocalDataStore=DEFAULT_STORE,
+                          skew_moneyness::Float64=0.95)
+    @assert channels in (2, 3) "IntradayLogSig supports 2 or 3 channels"
+    basis = prepare(channels, depth)
+    IntradayLogSig(depth, channels, rate, div_yield, min_points, BarCache(store), basis, skew_moneyness)
 end
 
 logsig_dim(f::IntradayLogSig) = length(f.basis.lynds)
@@ -656,25 +738,42 @@ function (f::IntradayLogSig)(ctx::StrikeSelectionContext)::Union{Vector{Float64}
     isempty(spot_dict) && return nothing
 
     # ATM IV: cached per (date, symbol), one DuckDB read per date
-    # Pass spot for strike filtering (only load near-ATM bars)
     iv_dict = _bulk_atm_iv(f.cache, ctx.surface.underlying, Date(ts), spot_dict,
                            open_utc, ts; rate=f.rate, div_yield=f.div_yield,
                            spot_hint=ctx.surface.spot)
     isempty(iv_dict) && return nothing
 
-    # Timestamps where we have both spot and IV
+    # Optional skew channel
+    skew_dict = Dict{DateTime, Float64}()
+    if f.channels == 3
+        skew_dict = _bulk_put_skew(f.cache, ctx.surface.underlying, Date(ts), spot_dict,
+                                   open_utc, ts; rate=f.rate, div_yield=f.div_yield,
+                                   spot_hint=ctx.surface.spot,
+                                   target_moneyness=f.skew_moneyness)
+        isempty(skew_dict) && return nothing
+    end
+
+    # Timestamps where we have all channels
     common_ts = sort(intersect(collect(keys(spot_dict)), collect(keys(iv_dict))))
+    if f.channels == 3
+        common_ts = sort(intersect(common_ts, collect(keys(skew_dict))))
+    end
     length(common_ts) < f.min_points && return nothing
 
     spots = [spot_dict[t] for t in common_ts]
     ivs = [iv_dict[t] for t in common_ts]
 
-    # Build 2-channel path: (spot_log_return, iv_change)
     n = length(common_ts)
-    path = Matrix{Float64}(undef, n, 2)
+    path = Matrix{Float64}(undef, n, f.channels)
     for i in 1:n
         path[i, 1] = log(spots[i] / spots[1])     # cumulative log return
         path[i, 2] = ivs[i] - ivs[1]              # IV change from open
+    end
+    if f.channels == 3
+        skews = [skew_dict[t] for t in common_ts]
+        for i in 1:n
+            path[i, 3] = skews[i] - skews[1]      # skew change from open
+        end
     end
 
     return Vector{Float64}(logsig(path, f.basis))
