@@ -76,7 +76,9 @@ function load_surfaces_and_spots(
     spread_lambda::Float64=0.0,
     expiry_interval::Period=Day(1),
     warn::Bool=false,
-    store::LocalDataStore=DEFAULT_STORE
+    rate::Float64=0.0,
+    div_yield::Float64=0.0,
+    store::LocalDataStore=DEFAULT_STORE,
 )
     println("  Loading dates from $start_date to $end_date...")
     all_dates = available_polygon_dates(store, symbol)
@@ -111,7 +113,9 @@ function load_surfaces_and_spots(
         where=where,
         min_volume=min_volume,
         warn=warn,
-        spread_lambda=spread_lambda
+        spread_lambda=spread_lambda,
+        rate=rate,
+        div_yield=div_yield,
     )
     surfaces = build_surfaces_for_timestamps(
         entry_ts;

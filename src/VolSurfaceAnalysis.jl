@@ -48,6 +48,11 @@ include("ml/selectors.jl")        # MLSelector abstract type + implementations
 include("ml/glmnet.jl")           # GLMNet ridge/lasso/elastic net
 
 # ============================================================================
+# Visualization helpers
+# ============================================================================
+include("viz.jl")                  # Smile / condor diagrams
+
+# ============================================================================
 # Data helpers (for scripts)
 # ============================================================================
 include("data/helpers.jl")         # Shared data-loading helpers for scripts
@@ -159,5 +164,8 @@ export train_classifier!
 export mse_loss, bce_loss
 export MLSelector, ScoredCandidateSelector, DirectDeltaSelector, MLSizer
 export GLMNetModel, train_ridge!, train_glmnet_classifier!
+
+# Visualization
+export CondorSpec, plot_smile_with_condors
 
 end # module
