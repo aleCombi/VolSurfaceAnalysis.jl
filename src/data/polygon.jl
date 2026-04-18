@@ -171,7 +171,9 @@ end
 # ============================================================================
 
 """
-    to_option_record(bar::PolygonBar, spot::Float64; warn::Bool=true, spread_lambda::Float64=0.0) -> OptionRecord
+    to_option_record(bar::PolygonBar, spot::Float64;
+                     warn::Bool=true, spread_lambda::Float64=0.0,
+                     rate::Float64=0.0, div_yield::Float64=0.0) -> OptionRecord
 
 Convert a PolygonBar to the unified OptionRecord format.
 
@@ -189,21 +191,29 @@ This function uses a configurable approximation with `spread_lambda`:
 
 This is pessimistic and may underestimate strategy performance.
 
-# IMPORTANT: Implied Volatility
-Polygon trade data does not include IV. We infer mark_iv from mark_price
-using Black-76 with spot as forward and r=0.0. Stored as a percentage.
+# Implied Volatility
+Polygon trade data does not include IV. We infer mark_iv by inverting
+Black-76 at the proper forward `F = spot * exp((rate - div_yield) * T)`
+with discount `D = exp(-rate * T)`. Stored as a percentage.
+
+If `rate == div_yield == 0.0` (the default), this reduces to F=spot, r=0
+(historical behavior).
 
 # Arguments
 - `bar`: The PolygonBar to convert
 - `spot`: Spot price of underlying (required for price normalization)
 - `warn`: Show warning about synthetic spreads (default: true, shown once)
 - `spread_lambda`: Tightness of synthetic spread in [0, 1] (default: 0.0)
+- `rate`: Risk-free rate for forward and discount (default: 0.0)
+- `div_yield`: Continuous dividend yield for forward (default: 0.0)
 """
 function to_option_record(
     bar::PolygonBar,
     spot::Float64;
     warn::Bool=true,
-    spread_lambda::Float64=0.0
+    spread_lambda::Float64=0.0,
+    rate::Float64=0.0,
+    div_yield::Float64=0.0,
 )::OptionRecord
     # Show warning once
     if warn && !_POLYGON_WARNINGS_SHOWN[]
@@ -236,12 +246,16 @@ function to_option_record(
     ask_frac = ask_raw / spot
     mark_frac = bar.close / spot
 
-    # Infer IV from mark price (if possible)
+    # Infer IV from mark price using the proper forward F = S * exp((r - q) * T).
+    # `price_to_iv` expects the price as a fraction of the *forward*, so we
+    # rescale the spot-fraction by S/F.
     T = time_to_expiry(bar.expiry, bar.timestamp)
     mark_iv = if T <= 0.0
         missing
     else
-        iv = price_to_iv(mark_frac, spot, bar.strike, T, bar.option_type)
+        F = spot * exp((rate - div_yield) * T)
+        price_frac_of_F = mark_frac * (spot / F)
+        iv = price_to_iv(price_frac_of_F, F, bar.strike, T, bar.option_type; r=rate)
         isnan(iv) ? missing : iv * 100.0
     end
 
@@ -392,9 +406,11 @@ function read_polygon_parquet(
 end
 
 """
-    read_polygon_option_records(path, spot; where="", min_volume=0, warn=true, spread_lambda=0.0) -> Vector{OptionRecord}
+    read_polygon_option_records(path, spot; where="", min_volume=0, warn=true,
+                                spread_lambda=0.0, rate=0.0, div_yield=0.0) -> Vector{OptionRecord}
 
 Load Polygon minute bars from parquet and convert to OptionRecord using a constant spot.
+`rate` and `div_yield` are forwarded to `to_option_record` for IV inversion.
 """
 function read_polygon_option_records(
     path::AbstractString,
@@ -402,17 +418,24 @@ function read_polygon_option_records(
     where::AbstractString="",
     min_volume::Int=0,
     warn::Bool=true,
-    spread_lambda::Float64=0.0
+    spread_lambda::Float64=0.0,
+    rate::Float64=0.0,
+    div_yield::Float64=0.0,
 )::Vector{OptionRecord}
     bars = read_polygon_parquet(path; where=where, min_volume=min_volume)
-    return [to_option_record(bar, spot; warn=warn, spread_lambda=spread_lambda) for bar in bars]
+    return [to_option_record(bar, spot;
+                             warn=warn, spread_lambda=spread_lambda,
+                             rate=rate, div_yield=div_yield)
+            for bar in bars]
 end
 
 """
-    read_polygon_option_records(path, spot_by_ts; where="", min_volume=0, warn=true, spread_lambda=0.0) -> Vector{OptionRecord}
+    read_polygon_option_records(path, spot_by_ts; where="", min_volume=0, warn=true,
+                                spread_lambda=0.0, rate=0.0, div_yield=0.0) -> Vector{OptionRecord}
 
 Load Polygon minute bars from parquet and convert to OptionRecord using a spot map.
-Records with missing spot are skipped.
+Records with missing spot are skipped. `rate` and `div_yield` are forwarded to
+`to_option_record` for IV inversion.
 """
 function read_polygon_option_records(
     path::AbstractString,
@@ -420,14 +443,18 @@ function read_polygon_option_records(
     where::AbstractString="",
     min_volume::Int=0,
     warn::Bool=true,
-    spread_lambda::Float64=0.0
+    spread_lambda::Float64=0.0,
+    rate::Float64=0.0,
+    div_yield::Float64=0.0,
 )::Vector{OptionRecord}
     bars = read_polygon_parquet(path; where=where, min_volume=min_volume)
     records = OptionRecord[]
     for bar in bars
         spot = get(spot_by_ts, bar.timestamp, missing)
         ismissing(spot) && continue
-        push!(records, to_option_record(bar, spot; warn=warn, spread_lambda=spread_lambda))
+        push!(records, to_option_record(bar, spot;
+                                        warn=warn, spread_lambda=spread_lambda,
+                                        rate=rate, div_yield=div_yield))
     end
     return records
 end

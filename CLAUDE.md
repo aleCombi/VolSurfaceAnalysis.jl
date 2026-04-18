@@ -51,6 +51,9 @@ julia --project=. -e "using Pkg; Pkg.test()"
   - `ml/selectors.jl` -- `ScoredCandidateSelector` (enumerate + score candidates), `DirectDeltaSelector` (predict optimal delta), `MLSizer` (ML-modulated trade sizing)
   - `ml/glmnet.jl` -- `GLMNetModel`, `train_ridge!`, `train_glmnet_classifier!` (ridge/lasso/elastic net via GLMNet.jl, drop-in replacement for Flux models)
 
+- **Visualization**
+  - `viz.jl` -- `CondorSpec`, `plot_smile_with_condors(surface, expiry, condor_specs; rate, div_yield, atm_window, title)`. Two-panel figure: put/call smile annotated with Black-76 deltas (top) + per-condor strike-axis structure diagram (bottom). Uses `delta_condor_selector` to pick legs.
+
 ### Key Patterns
 
 - **Strategy interface**: Implement `ScheduledStrategy` with `entry_schedule()` and `entry_positions()`. The engine calls `backtest_strategy(strategy, source::BacktestDataSource)` returning `BacktestResult`. A convenience `backtest_strategy(strategy, surfaces, spots)` wraps dicts in `DictDataSource`.
@@ -84,9 +87,14 @@ Scripts use `scripts/Project.toml` via `Pkg.activate(@__DIR__)`.
 - **`scripts/cross_symbol_filter.jl`** -- Cross-symbol training experiment. Trains on SPY+QQQ+IWM+SPXW, tests on SPY. Compares regressor vs classifier, detailed tail risk analysis (CVaR, loss severity buckets, filter forensics).
 - **`scripts/strike_selector.jl`** -- Separate: `ScoredCandidateSelector` pipeline (candidate enumeration + scoring), fundamentally different training data generation.
 
+## Polygon IV inversion (rate / div_yield)
+
+`to_option_record(::PolygonBar, spot; rate, div_yield)` inverts mark_iv with the proper forward `F = spot * exp((rate - div_yield) * T)` and discount `D = exp(-rT)`. Defaults to `0.0/0.0` for backward compat. `read_polygon_option_records` and `load_surfaces_and_spots` accept `rate` and `div_yield` kwargs; pass your scenario's rate (e.g., `0.045`) and dividend yield (e.g., `0.013` for SPY) to remove the put-call IV bias from F=spot inversion. Deribit ingestion is unaffected.
+
 ## Known Technical Debt
 
 - **`src/backtest/metrics.jl`**: `performance_metrics()` has two near-identical branches for margin computation
+- **`src/surface.jl` `_iv_from_price`** (used by `bid_iv`/`ask_iv`): inverts with `F=spot, r=0` regardless of `rate`/`div_yield`. After the Polygon `to_option_record` rate/q fix, `record.mark_iv` uses the proper forward but `bid_vol`/`ask_vol` on `VolPoint` still use the legacy convention.
 
 ## Conventions
 

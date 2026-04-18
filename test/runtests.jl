@@ -10,5 +10,6 @@ using Dates
     include("test_metrics.jl")
     include("test_local_data.jl")
     include("test_ml.jl")
+    include("test_viz.jl")
 end
 
