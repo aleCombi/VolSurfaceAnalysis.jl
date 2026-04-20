@@ -11,5 +11,6 @@ using Dates
     include("test_local_data.jl")
     include("test_ml.jl")
     include("test_viz.jl")
+    include("test_short_strangle.jl")
 end
 
