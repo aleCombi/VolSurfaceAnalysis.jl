@@ -40,10 +40,11 @@ julia --project=. -e "using Pkg; Pkg.test()"
   - `backtest/plots.jl` -- plot helpers
 
 - **Strategies**
-  - `strategies.jl` -- includes strike_selection + iron_condor + short_strangle
+  - `strategies.jl` -- includes strike_selection + iron_condor + short_strangle + rolling_wing_selector
   - `strategies/strike_selection.jl` -- `StrikeSelectionContext` struct, strike selection primitives + selector factories (`sigma_selector`, `delta_selector`, `delta_condor_selector`, `constrained_delta_selector`)
   - `strategies/iron_condor.jl` -- `IronCondorStrategy`
   - `strategies/short_strangle.jl` -- `ShortStrangleStrategy` (naked short put + short call, no wings) + `delta_strangle_selector(put_delta, call_delta)`. Selectors return 2-tuple `(sp_K, sc_K)`.
+  - `strategies/rolling_wing_selector.jl` -- `RollingWingCondorSelector` (stateful: short legs by delta, long-wing width selected by trailing-Sharpe over a rolling training window). Calendar-aligned recompute every `step_days`. Records full per-wing shadow PnL via `get_settlement_spot`.
 
 - **ML module**
   - `ml/features.jl` -- `Feature` and `CandidateFeature` abstract types, callable feature structs (ATMImpliedVol, DeltaSkew, RiskReversal, Butterfly, TermSlope, ATMSpread, DeltaSpread, TotalVolume, PutCallVolumeRatio, HourOfDay, DayOfWeek, ShortPutDelta, ShortCallDelta, EntryCredit, MaxLoss, CreditToMaxLoss), default feature sets

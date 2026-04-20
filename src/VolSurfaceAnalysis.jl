@@ -139,6 +139,7 @@ export save_pnl_distribution, save_equity_curve, save_pnl_and_equity_curve, save
 export IronCondorStrategy, FixedSize, StrikeSelectionContext
 export sigma_selector, delta_selector, delta_condor_selector, constrained_delta_selector
 export ShortStrangleStrategy, delta_strangle_selector
+export RollingWingCondorSelector
 
 # Strike selection helpers (used by scripts)
 export _delta_strangle_strikes_asymmetric
