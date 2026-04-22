@@ -1,68 +1,116 @@
-# scripts/spy_sizing_condor_sweep.jl
+# scripts/sizing_condor_sweep.jl
 #
-# Sweep symmetric iron condor wing widths on SPY 1DTE 20p/5c.
-# For each WING_WIDTH ∈ {3, 5, 7, 10, 15, 20}, compute the per-day PnL,
-# run the SAME walk-forward + sizing-policy pipeline as before, and
-# tabulate Sharpe / total PnL for the baseline + best-policy per width.
+# Sweep iron-condor wing widths on a fixed delta short (default 20Δ put / 5Δ call),
+# predict per-entry PnL via walk-forward ridge on SpotMinuteLogSig + a few base features,
+# and compare several sizing policies (baseline=1, skip<median, top-Q, linear, sigmoid).
+# Tabulates Sharpe / total PnL / maxDD per (wing, policy).
+#
+# Replaces 6 prior scripts (spy/qqq/iwm sizing_condor_sweep{,_2h,_4h,_3x_intraday}.jl).
+# Every knob below can be overridden via ENV. Common presets:
+#
+#   # SPY 1-DTE (2019+)
+#   SYM=SPY START_YEAR=2019 ENTRY_HOURS=12 TENOR=1d WING_WIDTHS=3,5,7,10,15,20 \
+#       LOOKBACK=3 MIN_PTS=100 TRAIN_DAYS=1095 MIN_TRAIN=200
+#
+#   # SPY intraday 2h (canonical)
+#   SYM=SPY ENTRY_HOURS=14 TENOR=2h MAX_TAU_DAYS=0.5 \
+#       WING_WIDTHS=1,2,3,5,8,12 LOOKBACK=5 MIN_PTS=150
+#
+#   # SPY intraday 4h
+#   SYM=SPY ENTRY_HOURS=12 TENOR=4h MAX_TAU_DAYS=0.5 WING_WIDTHS=1,2,3,5,8,12
+#
+#   # SPY 3-entries/day
+#   SYM=SPY ENTRY_HOURS=11,13,15 TENOR=2h MAX_TAU_DAYS=0.5
+#
+#   # QQQ 2h (DIV=0.006)
+#   SYM=QQQ DIV=0.006 ENTRY_HOURS=14 TENOR=2h MAX_TAU_DAYS=0.5 WING_WIDTHS=1,2,3,5,8,12
+#
+#   # IWM 2h (DIV=0.013)
+#   SYM=IWM DIV=0.013 ENTRY_HOURS=14 TENOR=2h MAX_TAU_DAYS=0.5 WING_WIDTHS=1,2,3,5,8,12
 
 using Pkg; Pkg.activate(@__DIR__)
 using VolSurfaceAnalysis
 using Dates, Printf, Statistics, Random, Plots
+include(joinpath(@__DIR__, "lib", "experiment.jl"))
 
 # =============================================================================
-# Configuration
+# Configuration (override via ENV)
 # =============================================================================
 
-SYMBOL              = "QQQ"
-START_DATE          = Date(2017, 1, 1)
-END_DATE            = Date(2024, 1, 31)
-ENTRY_TIME          = Time(14, 0)        # 2pm ET
-EXPIRY_INTERVAL     = Hour(2)            # 2h tenor
-SPREAD_LAMBDA       = 0.7
-RATE                = 0.045
-DIV_YIELD           = 0.006
-MAX_TAU_DAYS        = 0.5                # filter to intraday only
+SYMBOL              = get(ENV, "SYM", "SPY")
+START_DATE          = Date(parse(Int, get(ENV, "START_YEAR", "2017")), 1, 1)
+END_DATE            = Date(parse(Int, get(ENV, "END_YEAR", "2024")),
+                           parse(Int, get(ENV, "END_MONTH", "1")),
+                           parse(Int, get(ENV, "END_DAY",   "31")))
 
-PUT_DELTA           = 0.20
-CALL_DELTA          = 0.05
-WING_WIDTHS         = [1.0, 2.0, 3.0, 5.0, 8.0, 12.0]   # narrower than 1DTE — intraday strikes are tighter
+# Entry time(s): comma-separated hours (24h), e.g. "14" or "11,13,15"
+ENTRY_TIMES         = [Time(parse(Int, strip(h)), 0)
+                       for h in split(get(ENV, "ENTRY_HOURS", "14"), ",")]
 
+# Tenor: "1d" → Day(1), "2h" → Hour(2), etc.
+_tenor_str          = lowercase(get(ENV, "TENOR", "2h"))
+EXPIRY_INTERVAL     = if endswith(_tenor_str, "d")
+    Day(parse(Int, _tenor_str[1:end-1]))
+elseif endswith(_tenor_str, "h")
+    Hour(parse(Int, _tenor_str[1:end-1]))
+else
+    error("Unknown TENOR: $_tenor_str (use e.g. \"1d\" or \"2h\")")
+end
+
+SPREAD_LAMBDA       = parse(Float64, get(ENV, "SPREAD_LAMBDA", "0.7"))
+RATE                = parse(Float64, get(ENV, "RATE", "0.045"))
+DIV_YIELD           = parse(Float64, get(ENV, "DIV",  "0.013"))
+MAX_TAU_DAYS        = parse(Float64, get(ENV, "MAX_TAU_DAYS", "0.5"))
+
+PUT_DELTA           = parse(Float64, get(ENV, "PUT_DELTA",  "0.20"))
+CALL_DELTA          = parse(Float64, get(ENV, "CALL_DELTA", "0.05"))
+WING_WIDTHS         = [parse(Float64, strip(w))
+                       for w in split(get(ENV, "WING_WIDTHS", "1,2,3,5,8,12"), ",")]
+
+LOGSIG_LOOKBACK_HRS = parse(Int, get(ENV, "LOOKBACK", "5"))
+LOGSIG_MIN_POINTS   = parse(Int, get(ENV, "MIN_PTS",  "150"))
 FEATURES            = Feature[
-    SpotMinuteLogSig(lookback_hours=5, depth=3, min_points=150),
+    SpotMinuteLogSig(lookback_hours=LOGSIG_LOOKBACK_HRS, depth=3, min_points=LOGSIG_MIN_POINTS),
 ]
 
-TRAIN_WINDOW_DAYS   = 365
-TEST_WINDOW_DAYS    = 90
-STEP_DAYS           = 90
-MAX_SIZE            = 2.0
+TRAIN_WINDOW_DAYS   = parse(Int, get(ENV, "TRAIN_DAYS", "365"))
+TEST_WINDOW_DAYS    = parse(Int, get(ENV, "TEST_DAYS",  "90"))
+STEP_DAYS           = parse(Int, get(ENV, "STEP_DAYS",  "90"))
+MIN_TRAIN_ENTRIES   = parse(Int, get(ENV, "MIN_TRAIN",  "80"))
+MIN_TEST_ENTRIES    = parse(Int, get(ENV, "MIN_TEST",   "20"))
+MAX_SIZE            = parse(Float64, get(ENV, "MAX_SIZE", "2.0"))
 
 # =============================================================================
 # Output dir
 # =============================================================================
 
-run_ts = Dates.format(now(), "yyyymmdd_HHMMSS")
-run_dir = joinpath(@__DIR__, "runs", "qqq_sizing_condor_sweep_2h_$run_ts")
+run_tag = get(ENV, "TAG", "$(SYMBOL)_$(_tenor_str)_$(length(ENTRY_TIMES))e")
+run_ts  = Dates.format(now(), "yyyymmdd_HHMMSS")
+run_dir = joinpath(@__DIR__, "runs", "sizing_condor_sweep_$(run_tag)_$run_ts")
 mkpath(run_dir)
 println("Output: $run_dir")
+println("\n  $SYMBOL  $START_DATE → $END_DATE   entries=$ENTRY_TIMES  tenor=$(EXPIRY_INTERVAL)")
+println("  Δ_put=$PUT_DELTA  Δ_call=$CALL_DELTA  wings=$WING_WIDTHS  max_tau=$(MAX_TAU_DAYS)d")
+println("  walk-forward train=$(TRAIN_WINDOW_DAYS)d test=$(TEST_WINDOW_DAYS)d step=$(STEP_DAYS)d")
 
 # =============================================================================
 # Data source
 # =============================================================================
 
-println("\nLoading $SYMBOL  $START_DATE → $END_DATE ...")
+println("\nLoading $SYMBOL …")
 (; source, sched) = polygon_parquet_source(SYMBOL;
-    start_date=START_DATE, end_date=END_DATE, entry_time=ENTRY_TIME,
+    start_date=START_DATE, end_date=END_DATE, entry_time=ENTRY_TIMES,
     rate=RATE, div_yield=DIV_YIELD, spread_lambda=SPREAD_LAMBDA,
 )
+println("  $(length(sched)) entry timestamps")
 
 # =============================================================================
 # Build dataset: for each entry compute PnL for ALL wing widths simultaneously
 # =============================================================================
 
-dates  = Date[]
-feats  = Vector{Vector{Float32}}()
-spots  = Float64[]
-# pnls_by_width[entry_idx][width_idx] = pnl in USD
+dates         = Date[]
+feats         = Vector{Vector{Float32}}()
+spots         = Float64[]
 pnls_by_width = Vector{Vector{Float64}}()
 
 n_total = 0
@@ -84,30 +132,15 @@ each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
     sc_K = delta_strike(dctx,  CALL_DELTA, Call)
     (sp_K === nothing || sc_K === nothing) && (global n_skip += 1; return)
 
-    otm_put_recs  = filter(r -> r.strike < sp_K, dctx.put_recs)
-    otm_call_recs = filter(r -> r.strike > sc_K, dctx.call_recs)
-    (isempty(otm_put_recs) || isempty(otm_call_recs)) && (global n_skip += 1; return)
-
-    # Compute PnL for each wing width by snapping to nearest available OTM strike
     pnls_this_entry = Float64[]
     ok = true
     for ww in WING_WIDTHS
-        target_lp = sp_K - ww
-        target_lc = sc_K + ww
-        lp_rec = otm_put_recs[argmin(abs.([r.strike - target_lp for r in otm_put_recs]))]
-        lc_rec = otm_call_recs[argmin(abs.([r.strike - target_lc for r in otm_call_recs]))]
-        condor_pos = Position[]
-        for t in (Trade(ctx.surface.underlying, sp_K, ctx.expiry, Put;  direction=-1, quantity=1.0),
-                  Trade(ctx.surface.underlying, sc_K, ctx.expiry, Call; direction=-1, quantity=1.0),
-                  Trade(ctx.surface.underlying, lp_rec.strike, ctx.expiry, Put;  direction=+1, quantity=1.0),
-                  Trade(ctx.surface.underlying, lc_rec.strike, ctx.expiry, Call; direction=+1, quantity=1.0))
-            p = open_position(t, ctx.surface)
-            p === nothing && (ok = false; break)
-            push!(condor_pos, p)
-        end
-        !ok && break
-        length(condor_pos) == 4 || (ok = false; break)
-        push!(pnls_this_entry, settle(condor_pos, Float64(settlement)) * spot)
+        lp_K = nearest_otm_strike(dctx, sp_K, ww, Put)
+        lc_K = nearest_otm_strike(dctx, sc_K, ww, Call)
+        (lp_K === nothing || lc_K === nothing) && (ok = false; break)
+        cp = open_condor_positions(ctx, sp_K, sc_K, lp_K, lc_K)
+        length(cp) == 4 || (ok = false; break)
+        push!(pnls_this_entry, settle(cp, Float64(settlement)) * spot)
     end
     ok || (global n_skip += 1; return)
 
@@ -123,25 +156,6 @@ n_kept = length(dates)
 # =============================================================================
 # Helpers
 # =============================================================================
-
-function build_folds(d, train_days, test_days, step)
-    first_test = d[1] + Day(train_days)
-    last_d = d[end]
-    folds = NamedTuple[]
-    ts_start = first_test
-    while ts_start <= last_d
-        te_end = ts_start + Day(test_days) - Day(1)
-        tr_start = ts_start - Day(train_days)
-        tr_end = ts_start - Day(1)
-        tr_mask = (d .>= tr_start) .& (d .<= tr_end)
-        te_mask = (d .>= ts_start) .& (d .<= te_end)
-        if sum(tr_mask) >= 80 && sum(te_mask) >= 20
-            push!(folds, (train_mask=tr_mask, test_mask=te_mask))
-        end
-        ts_start += Day(step)
-    end
-    return folds
-end
 
 sigmoid_fn(z) = 1 / (1 + exp(-z))
 
@@ -184,11 +198,11 @@ end
 
 function policy_metrics(scores, ys, μs, σs, meds, q75s, max_size)
     policies = [
-        ("baseline",      (p, μ, σ, m, q) -> 1.0),
-        ("skip<med",      (p, μ, σ, m, q) -> p > m ? 1.0 : 0.0),
-        ("topQ",          (p, μ, σ, m, q) -> p > q ? 1.0 : 0.0),
-        ("linear",        (p, μ, σ, m, q) -> clamp((p - μ) / max(σ, 1e-9), 0.0, max_size)),
-        ("sigmoid",       (p, μ, σ, m, q) -> max_size * sigmoid_fn((p - μ) / max(σ, 1e-9))),
+        ("baseline", (p, μ, σ, m, q) -> 1.0),
+        ("skip<med", (p, μ, σ, m, q) -> p > m ? 1.0 : 0.0),
+        ("topQ",     (p, μ, σ, m, q) -> p > q ? 1.0 : 0.0),
+        ("linear",   (p, μ, σ, m, q) -> clamp((p - μ) / max(σ, 1e-9), 0.0, max_size)),
+        ("sigmoid",  (p, μ, σ, m, q) -> max_size * sigmoid_fn((p - μ) / max(σ, 1e-9))),
     ]
     out = NamedTuple[]
     n = length(ys)
@@ -208,18 +222,20 @@ end
 # Sweep loop
 # =============================================================================
 
-# Sort dataset by date once
-ord = sortperm(dates)
+ord          = sortperm(dates)
 dates_sorted = dates[ord]
 feats_sorted = feats[ord]
 spots_sorted = spots[ord]
 pnls_sorted  = pnls_by_width[ord]
-X_all = Float32.(hcat(feats_sorted...))
-folds = build_folds(dates_sorted, TRAIN_WINDOW_DAYS, TEST_WINDOW_DAYS, STEP_DAYS)
+X_all        = Float32.(hcat(feats_sorted...))
+folds = build_folds(dates_sorted;
+    train_days=TRAIN_WINDOW_DAYS, test_days=TEST_WINDOW_DAYS, step_days=STEP_DAYS,
+    min_train=MIN_TRAIN_ENTRIES, min_test=MIN_TEST_ENTRIES,
+)
 println("\nFolds: $(length(folds))")
 
 println("\n", "=" ^ 110)
-println("  WING WIDTH SWEEP — SPY 1DTE 20p/5c iron condor")
+println("  WING WIDTH SWEEP — $SYMBOL $(EXPIRY_INTERVAL) $(round(Int,100*PUT_DELTA))p/$(round(Int,100*CALL_DELTA))c iron condor")
 println("=" ^ 110)
 @printf "  %5s  %-10s  %7s  %5s  %10s  %8s  %8s  %10s\n" (
     "wing", "policy", "trades", "rate", "totalPnL", "/day", "Sharpe", "maxDD"
@@ -227,7 +243,7 @@ println("=" ^ 110)
 println("  ", "-" ^ 96)
 
 best_per_width = Dict()
-all_results = NamedTuple[]
+all_results    = NamedTuple[]
 
 for (wi, ww) in enumerate(WING_WIDTHS)
     Y_all = reshape(Float32.([p[wi] for p in pnls_sorted]), 1, length(pnls_sorted))
@@ -260,7 +276,7 @@ for ww in WING_WIDTHS
 end
 
 # =============================================================================
-# Plot: Sharpe vs wing width, baseline + best-policy
+# Plot: Sharpe vs wing width by policy
 # =============================================================================
 
 ws    = [r.wing for r in all_results]
@@ -269,7 +285,7 @@ sharps = [r.sharpe for r in all_results]
 
 p_sh = plot(;
     xlabel="wing width (USD)", ylabel="Sharpe (annualized)",
-    title="SPY 1DTE 20p/5c condor — Sharpe vs wing width by policy",
+    title="$SYMBOL $(EXPIRY_INTERVAL) $(round(Int,100*PUT_DELTA))p/$(round(Int,100*CALL_DELTA))c condor — Sharpe vs wing by policy",
     legend=:bottomright, size=(1100, 500),
 )
 for pol in ("baseline", "skip<med", "topQ", "linear", "sigmoid")
@@ -281,23 +297,18 @@ savefig(p_sh, joinpath(run_dir, "sharpe_by_wing.png"))
 println("\n  Saved: sharpe_by_wing.png")
 
 # =============================================================================
-# Per-month Sharpe — focus on the widest wing baseline (production candidate)
+# Per-month Sharpe — focus on the best (wing, policy) combo
 # =============================================================================
 
-# Identify top wing-width by best-fold Sharpe (usually 12.0 → baseline)
 best_overall = argmax([r.sharpe for r in all_results])
 best_ww   = all_results[best_overall].wing
 best_pol  = all_results[best_overall].name
 println("\n  Best overall: wing=$best_ww  policy=$best_pol  Sharpe=$(round(all_results[best_overall].sharpe, digits=2))")
 
-# Compute per-month Sharpe for the best-Sharpe (wing, policy) combo
-# Run walkforward with the best wing, then apply best policy and slice by month
 best_ww_idx = findfirst(==(best_ww), WING_WIDTHS)
 Y_best = reshape(Float32.([p[best_ww_idx] for p in pnls_sorted]), 1, length(pnls_sorted))
 res_best = run_walkforward(dates_sorted, X_all, Y_best, folds)
 
-# Apply the best policy
-sigmoid_fn2(z) = 1 / (1 + exp(-z))
 size_fn = if best_pol == "baseline"
     (p, μ, σ, m, q) -> 1.0
 elseif best_pol == "skip<med"
@@ -307,14 +318,14 @@ elseif best_pol == "topQ"
 elseif best_pol == "linear"
     (p, μ, σ, m, q) -> clamp((p - μ)/max(σ, 1e-9), 0.0, MAX_SIZE)
 else  # sigmoid
-    (p, μ, σ, m, q) -> MAX_SIZE * sigmoid_fn2((p - μ)/max(σ, 1e-9))
+    (p, μ, σ, m, q) -> MAX_SIZE * sigmoid_fn((p - μ)/max(σ, 1e-9))
 end
 sizes_best = [size_fn(res_best.preds[i], res_best.μ[i], res_best.σ[i],
                       res_best.med[i], res_best.q75[i]) for i in eachindex(res_best.preds)]
 sized_pnls_best = sizes_best .* res_best.y
 
 println("\n  ──────────────────────────────────────────────────")
-println("  PER-MONTH Sharpe — $SYMBOL  ($best_ww-wide condor, $best_pol)")
+println("  PER-MONTH Sharpe — $SYMBOL  (wing=$best_ww  policy=$best_pol)")
 println("  ──────────────────────────────────────────────────")
 @printf "  %-9s  %5s  %+10s  %+8s\n" "month" "n" "totalPnL" "Sharpe"
 println("  " * "─"^46)
