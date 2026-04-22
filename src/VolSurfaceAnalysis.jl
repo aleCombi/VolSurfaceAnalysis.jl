@@ -142,6 +142,7 @@ export ShortStrangleStrategy, delta_strangle_selector
 export RollingWingCondorSelector
 
 # Strike selection helpers (used by scripts)
+export delta_context, delta_strike
 export _delta_strangle_strikes_asymmetric
 
 # ML features

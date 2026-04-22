@@ -358,5 +358,44 @@ using DuckDB
         @test cs3.clears == 1
     end
 
+    # ============================================================
+    # 11. delta_context + delta_strike public helpers
+    # ============================================================
+    @testset "delta_context + delta_strike" begin
+        source = DictDataSource(surfaces, settlement_spots)
+        history = HistoricalView(source, entry_ts)
+        ctx = VolSurfaceAnalysis.StrikeSelectionContext(
+            surfaces[entry_ts], expiry_ts, history,
+        )
+
+        # Happy path: ctx has only a call record in the fixture, so put-side
+        # records are empty — delta_context returns nothing.
+        @test delta_context(ctx) === nothing
+
+        # Construct a two-record surface (one put + one call) inline to exercise
+        # the happy path.
+        instr_put  = "BTC-26JAN26-100000-P"
+        instr_call = "BTC-26JAN26-100000-C"
+        rec_put  = OptionRecord(instr_put,  Underlying("BTC"), expiry_ts, strike, Put,
+                                0.05, 0.06, 0.055, 80.0, 10.0, 100.0, entry_spot, entry_ts)
+        rec_call = OptionRecord(instr_call, Underlying("BTC"), expiry_ts, strike, Call,
+                                bid,  ask,  0.045, 80.0, 10.0, 100.0, entry_spot, entry_ts)
+        surf = build_surface([rec_put, rec_call])
+        ctx_pc = VolSurfaceAnalysis.StrikeSelectionContext(surf, expiry_ts, history)
+
+        dctx = delta_context(ctx_pc; rate=0.0, div_yield=0.0)
+        @test dctx !== nothing
+        @test length(dctx.put_recs)  == 1
+        @test length(dctx.call_recs) == 1
+        @test dctx.spot == entry_spot
+        @test dctx.tau > 0.0
+        # F = spot * exp(0) == spot when rate=div=0
+        @test dctx.F == entry_spot
+
+        # delta_strike: with only one strike, that strike is chosen
+        @test delta_strike(dctx, -0.30, Put)  == strike
+        @test delta_strike(dctx,  0.30, Call) == strike
+    end
+
     try rm(tmpfile; force=true) catch end
 end

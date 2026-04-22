@@ -166,6 +166,55 @@ function _atm_iv_from_records(
 end
 
 # =============================================================================
+# Public delta-strike helpers (for scripts that need per-entry primitives)
+# =============================================================================
+
+"""
+    delta_context(ctx; rate=0.0, div_yield=0.0)
+        -> (; put_recs, call_recs, spot, F, tau, rate) | nothing
+
+Resolve the per-entry quantities needed for delta-based strike lookup:
+records filtered by option type, spot, forward `F = spot * exp((rate-div_yield)*tau)`,
+and tau. Returns `nothing` if `tau <= 0` or either put or call records are empty.
+
+Pair with `delta_strike(dctx, target_delta, opt_type)` to pick strikes.
+"""
+function delta_context(
+    ctx;
+    rate::Float64=0.0,
+    div_yield::Float64=0.0,
+)
+    tau = _ctx_tau(ctx)
+    tau <= 0.0 && return nothing
+    recs = _ctx_recs(ctx)
+    put_recs  = filter(r -> r.option_type == Put,  recs)
+    call_recs = filter(r -> r.option_type == Call, recs)
+    (isempty(put_recs) || isempty(call_recs)) && return nothing
+    spot = ctx.surface.spot
+    F = spot * exp((rate - div_yield) * tau)
+    return (put_recs=put_recs, call_recs=call_recs, spot=spot, F=F, tau=tau, rate=rate)
+end
+
+"""
+    delta_strike(dctx, target_delta, opt_type::OptionType) -> Float64 | nothing
+
+Return the OTM strike whose Black-76 delta is closest to `target_delta` for the
+given option type (`Put` or `Call`). `target_delta` follows the standard sign
+convention (negative for puts, positive for calls). `dctx` is the NamedTuple
+returned by `delta_context`. Returns `nothing` when no viable record has a
+computable delta.
+"""
+function delta_strike(
+    dctx,
+    target_delta::Float64,
+    opt_type::OptionType,
+)::Union{Nothing,Float64}
+    recs = opt_type == Put ? dctx.put_recs : dctx.call_recs
+    side = opt_type == Put ? :put : :call
+    return _best_delta_strike(recs, target_delta, dctx.spot, side, dctx.F, dctx.tau, dctx.rate)
+end
+
+# =============================================================================
 # Asymmetric delta strangle strikes (used by condor selectors)
 # =============================================================================
 

@@ -69,25 +69,20 @@ println("\nBuilding dataset...")
 each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
     ismissing(settlement) && return
     global n_total += 1
-    recs = VolSurfaceAnalysis._ctx_recs(ctx)
-    tau = VolSurfaceAnalysis._ctx_tau(ctx)
-    tau <= 0.0 && return
-    tau * 365.25 > MAX_TAU_DAYS && (global n_skip += 1; return)
-    spot = ctx.surface.spot
-    F = spot * exp((RATE - DIV_YIELD) * tau)
-    put_recs  = filter(r -> r.option_type == Put,  recs)
-    call_recs = filter(r -> r.option_type == Call, recs)
-    (isempty(put_recs) || isempty(call_recs)) && (global n_skip += 1; return)
+    dctx = delta_context(ctx; rate=RATE, div_yield=DIV_YIELD)
+    dctx === nothing && (global n_skip += 1; return)
+    dctx.tau * 365.25 > MAX_TAU_DAYS && (global n_skip += 1; return)
+    spot = dctx.spot
     spot_settle = Float64(settlement)
 
     row = fill(NaN, n_combos)
     for (i, (pd, cd)) in enumerate(COMBOS)
-        sp_K = VolSurfaceAnalysis._best_delta_strike(put_recs,  -pd, spot, :put,  F, tau, RATE)
-        sc_K = VolSurfaceAnalysis._best_delta_strike(call_recs,  cd, spot, :call, F, tau, RATE)
+        sp_K = delta_strike(dctx, -pd, Put)
+        sc_K = delta_strike(dctx,  cd, Call)
         (sp_K === nothing || sc_K === nothing) && continue
         sp_rec = nothing; sc_rec = nothing
-        for r in put_recs;  r.strike == sp_K && (sp_rec = r; break); end
-        for r in call_recs; r.strike == sc_K && (sc_rec = r; break); end
+        for r in dctx.put_recs;  r.strike == sp_K && (sp_rec = r; break); end
+        for r in dctx.call_recs; r.strike == sc_K && (sc_rec = r; break); end
         (sp_rec === nothing || sc_rec === nothing) && continue
         sp_bid = VolSurfaceAnalysis._extract_price(sp_rec, :bid)
         sc_bid = VolSurfaceAnalysis._extract_price(sc_rec, :bid)

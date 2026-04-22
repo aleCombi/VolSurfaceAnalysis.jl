@@ -90,21 +90,17 @@ each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
     fvec = extract_surface_features(ctx, FEATURES)
     fvec === nothing && (global n_skip += 1; return)
 
-    recs = VolSurfaceAnalysis._ctx_recs(ctx)
-    tau  = VolSurfaceAnalysis._ctx_tau(ctx)
-    tau <= 0.0 && return
-    tau * 365.25 > MAX_TAU_DAYS && (global n_skip += 1; return)
-    spot = ctx.surface.spot
-    F = spot * exp((RATE - DIV_YIELD) * tau)
+    dctx = delta_context(ctx; rate=RATE, div_yield=DIV_YIELD)
+    dctx === nothing && (global n_skip += 1; return)
+    dctx.tau * 365.25 > MAX_TAU_DAYS && (global n_skip += 1; return)
+    spot = dctx.spot
 
-    put_recs  = filter(r -> r.option_type == Put,  recs)
-    call_recs = filter(r -> r.option_type == Call, recs)
-    sp_K = VolSurfaceAnalysis._best_delta_strike(put_recs,  -PUT_DELTA,  spot, :put,  F, tau, RATE)
-    sc_K = VolSurfaceAnalysis._best_delta_strike(call_recs,  CALL_DELTA, spot, :call, F, tau, RATE)
+    sp_K = delta_strike(dctx, -PUT_DELTA,  Put)
+    sc_K = delta_strike(dctx,  CALL_DELTA, Call)
     (sp_K === nothing || sc_K === nothing) && (global n_skip += 1; return)
 
-    otm_put_recs  = filter(r -> r.strike < sp_K, put_recs)
-    otm_call_recs = filter(r -> r.strike > sc_K, call_recs)
+    otm_put_recs  = filter(r -> r.strike < sp_K, dctx.put_recs)
+    otm_call_recs = filter(r -> r.strike > sc_K, dctx.call_recs)
     (isempty(otm_put_recs) || isempty(otm_call_recs)) && (global n_skip += 1; return)
 
     # Compute PnL for each wing width by snapping to nearest available OTM strike
