@@ -106,16 +106,7 @@ each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
         lp_K = nearest_otm_strike(dctx, sp_K, ww, Put)
         lc_K = nearest_otm_strike(dctx, sc_K, ww, Call)
         (lp_K === nothing || lc_K === nothing) && (ok = false; break)
-        condor_pos = Position[]
-        for t in (Trade(ctx.surface.underlying, sp_K, ctx.expiry, Put;  direction=-1, quantity=1.0),
-                  Trade(ctx.surface.underlying, sc_K, ctx.expiry, Call; direction=-1, quantity=1.0),
-                  Trade(ctx.surface.underlying, lp_K, ctx.expiry, Put;  direction=+1, quantity=1.0),
-                  Trade(ctx.surface.underlying, lc_K, ctx.expiry, Call; direction=+1, quantity=1.0))
-            p = open_position(t, ctx.surface)
-            p === nothing && (ok = false; break)
-            push!(condor_pos, p)
-        end
-        !ok && break
+        condor_pos = open_condor_positions(ctx, sp_K, sc_K, lp_K, lc_K)
         length(condor_pos) == 4 || (ok = false; break)
         push!(pnls_this_entry, settle(condor_pos, Float64(settlement)) * spot)
     end

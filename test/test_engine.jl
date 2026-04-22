@@ -455,5 +455,46 @@ using DuckDB
         @test extract_price(rec_nothing, :ask) === nothing
     end
 
+    # ============================================================
+    # 13. open_condor_positions
+    # ============================================================
+    @testset "open_condor_positions" begin
+        history = HistoricalView(DictDataSource(surfaces, settlement_spots), entry_ts)
+        # Build a surface with 2 puts + 2 calls so a condor has 4 distinct legs.
+        K_sp, K_lp = 100_000.0, 95_000.0   # short put, long put wing
+        K_sc, K_lc = 110_000.0, 115_000.0  # short call, long call wing
+        recs = OptionRecord[
+            OptionRecord("BTC-SP", Underlying("BTC"), expiry_ts, K_sp, Put,
+                         0.05, 0.06, 0.055, 80.0, 10.0, 100.0, entry_spot, entry_ts),
+            OptionRecord("BTC-LP", Underlying("BTC"), expiry_ts, K_lp, Put,
+                         0.02, 0.03, 0.025, 80.0, 10.0, 100.0, entry_spot, entry_ts),
+            OptionRecord("BTC-SC", Underlying("BTC"), expiry_ts, K_sc, Call,
+                         0.05, 0.06, 0.055, 80.0, 10.0, 100.0, entry_spot, entry_ts),
+            OptionRecord("BTC-LC", Underlying("BTC"), expiry_ts, K_lc, Call,
+                         0.02, 0.03, 0.025, 80.0, 10.0, 100.0, entry_spot, entry_ts),
+        ]
+        surf = build_surface(recs)
+        ctx_condor = VolSurfaceAnalysis.StrikeSelectionContext(surf, expiry_ts, history)
+
+        positions = open_condor_positions(ctx_condor, K_sp, K_sc, K_lp, K_lc)
+        @test length(positions) == 4
+        # Order: short put, short call, long put, long call
+        @test positions[1].trade.option_type == Put  && positions[1].trade.direction == -1 && positions[1].trade.strike == K_sp
+        @test positions[2].trade.option_type == Call && positions[2].trade.direction == -1 && positions[2].trade.strike == K_sc
+        @test positions[3].trade.option_type == Put  && positions[3].trade.direction ==  1 && positions[3].trade.strike == K_lp
+        @test positions[4].trade.option_type == Call && positions[4].trade.direction ==  1 && positions[4].trade.strike == K_lc
+        # Short legs fill at bid, long legs at ask (trade.direction convention)
+        @test positions[1].entry_price == 0.05
+        @test positions[3].entry_price == 0.03
+
+        # Missing record for one leg → empty vector
+        empty = open_condor_positions(ctx_condor, K_sp, K_sc, 80_000.0, K_lc)
+        @test isempty(empty)
+
+        # Quantity propagates
+        positions_q = open_condor_positions(ctx_condor, K_sp, K_sc, K_lp, K_lc; quantity=2.5)
+        @test all(p.trade.quantity == 2.5 for p in positions_q)
+    end
+
     try rm(tmpfile; force=true) catch end
 end

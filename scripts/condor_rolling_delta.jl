@@ -77,7 +77,6 @@ each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
     spot = dctx.spot
 
     ps = Float64[]
-    ok = true
     for (pd, cd) in DELTA_COMBOS
         sp_K = delta_strike(dctx, -pd, Put)
         sc_K = delta_strike(dctx,  cd, Call)
@@ -87,20 +86,10 @@ each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
         lp_K = nearest_otm_strike(dctx, sp_K, WING_WIDTH, Put)
         lc_K = nearest_otm_strike(dctx, sc_K, WING_WIDTH, Call)
         (lp_K === nothing || lc_K === nothing) && (push!(ps, NaN); continue)
-        cp = Position[]
-        for t in (Trade(ctx.surface.underlying, sp_K, ctx.expiry, Put;  direction=-1, quantity=1.0),
-                  Trade(ctx.surface.underlying, sc_K, ctx.expiry, Call; direction=-1, quantity=1.0),
-                  Trade(ctx.surface.underlying, lp_K, ctx.expiry, Put;  direction=+1, quantity=1.0),
-                  Trade(ctx.surface.underlying, lc_K, ctx.expiry, Call; direction=+1, quantity=1.0))
-            p = open_position(t, ctx.surface)
-            p === nothing && (ok = false; break)
-            push!(cp, p)
-        end
-        !ok && break
+        cp = open_condor_positions(ctx, sp_K, sc_K, lp_K, lc_K)
         length(cp) == 4 || (push!(ps, NaN); continue)
         push!(ps, settle(cp, Float64(settlement)) * spot)
     end
-    ok || (global n_skip += 1; return)
     push!(dates, Date(ctx.surface.timestamp))
     push!(pnls_by_combo, ps)
 end
