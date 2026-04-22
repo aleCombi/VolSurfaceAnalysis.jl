@@ -1,66 +1,103 @@
-# scripts/logsig_ic_test.jl
+# scripts/logsig_ic.jl
 #
-# Test: does intraday spot-path information predict realized PnL of a fixed
-# 20p/5c short strangle on SPY?
+# Information-coefficient (IC) test: does an intraday spot-path log-signature
+# feature predict realized PnL of a fixed delta short strangle?
 #
-# - Fixed strangle: sell 20Δ put + sell 5Δ call, expire next day, fill at bid.
-# - Features: configurable Vector{<:Feature}; extracted via `extract_surface_features`.
-# - Period: 2019-01-01 → 2024-01-31 (post-2018 for liquidity sanity).
-# - Validation: rolling walk-forward — train on last `TRAIN_WINDOW_DAYS`,
-#   test on next `TEST_WINDOW_DAYS`, step `STEP_DAYS`. Report per-window IC,
-#   aggregated IC, and pooled-test top-quintile metrics.
+# - Strangle: sell PUT_DELTA put + sell CALL_DELTA call, fill at bid, settle at expiry.
+# - Feature: SpotMinuteLogSig(lookback_hours=L, depth=3, min_points=M).
+# - Validation: rolling walk-forward — train TRAIN_WINDOW_DAYS, test TEST_WINDOW_DAYS,
+#   step STEP_DAYS. Report per-fold Pearson/Spearman IC, pooled stats, top/bot quintile,
+#   verdict.
 # - Model: ridge (`train_ridge!` with internal chronological val split).
+#
+# Replaces 16 prior scripts (logsig_ic_2ch_*_{2016|2019|intraday|intraday_late}.jl).
+# All knobs below can be overridden via ENV. Common presets:
+#
+#   # SPY 1-DTE baseline (2016+)
+#   SYM=SPY START_YEAR=2016 ENTRY_HOUR=12 TENOR=1d TRAIN_DAYS=365 LOOKBACK=3 MIN_PTS=100
+#
+#   # SPY intraday 12:00 / 4h
+#   SYM=SPY ENTRY_HOUR=12 TENOR=4h MAX_TAU_DAYS=0.5 LOOKBACK=5 MIN_PTS=150
+#
+#   # SPY intraday late 14:00 / 2h (canonical)
+#   SYM=SPY ENTRY_HOUR=14 TENOR=2h MAX_TAU_DAYS=0.5 LOOKBACK=5 MIN_PTS=150
+#
+#   # HYG 1-DTE (div-heavy: DIV=0.055, longer window allowed)
+#   SYM=HYG DIV=0.055 MAX_TAU_DAYS=5 TENOR=1d LOOKBACK=3 MIN_PTS=100
+#
+#   # Other symbol-specific DIV_YIELDs used previously:
+#   #   GLD=0.00  TSLA=0.00  SMH=0.00  XLE=0.03  TLT=0.036  QQQ=0.006  IWM=0.013
 
 using Pkg; Pkg.activate(@__DIR__)
 using VolSurfaceAnalysis
 using Dates, Printf, Statistics, Random, Plots
 
 # =============================================================================
-# Configuration
+# Configuration (override via ENV)
 # =============================================================================
 
-SYMBOL              = "HYG"
-START_DATE          = Date(2017, 1, 1)   # SPY M/W/F same-day expiries available;
-                                         # Tu/Th silently dropped via tau filter
-                                         # until Aug 2022 (when M-F became standard)
-END_DATE            = Date(2024, 1, 31)
-ENTRY_TIME          = Time(14, 0)        # 2pm ET (later entry → longer morning path)
-EXPIRY_INTERVAL     = Hour(2)            # 4pm ET expiry → ~2 hours to settlement
-SPREAD_LAMBDA       = 0.7
-RATE                = 0.045
-DIV_YIELD           = 0.055
+SYMBOL              = get(ENV, "SYM", "SPY")
+START_DATE          = Date(parse(Int, get(ENV, "START_YEAR", "2017")), 1, 1)
+END_DATE            = Date(parse(Int, get(ENV, "END_YEAR", "2024")),
+                           parse(Int, get(ENV, "END_MONTH", "1")),
+                           parse(Int, get(ENV, "END_DAY",   "31")))
+ENTRY_TIME          = Time(parse(Int, get(ENV, "ENTRY_HOUR", "14")), 0)
 
-# Filter: skip entries where the picked expiry isn't actually intraday.
-# Pre-Aug 2022 this drops Tu/Th entries automatically.
-MAX_TAU_DAYS        = 0.5                # ≤ 12 hours
+# Tenor: "1d" → Day(1), "2h" → Hour(2), "4h" → Hour(4), etc.
+_tenor_str          = lowercase(get(ENV, "TENOR", "2h"))
+EXPIRY_INTERVAL     = if endswith(_tenor_str, "d")
+    Day(parse(Int, _tenor_str[1:end-1]))
+elseif endswith(_tenor_str, "h")
+    Hour(parse(Int, _tenor_str[1:end-1]))
+else
+    error("Unknown TENOR: $_tenor_str (use e.g. \"1d\" or \"2h\")")
+end
 
-# Fixed strangle
-PUT_DELTA           = 0.20
-CALL_DELTA          = 0.05
+SPREAD_LAMBDA       = parse(Float64, get(ENV, "SPREAD_LAMBDA", "0.7"))
+RATE                = parse(Float64, get(ENV, "RATE", "0.045"))
+DIV_YIELD           = parse(Float64, get(ENV, "DIV", "0.013"))
 
+# Skip entries whose picked expiry is further than MAX_TAU_DAYS from now.
+# Use a large number (e.g. 5) for daily tenors; 0.5 for intraday ≤ 12h.
+MAX_TAU_DAYS        = parse(Float64, get(ENV, "MAX_TAU_DAYS", "0.5"))
+
+# Fixed strangle deltas
+PUT_DELTA           = parse(Float64, get(ENV, "PUT_DELTA",  "0.20"))
+CALL_DELTA          = parse(Float64, get(ENV, "CALL_DELTA", "0.05"))
+
+# Feature: SpotMinuteLogSig. Daily scripts used (3, 100); intraday (5, 150).
+LOGSIG_LOOKBACK_HRS = parse(Int, get(ENV, "LOOKBACK",  "5"))
+LOGSIG_MIN_POINTS   = parse(Int, get(ENV, "MIN_PTS",   "150"))
 FEATURES            = Feature[
-    SpotMinuteLogSig(lookback_hours=5, depth=3, min_points=150),
+    SpotMinuteLogSig(lookback_hours=LOGSIG_LOOKBACK_HRS, depth=3, min_points=LOGSIG_MIN_POINTS),
 ]
 
-# Walk-forward windows — 1yr train / 1Q test, step 1Q
-TRAIN_WINDOW_DAYS   = 365
-TEST_WINDOW_DAYS    = 90
-STEP_DAYS           = 90
+# Walk-forward windows
+TRAIN_WINDOW_DAYS   = parse(Int, get(ENV, "TRAIN_DAYS", "365"))
+TEST_WINDOW_DAYS    = parse(Int, get(ENV, "TEST_DAYS",  "90"))
+STEP_DAYS           = parse(Int, get(ENV, "STEP_DAYS",  "90"))
+MIN_TRAIN_ENTRIES   = parse(Int, get(ENV, "MIN_TRAIN",  "80"))
+MIN_TEST_ENTRIES    = parse(Int, get(ENV, "MIN_TEST",   "20"))
 
 # =============================================================================
 # Output dir
 # =============================================================================
 
-run_ts = Dates.format(now(), "yyyymmdd_HHMMSS")
-run_dir = joinpath(@__DIR__, "runs", "logsig_ic_2ch_HYG_intraday_late_$run_ts")
+run_tag = get(ENV, "TAG", "$(SYMBOL)_$(_tenor_str)_$(ENTRY_TIME)")
+run_ts  = Dates.format(now(), "yyyymmdd_HHMMSS")
+run_dir = joinpath(@__DIR__, "runs", "logsig_ic_$(run_tag)_$run_ts")
 mkpath(run_dir)
 println("Output: $run_dir")
+println("\n  $SYMBOL  $START_DATE → $END_DATE   entry $(ENTRY_TIME)  tenor=$(EXPIRY_INTERVAL)")
+println("  Δ_put=$PUT_DELTA Δ_call=$CALL_DELTA  max_tau=$(MAX_TAU_DAYS)d")
+println("  logsig lookback=$(LOGSIG_LOOKBACK_HRS)h depth=3 min_points=$(LOGSIG_MIN_POINTS)")
+println("  walk-forward train=$(TRAIN_WINDOW_DAYS)d test=$(TEST_WINDOW_DAYS)d step=$(STEP_DAYS)d")
 
 # =============================================================================
 # Data source
 # =============================================================================
 
-println("\nLoading $SYMBOL  $START_DATE → $END_DATE ...")
+println("\nLoading $SYMBOL …")
 (; source, sched) = polygon_parquet_source(SYMBOL;
     start_date=START_DATE, end_date=END_DATE, entry_time=ENTRY_TIME,
     rate=RATE, div_yield=DIV_YIELD, spread_lambda=SPREAD_LAMBDA,
@@ -70,13 +107,13 @@ println("  $(length(sched)) entry timestamps")
 n_features = surface_feature_dim(FEATURES)
 println("\nFeature stack:")
 for f in FEATURES
-    println("  ", typeof(f), "  →  dim = ", f isa SpotMinuteLogSig || f isa SpotLogSig || f isa IntradayLogSig ? logsig_dim(f) : 1)
+    println("  ", typeof(f), "  →  dim = ",
+            f isa SpotMinuteLogSig || f isa SpotLogSig || f isa IntradayLogSig ? logsig_dim(f) : 1)
 end
 println("  total feature dim = $n_features")
 
 # =============================================================================
-# Build dataset (one entry per day): (date, features, pnl_usd, spot)
-# Clear caches after each entry — features extracted, originals discarded.
+# Build dataset: (date, features, pnl_usd, spot) per entry
 # =============================================================================
 
 dates  = Date[]
@@ -88,69 +125,44 @@ n_total       = 0
 n_skip_feat   = 0
 n_skip_strk   = 0
 
-# Cache-eviction helper. ParquetDataSource and IntradayLogSig.BarCache both
-# accumulate per-date data forever; clear after each entry.
-function _evict_caches!(src::ParquetDataSource, feats::Vector{<:Feature})
-    empty!(src.surface_cache)
-    empty!(src.spot_date_cache)
-    for f in feats
-        if f isa IntradayLogSig
-            empty!(f.cache.data)
-        end
-    end
-    nothing
-end
-
 println("\nBuilding dataset...")
 report_every = 100
 each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
-    try
-        ismissing(settlement) && return
-        global n_total += 1
+    ismissing(settlement) && return
+    global n_total += 1
 
-        fvec = extract_surface_features(ctx, FEATURES)
-        if fvec === nothing
-            global n_skip_feat += 1
-            return
-        end
+    fvec = extract_surface_features(ctx, FEATURES)
+    if fvec === nothing
+        global n_skip_feat += 1
+        return
+    end
 
-        dctx = delta_context(ctx; rate=RATE, div_yield=DIV_YIELD)
-        dctx === nothing && return
-        # Intraday filter: skip if the picked expiry is more than MAX_TAU_DAYS away
-        dctx.tau * 365.25 > MAX_TAU_DAYS && (global n_skip_strk += 1; return)
-        spot = dctx.spot
+    dctx = delta_context(ctx; rate=RATE, div_yield=DIV_YIELD)
+    dctx === nothing && return
+    dctx.tau * 365.25 > MAX_TAU_DAYS && (global n_skip_strk += 1; return)
+    spot = dctx.spot
 
-        p_K = delta_strike(dctx, -PUT_DELTA,  Put)
-        c_K = delta_strike(dctx,  CALL_DELTA, Call)
-        if p_K === nothing || c_K === nothing
-            global n_skip_strk += 1
-            return
-        end
+    p_K = delta_strike(dctx, -PUT_DELTA,  Put)
+    c_K = delta_strike(dctx,  CALL_DELTA, Call)
+    if p_K === nothing || c_K === nothing
+        global n_skip_strk += 1
+        return
+    end
 
-        short_pos = Position[]
-        for t in (Trade(ctx.surface.underlying, p_K, ctx.expiry, Put;  direction=-1, quantity=1.0),
-                  Trade(ctx.surface.underlying, c_K, ctx.expiry, Call; direction=-1, quantity=1.0))
-            p = open_position(t, ctx.surface)
-            p === nothing && continue
-            push!(short_pos, p)
-        end
-        if length(short_pos) != 2
-            global n_skip_strk += 1
-            return
-        end
+    short_pos = open_strangle_positions(ctx, p_K, c_K; direction=-1)
+    if length(short_pos) != 2
+        global n_skip_strk += 1
+        return
+    end
+    pnl_usd = settle(short_pos, Float64(settlement)) * spot
 
-        pnl_usd = settle(short_pos, Float64(settlement)) * spot
+    push!(dates, Date(ctx.surface.timestamp))
+    push!(feats, fvec)
+    push!(pnls,  pnl_usd)
+    push!(spots, spot)
 
-        push!(dates, Date(ctx.surface.timestamp))
-        push!(feats, fvec)
-        push!(pnls,  pnl_usd)
-        push!(spots, spot)
-
-        if n_total % report_every == 0
-            @printf "  %5d entries processed  (kept %d, mem freed each step)\r" n_total length(dates)
-        end
-    finally
-        _evict_caches!(source, FEATURES)
+    if n_total % report_every == 0
+        @printf "  %5d entries processed  (kept %d)\r" n_total length(dates)
     end
 end
 println()
@@ -189,54 +201,19 @@ end
 X_all = hcat(feats...)                              # (n_features, n_kept)
 Y_all = reshape(Float32.(pnls), 1, length(pnls))    # (1, n_kept)
 
-# Sort by date (defensive — should already be sorted by each_entry order)
-sort_perm = sortperm(dates)
+sort_perm    = sortperm(dates)
 dates_sorted = dates[sort_perm]
-X_all = Float32.(X_all[:, sort_perm])
-Y_all = Y_all[:, sort_perm]
+X_all        = Float32.(X_all[:, sort_perm])
+Y_all        = Y_all[:, sort_perm]
 spots_sorted = spots[sort_perm]
 
-# Generate fold start dates: first test window starts after TRAIN_WINDOW_DAYS
-first_test_start = dates_sorted[1] + Day(TRAIN_WINDOW_DAYS)
-last_date = dates_sorted[end]
-
-function build_folds(dates_sorted, first_test_start, last_date,
-                    train_window_days, test_window_days, step_days)
-    folds = NamedTuple[]
-    test_start = first_test_start
-    fold_idx = 0
-    while test_start <= last_date
-        test_end = test_start + Day(test_window_days) - Day(1)
-        train_start = test_start - Day(train_window_days)
-        train_end = test_start - Day(1)
-
-        train_mask = (dates_sorted .>= train_start) .& (dates_sorted .<= train_end)
-        test_mask  = (dates_sorted .>= test_start)  .& (dates_sorted .<= test_end)
-        n_tr = sum(train_mask)
-        n_te = sum(test_mask)
-        if n_tr < 80 || n_te < 20
-            test_start += Day(step_days)
-            continue
-        end
-
-        fold_idx += 1
-        push!(folds, (
-            idx=fold_idx,
-            train_start=train_start, train_end=train_end,
-            test_start=test_start,   test_end=test_end,
-            train_mask=train_mask,   test_mask=test_mask,
-            n_train=n_tr,            n_test=n_te,
-        ))
-        test_start += Day(step_days)
-    end
-    return folds
-end
-
-folds = build_folds(dates_sorted, first_test_start, last_date,
-                    TRAIN_WINDOW_DAYS, TEST_WINDOW_DAYS, STEP_DAYS)
+include(joinpath(@__DIR__, "lib", "experiment.jl"))
+folds = build_folds(dates_sorted;
+    train_days=TRAIN_WINDOW_DAYS, test_days=TEST_WINDOW_DAYS, step_days=STEP_DAYS,
+    min_train=MIN_TRAIN_ENTRIES, min_test=MIN_TEST_ENTRIES,
+)
 
 println("\nWalk-forward folds: $(length(folds))")
-@printf "  train_window=%d days  test_window=%d days  step=%d days\n" TRAIN_WINDOW_DAYS TEST_WINDOW_DAYS STEP_DAYS
 
 # =============================================================================
 # Run folds
@@ -258,7 +235,6 @@ for f in folds
     y     = vec(Y_te)
     @assert all(isfinite, preds) "Non-finite predictions in fold $(f.idx)"
 
-    # Per-fold metrics
     pic = cor(preds, y)
     sic = spearman_corr(preds, y)
     n   = length(y)
@@ -266,17 +242,13 @@ for f in folds
     sorted = sortperm(preds; rev=true)
     top    = sorted[1:n_q]
     bot    = sorted[end-n_q+1:end]
-    top_pnl = mean(y[top])
-    bot_pnl = mean(y[bot])
-    all_pnl = mean(y)
     push!(fold_results, (
         idx=f.idx, train=(f.train_start, f.train_end), test=(f.test_start, f.test_end),
-        n_train=f.n_train, n_test=n,
+        n_train=sum(f.train_mask), n_test=n,
         pearson=pic, spearman=sic,
-        all_pnl=all_pnl, top_pnl=top_pnl, bot_pnl=bot_pnl,
+        all_pnl=mean(y), top_pnl=mean(y[top]), bot_pnl=mean(y[bot]),
     ))
 
-    # Pool for global stats
     append!(all_preds, preds)
     append!(all_y,     y)
     append!(all_dates, dates_sorted[f.test_mask])
@@ -305,13 +277,12 @@ end
 # Aggregate metrics
 # =============================================================================
 
-n_folds = length(fold_results)
-mean_pearson  = mean(r.pearson  for r in fold_results)
-mean_spearman = mean(r.spearman for r in fold_results)
-std_spearman  = std([r.spearman for r in fold_results])
+n_folds        = length(fold_results)
+mean_pearson   = mean(r.pearson  for r in fold_results)
+mean_spearman  = mean(r.spearman for r in fold_results)
+std_spearman   = std([r.spearman for r in fold_results])
 positive_folds = count(r -> r.spearman > 0, fold_results)
 
-# Pooled out-of-sample
 pooled_pearson  = cor(all_preds, all_y)
 pooled_spearman = spearman_corr(all_preds, all_y)
 n_pool          = length(all_y)
@@ -320,14 +291,13 @@ ss_tot          = sum((all_y .- y_mean) .^ 2)
 ss_res          = sum((all_y .- all_preds) .^ 2)
 pooled_r2       = 1 - ss_res / ss_tot
 
-# Pooled top-quintile (across all OOS folds, ranked together)
-n_q_pool        = max(1, n_pool ÷ 5)
-sorted_pool     = sortperm(all_preds; rev=true)
-top_pool        = sorted_pool[1:n_q_pool]
-bot_pool        = sorted_pool[end-n_q_pool+1:end]
-all_mean_pool   = mean(all_y)
-top_mean_pool   = mean(all_y[top_pool])
-bot_mean_pool   = mean(all_y[bot_pool])
+n_q_pool      = max(1, n_pool ÷ 5)
+sorted_pool   = sortperm(all_preds; rev=true)
+top_pool      = sorted_pool[1:n_q_pool]
+bot_pool      = sorted_pool[end-n_q_pool+1:end]
+all_mean_pool = mean(all_y)
+top_mean_pool = mean(all_y[top_pool])
+bot_mean_pool = mean(all_y[bot_pool])
 
 sharpe(v) = std(v) > 0 ? mean(v) / std(v) * sqrt(252) : 0.0
 all_sharpe = sharpe(all_y)
@@ -355,7 +325,6 @@ println()
 
 println("\n  Saving plots...")
 
-# Per-fold Spearman bar chart
 p1 = bar([r.idx for r in fold_results], [r.spearman for r in fold_results];
     xlabel="fold", ylabel="Spearman IC",
     title="walk-forward Spearman IC per fold (mean=$(round(mean_spearman, digits=3)))",
@@ -367,11 +336,9 @@ hline!(p1, [mean_spearman]; color=:black, ls=:dot, label="mean")
 savefig(p1, joinpath(run_dir, "walkforward_ic.png"))
 println("    walkforward_ic.png")
 
-# Pooled cumulative PnL: all vs predicted top quintile vs bot quintile
-order = sortperm(all_dates)
+order    = sortperm(all_dates)
 d_sort   = all_dates[order]
 y_sort   = all_y[order]
-p_sort   = all_preds[order]
 
 in_top = falses(n_pool); in_top[top_pool] .= true
 in_bot = falses(n_pool); in_bot[bot_pool] .= true
