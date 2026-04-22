@@ -20,6 +20,66 @@ const ResultRow = @NamedTuple begin
     pnl::Float64
 end
 
+# =============================================================================
+# Walk-forward folds
+# =============================================================================
+
+const Fold = @NamedTuple begin
+    idx::Int
+    train_start::Date
+    train_end::Date
+    test_start::Date
+    test_end::Date
+    train_mask::BitVector
+    test_mask::BitVector
+end
+
+"""
+    build_folds(dates; train_days, test_days, step_days, min_train=0, min_test=0)
+
+Walk-forward folds over an ascending-sorted `Vector{Date}`. First test window
+starts at `dates[1] + train_days`; each subsequent window advances `step_days`
+calendar days. Folds with fewer than `min_train` train-side or `min_test`
+test-side entries are skipped (the window still advances). Each `Fold` carries
+train/test `BitVector`s aligned with `dates` plus the four window endpoints and
+a 1-based fold index (counting only kept folds).
+"""
+function build_folds(
+    dates::AbstractVector{Date};
+    train_days::Integer,
+    test_days::Integer,
+    step_days::Integer,
+    min_train::Integer = 0,
+    min_test::Integer = 0,
+)
+    folds = Fold[]
+    isempty(dates) && return folds
+    test_start = dates[1] + Day(train_days)
+    last_d = dates[end]
+    idx = 0
+    while test_start <= last_d
+        test_end    = test_start + Day(test_days) - Day(1)
+        train_start = test_start - Day(train_days)
+        train_end   = test_start - Day(1)
+        train_mask  = (dates .>= train_start) .& (dates .<= train_end)
+        test_mask   = (dates .>= test_start)  .& (dates .<= test_end)
+        if sum(train_mask) >= min_train && sum(test_mask) >= min_test
+            idx += 1
+            push!(folds, (
+                idx         = idx,
+                train_start = train_start,
+                train_end   = train_end,
+                test_start  = test_start,
+                test_end    = test_end,
+                train_mask  = train_mask,
+                test_mask   = test_mask,
+            ))
+        end
+        test_start += Day(step_days)
+    end
+    return folds
+end
+
 function print_summary(results::Vector{ResultRow}, symbols::Vector{String})
     isempty(results) && return
 
