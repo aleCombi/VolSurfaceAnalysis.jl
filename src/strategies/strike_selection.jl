@@ -250,6 +250,15 @@ neither is available.
 """
 extract_price(rec, side::Symbol) = _extract_price(rec, side)
 
+"""
+    find_record_at_strike(recs, strike) -> OptionRecord | nothing
+
+Return the first record in `recs` whose `.strike` equals `strike` exactly,
+or `nothing` when no match exists.
+"""
+find_record_at_strike(recs::Vector{OptionRecord}, strike::Float64) =
+    _find_rec_by_strike(recs, strike)
+
 # =============================================================================
 # Asymmetric delta strangle strikes (used by condor selectors)
 # =============================================================================

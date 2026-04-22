@@ -141,10 +141,10 @@ export IronCondorStrategy, FixedSize, StrikeSelectionContext
 export sigma_selector, delta_selector, delta_condor_selector, constrained_delta_selector
 export ShortStrangleStrategy, delta_strangle_selector
 export RollingWingCondorSelector
-export open_condor_positions
+export open_condor_positions, open_strangle_positions
 
 # Strike selection helpers (used by scripts)
-export delta_context, delta_strike, nearest_otm_strike, extract_price
+export delta_context, delta_strike, nearest_otm_strike, extract_price, find_record_at_strike
 export _delta_strangle_strikes_asymmetric
 
 # ML features

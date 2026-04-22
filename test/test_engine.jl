@@ -496,5 +496,49 @@ using DuckDB
         @test all(p.trade.quantity == 2.5 for p in positions_q)
     end
 
+    # ============================================================
+    # 14. open_strangle_positions + find_record_at_strike
+    # ============================================================
+    @testset "open_strangle_positions + find_record_at_strike" begin
+        history = HistoricalView(DictDataSource(surfaces, settlement_spots), entry_ts)
+        K_sp, K_sc = 100_000.0, 110_000.0
+        recs = OptionRecord[
+            OptionRecord("BTC-SP", Underlying("BTC"), expiry_ts, K_sp, Put,
+                         0.05, 0.06, 0.055, 80.0, 10.0, 100.0, entry_spot, entry_ts),
+            OptionRecord("BTC-SC", Underlying("BTC"), expiry_ts, K_sc, Call,
+                         0.04, 0.05, 0.045, 80.0, 10.0, 100.0, entry_spot, entry_ts),
+        ]
+        surf = build_surface(recs)
+        ctx_strangle = VolSurfaceAnalysis.StrikeSelectionContext(surf, expiry_ts, history)
+
+        # Default direction = -1 (short). Short fills at bid.
+        short_pos = open_strangle_positions(ctx_strangle, K_sp, K_sc)
+        @test length(short_pos) == 2
+        @test short_pos[1].trade.option_type == Put  && short_pos[1].trade.direction == -1
+        @test short_pos[2].trade.option_type == Call && short_pos[2].trade.direction == -1
+        @test short_pos[1].entry_price == 0.05   # bid
+        @test short_pos[2].entry_price == 0.04   # bid
+
+        # direction = +1 (long) fills at ask.
+        long_pos = open_strangle_positions(ctx_strangle, K_sp, K_sc; direction=+1)
+        @test length(long_pos) == 2
+        @test all(p.trade.direction == +1 for p in long_pos)
+        @test long_pos[1].entry_price == 0.06   # ask
+        @test long_pos[2].entry_price == 0.05   # ask
+
+        # Missing record → empty
+        @test isempty(open_strangle_positions(ctx_strangle, 80_000.0, K_sc))
+
+        # Quantity propagates
+        qty_pos = open_strangle_positions(ctx_strangle, K_sp, K_sc; quantity=3.0)
+        @test all(p.trade.quantity == 3.0 for p in qty_pos)
+
+        # find_record_at_strike
+        @test find_record_at_strike(recs, K_sp) === recs[1]
+        @test find_record_at_strike(recs, K_sc) === recs[2]
+        @test find_record_at_strike(recs, 99_999.0) === nothing
+        @test find_record_at_strike(OptionRecord[], K_sp) === nothing
+    end
+
     try rm(tmpfile; force=true) catch end
 end
