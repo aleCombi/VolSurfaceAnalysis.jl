@@ -64,47 +64,40 @@ sched = filter(t -> t in Set(entry_ts), available_timestamps(source))
 # --- Build dataset (PnL[entry, combo]) ---------------------------------------
 dates = Date[]; pnl_rows = Vector{Vector{Float64}}()
 n_total = 0; n_skip = 0
-function _evict!(src::ParquetDataSource)
-    empty!(src.surface_cache); empty!(src.spot_date_cache); nothing
-end
 
 println("\nBuilding dataset...")
-each_entry(source, EXPIRY_INTERVAL, sched) do ctx, settlement
-    try
-        ismissing(settlement) && return
-        global n_total += 1
-        recs = VolSurfaceAnalysis._ctx_recs(ctx)
-        tau = VolSurfaceAnalysis._ctx_tau(ctx)
-        tau <= 0.0 && return
-        tau * 365.25 > MAX_TAU_DAYS && (global n_skip += 1; return)
-        spot = ctx.surface.spot
-        F = spot * exp((RATE - DIV_YIELD) * tau)
-        put_recs  = filter(r -> r.option_type == Put,  recs)
-        call_recs = filter(r -> r.option_type == Call, recs)
-        (isempty(put_recs) || isempty(call_recs)) && (global n_skip += 1; return)
-        spot_settle = Float64(settlement)
+each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
+    ismissing(settlement) && return
+    global n_total += 1
+    recs = VolSurfaceAnalysis._ctx_recs(ctx)
+    tau = VolSurfaceAnalysis._ctx_tau(ctx)
+    tau <= 0.0 && return
+    tau * 365.25 > MAX_TAU_DAYS && (global n_skip += 1; return)
+    spot = ctx.surface.spot
+    F = spot * exp((RATE - DIV_YIELD) * tau)
+    put_recs  = filter(r -> r.option_type == Put,  recs)
+    call_recs = filter(r -> r.option_type == Call, recs)
+    (isempty(put_recs) || isempty(call_recs)) && (global n_skip += 1; return)
+    spot_settle = Float64(settlement)
 
-        row = fill(NaN, n_combos)
-        for (i, (pd, cd)) in enumerate(COMBOS)
-            sp_K = VolSurfaceAnalysis._best_delta_strike(put_recs,  -pd, spot, :put,  F, tau, RATE)
-            sc_K = VolSurfaceAnalysis._best_delta_strike(call_recs,  cd, spot, :call, F, tau, RATE)
-            (sp_K === nothing || sc_K === nothing) && continue
-            sp_rec = nothing; sc_rec = nothing
-            for r in put_recs;  r.strike == sp_K && (sp_rec = r; break); end
-            for r in call_recs; r.strike == sc_K && (sc_rec = r; break); end
-            (sp_rec === nothing || sc_rec === nothing) && continue
-            sp_bid = VolSurfaceAnalysis._extract_price(sp_rec, :bid)
-            sc_bid = VolSurfaceAnalysis._extract_price(sc_rec, :bid)
-            (sp_bid === nothing || sc_bid === nothing) && continue
-            credit_usd = (sp_bid + sc_bid) * spot
-            intrinsic_usd = max(sp_K - spot_settle, 0.0) + max(spot_settle - sc_K, 0.0)
-            row[i] = credit_usd - intrinsic_usd
-        end
-        push!(dates, Date(ctx.surface.timestamp))
-        push!(pnl_rows, row)
-    finally
-        _evict!(source)
+    row = fill(NaN, n_combos)
+    for (i, (pd, cd)) in enumerate(COMBOS)
+        sp_K = VolSurfaceAnalysis._best_delta_strike(put_recs,  -pd, spot, :put,  F, tau, RATE)
+        sc_K = VolSurfaceAnalysis._best_delta_strike(call_recs,  cd, spot, :call, F, tau, RATE)
+        (sp_K === nothing || sc_K === nothing) && continue
+        sp_rec = nothing; sc_rec = nothing
+        for r in put_recs;  r.strike == sp_K && (sp_rec = r; break); end
+        for r in call_recs; r.strike == sc_K && (sc_rec = r; break); end
+        (sp_rec === nothing || sc_rec === nothing) && continue
+        sp_bid = VolSurfaceAnalysis._extract_price(sp_rec, :bid)
+        sc_bid = VolSurfaceAnalysis._extract_price(sc_rec, :bid)
+        (sp_bid === nothing || sc_bid === nothing) && continue
+        credit_usd = (sp_bid + sc_bid) * spot
+        intrinsic_usd = max(sp_K - spot_settle, 0.0) + max(spot_settle - sc_K, 0.0)
+        row[i] = credit_usd - intrinsic_usd
     end
+    push!(dates, Date(ctx.surface.timestamp))
+    push!(pnl_rows, row)
 end
 ord = sortperm(dates); dates = dates[ord]; pnl_rows = pnl_rows[ord]
 PnL = permutedims(reduce(hcat, pnl_rows))

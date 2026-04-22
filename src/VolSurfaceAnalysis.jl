@@ -126,7 +126,7 @@ export backtest_strategy, each_entry
 
 # Data sources
 export BacktestDataSource, DictDataSource, ParquetDataSource, HistoricalView
-export available_timestamps, get_surface, get_settlement_spot, get_spot, get_spots
+export available_timestamps, get_surface, get_settlement_spot, get_spot, get_spots, clear_cache!
 export PerformanceMetrics
 export aggregate_pnl, performance_metrics, profit_curve, average_entry_spread
 export condor_group_stats, condor_trade_table, condor_max_loss_by_key

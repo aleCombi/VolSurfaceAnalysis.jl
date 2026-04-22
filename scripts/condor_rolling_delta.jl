@@ -66,59 +66,52 @@ pnls_by_combo = Vector{Vector{Float64}}()   # entry_idx → length(DELTA_COMBOS)
 
 n_total = 0
 n_skip  = 0
-function _evict!(src::ParquetDataSource)
-    empty!(src.surface_cache); empty!(src.spot_date_cache); nothing
-end
 
 println("\nBuilding dataset (per-entry PnL × $(length(DELTA_COMBOS)) combos)...")
-each_entry(source, EXPIRY_INTERVAL, sched) do ctx, settlement
-    try
-        ismissing(settlement) && return
-        global n_total += 1
-        recs = VolSurfaceAnalysis._ctx_recs(ctx)
-        tau = VolSurfaceAnalysis._ctx_tau(ctx)
-        tau <= 0.0 && return
-        tau * 365.25 > MAX_TAU_DAYS && (global n_skip += 1; return)
-        spot = ctx.surface.spot
-        F = spot * exp((RATE - DIV_YIELD) * tau)
-        put_recs  = filter(r -> r.option_type == Put,  recs)
-        call_recs = filter(r -> r.option_type == Call, recs)
-        (isempty(put_recs) || isempty(call_recs)) && (global n_skip += 1; return)
+each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
+    ismissing(settlement) && return
+    global n_total += 1
+    recs = VolSurfaceAnalysis._ctx_recs(ctx)
+    tau = VolSurfaceAnalysis._ctx_tau(ctx)
+    tau <= 0.0 && return
+    tau * 365.25 > MAX_TAU_DAYS && (global n_skip += 1; return)
+    spot = ctx.surface.spot
+    F = spot * exp((RATE - DIV_YIELD) * tau)
+    put_recs  = filter(r -> r.option_type == Put,  recs)
+    call_recs = filter(r -> r.option_type == Call, recs)
+    (isempty(put_recs) || isempty(call_recs)) && (global n_skip += 1; return)
 
-        ps = Float64[]
-        ok = true
-        for (pd, cd) in DELTA_COMBOS
-            sp_K = VolSurfaceAnalysis._best_delta_strike(put_recs,  -pd, spot, :put,  F, tau, RATE)
-            sc_K = VolSurfaceAnalysis._best_delta_strike(call_recs,  cd, spot, :call, F, tau, RATE)
-            if sp_K === nothing || sc_K === nothing
-                push!(ps, NaN); continue
-            end
-            otm_p = filter(r -> r.strike < sp_K, put_recs)
-            otm_c = filter(r -> r.strike > sc_K, call_recs)
-            (isempty(otm_p) || isempty(otm_c)) && (push!(ps, NaN); continue)
-            target_lp = sp_K - WING_WIDTH
-            target_lc = sc_K + WING_WIDTH
-            lp = otm_p[argmin(abs.([r.strike - target_lp for r in otm_p]))]
-            lc = otm_c[argmin(abs.([r.strike - target_lc for r in otm_c]))]
-            cp = Position[]
-            for t in (Trade(ctx.surface.underlying, sp_K, ctx.expiry, Put;  direction=-1, quantity=1.0),
-                      Trade(ctx.surface.underlying, sc_K, ctx.expiry, Call; direction=-1, quantity=1.0),
-                      Trade(ctx.surface.underlying, lp.strike, ctx.expiry, Put;  direction=+1, quantity=1.0),
-                      Trade(ctx.surface.underlying, lc.strike, ctx.expiry, Call; direction=+1, quantity=1.0))
-                p = open_position(t, ctx.surface)
-                p === nothing && (ok = false; break)
-                push!(cp, p)
-            end
-            !ok && break
-            length(cp) == 4 || (push!(ps, NaN); continue)
-            push!(ps, settle(cp, Float64(settlement)) * spot)
+    ps = Float64[]
+    ok = true
+    for (pd, cd) in DELTA_COMBOS
+        sp_K = VolSurfaceAnalysis._best_delta_strike(put_recs,  -pd, spot, :put,  F, tau, RATE)
+        sc_K = VolSurfaceAnalysis._best_delta_strike(call_recs,  cd, spot, :call, F, tau, RATE)
+        if sp_K === nothing || sc_K === nothing
+            push!(ps, NaN); continue
         end
-        ok || (global n_skip += 1; return)
-        push!(dates, Date(ctx.surface.timestamp))
-        push!(pnls_by_combo, ps)
-    finally
-        _evict!(source)
+        otm_p = filter(r -> r.strike < sp_K, put_recs)
+        otm_c = filter(r -> r.strike > sc_K, call_recs)
+        (isempty(otm_p) || isempty(otm_c)) && (push!(ps, NaN); continue)
+        target_lp = sp_K - WING_WIDTH
+        target_lc = sc_K + WING_WIDTH
+        lp = otm_p[argmin(abs.([r.strike - target_lp for r in otm_p]))]
+        lc = otm_c[argmin(abs.([r.strike - target_lc for r in otm_c]))]
+        cp = Position[]
+        for t in (Trade(ctx.surface.underlying, sp_K, ctx.expiry, Put;  direction=-1, quantity=1.0),
+                  Trade(ctx.surface.underlying, sc_K, ctx.expiry, Call; direction=-1, quantity=1.0),
+                  Trade(ctx.surface.underlying, lp.strike, ctx.expiry, Put;  direction=+1, quantity=1.0),
+                  Trade(ctx.surface.underlying, lc.strike, ctx.expiry, Call; direction=+1, quantity=1.0))
+            p = open_position(t, ctx.surface)
+            p === nothing && (ok = false; break)
+            push!(cp, p)
+        end
+        !ok && break
+        length(cp) == 4 || (push!(ps, NaN); continue)
+        push!(ps, settle(cp, Float64(settlement)) * spot)
     end
+    ok || (global n_skip += 1; return)
+    push!(dates, Date(ctx.surface.timestamp))
+    push!(pnls_by_combo, ps)
 end
 println()
 n_kept = length(dates)

@@ -56,11 +56,15 @@ entry_positions(s::ScheduledStrategy, surface::VolatilitySurface, ::BacktestData
     entry_positions(s, surface)
 
 """
-    each_entry(f, source, expiry_interval, schedule)
+    each_entry(f, source, expiry_interval, schedule; clear_cache=false)
 
 Iterate over scheduled entry timestamps, resolving each to a surface and expiry.
 Calls `f(ctx::StrikeSelectionContext, settlement)` for each valid entry.
 `settlement` is `Union{Float64, Missing}`.
+
+When `clear_cache=true`, `clear_cache!(source)` is called after every callback
+(success or exception), which prevents unbounded cache growth during long
+single-pass sweeps. No-op for sources without caches.
 
 This is the shared iteration core used by both `backtest_strategy` and
 training data generation.
@@ -69,7 +73,8 @@ function each_entry(
     f,
     source::BacktestDataSource,
     expiry_interval::Period,
-    schedule::Vector{DateTime}
+    schedule::Vector{DateTime};
+    clear_cache::Bool=false,
 )
     ts = available_timestamps(source)
     for entry_time in schedule
@@ -86,7 +91,11 @@ function each_entry(
         history = HistoricalView(source, ts[idx])
         ctx = StrikeSelectionContext(surface, expiry, history)
         settlement = get_settlement_spot(source, expiry)
-        f(ctx, settlement)
+        try
+            f(ctx, settlement)
+        finally
+            clear_cache && clear_cache!(source)
+        end
     end
 end
 

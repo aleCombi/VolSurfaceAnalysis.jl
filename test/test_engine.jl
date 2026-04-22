@@ -280,5 +280,83 @@ using DuckDB
         @test pos3[1].trade.strike == strike
     end
 
+    # ============================================================
+    # 10. clear_cache!: no-op default, ParquetDataSource empties, idempotent
+    # ============================================================
+    @testset "clear_cache! default no-op" begin
+        source = DictDataSource(surfaces, settlement_spots)
+        @test VolSurfaceAnalysis.clear_cache!(source) === nothing
+        # Still functional after "clearing"
+        @test get_surface(source, entry_ts) isa VolatilitySurface
+    end
+
+    @testset "clear_cache! on ParquetDataSource empties caches" begin
+        # Seed a ParquetDataSource directly — no parquet I/O needed.
+        p = ParquetDataSource(
+            [entry_ts];
+            path_for_timestamp = _ -> "/nonexistent",
+            read_records       = (path; where="") -> OptionRecord[],
+            spot_root          = "/nonexistent",
+            spot_symbol        = "BTC",
+        )
+        # Manually populate both caches
+        p.surface_cache[entry_ts] = surfaces[entry_ts]
+        p.spot_date_cache[Date(entry_ts)] = Dict(entry_ts => 1.0)
+        @test !isempty(p.surface_cache)
+        @test !isempty(p.spot_date_cache)
+
+        VolSurfaceAnalysis.clear_cache!(p)
+        @test isempty(p.surface_cache)
+        @test isempty(p.spot_date_cache)
+
+        # Idempotent
+        @test VolSurfaceAnalysis.clear_cache!(p) === nothing
+        @test isempty(p.surface_cache)
+    end
+
+    @testset "each_entry clear_cache kwarg drives clear_cache!" begin
+        # Custom data source that counts clear_cache! invocations.
+        mutable struct CountingDataSource <: BacktestDataSource
+            inner::DictDataSource
+            clears::Int
+        end
+        VolSurfaceAnalysis.available_timestamps(s::CountingDataSource) =
+            available_timestamps(s.inner)
+        VolSurfaceAnalysis.get_surface(s::CountingDataSource, ts::DateTime) =
+            get_surface(s.inner, ts)
+        VolSurfaceAnalysis.get_settlement_spot(s::CountingDataSource, ts::DateTime) =
+            get_settlement_spot(s.inner, ts)
+        VolSurfaceAnalysis.get_spot(s::CountingDataSource, ts::DateTime) =
+            get_spot(s.inner, ts)
+        VolSurfaceAnalysis.clear_cache!(s::CountingDataSource) = (s.clears += 1; nothing)
+
+        inner = DictDataSource(surfaces, settlement_spots)
+
+        # clear_cache=false (default): no clears
+        cs1 = CountingDataSource(inner, 0)
+        n_cb1 = 0
+        each_entry(cs1, Day(1), [entry_ts]) do _, _
+            n_cb1 += 1
+        end
+        @test n_cb1 == 1
+        @test cs1.clears == 0
+
+        # clear_cache=true: one clear per callback
+        cs2 = CountingDataSource(inner, 0)
+        n_cb2 = 0
+        each_entry(cs2, Day(1), [entry_ts]; clear_cache=true) do _, _
+            n_cb2 += 1
+        end
+        @test n_cb2 == 1
+        @test cs2.clears == 1
+
+        # Callback throws → finally still clears
+        cs3 = CountingDataSource(inner, 0)
+        @test_throws ErrorException each_entry(cs3, Day(1), [entry_ts]; clear_cache=true) do _, _
+            error("boom")
+        end
+        @test cs3.clears == 1
+    end
+
     try rm(tmpfile; force=true) catch end
 end
