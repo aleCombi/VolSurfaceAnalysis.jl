@@ -51,25 +51,11 @@ println("\n  $SYMBOL  $START_DATE → $END_DATE   train=$TRAIN_DAYS d / test=$TE
 # Data source
 # =============================================================================
 
-store = DEFAULT_STORE
-all_dates = available_polygon_dates(store, SYMBOL)
-filtered = filter(d -> START_DATE <= d <= END_DATE, all_dates)
-println("\nLoading $SYMBOL  ($(length(filtered)) trading days)...")
-
-entry_ts = build_entry_timestamps(filtered, ENTRY_TIME)
-entry_spots = read_polygon_spot_prices_for_timestamps(
-    polygon_spot_root(store), entry_ts; symbol=SYMBOL,
+println("\nLoading $SYMBOL  $START_DATE → $END_DATE ...")
+(; source, sched) = polygon_parquet_source(SYMBOL;
+    start_date=START_DATE, end_date=END_DATE, entry_time=ENTRY_TIME,
+    rate=RATE, div_yield=DIV_YIELD, spread_lambda=SPREAD_LAMBDA,
 )
-source = ParquetDataSource(entry_ts;
-    path_for_timestamp = ts -> polygon_options_path(store, Date(ts), SYMBOL),
-    read_records = (path; where="") -> read_polygon_option_records(
-        path, entry_spots; where=where, min_volume=0, warn=false,
-        spread_lambda=SPREAD_LAMBDA, rate=RATE, div_yield=DIV_YIELD,
-    ),
-    spot_root = polygon_spot_root(store),
-    spot_symbol = SYMBOL,
-)
-sched = filter(t -> t in Set(entry_ts), available_timestamps(source))
 
 # =============================================================================
 # Build dataset: PnL per (entry, wing_width)
@@ -80,58 +66,47 @@ pnls_by_width = Vector{Vector{Float64}}()
 
 n_total = 0
 n_skip  = 0
-function _evict!(src::ParquetDataSource)
-    empty!(src.surface_cache); empty!(src.spot_date_cache); nothing
-end
 
 println("\nBuilding dataset (per-entry PnL × $(length(WING_WIDTHS)) widths)...")
-each_entry(source, EXPIRY_INTERVAL, sched) do ctx, settlement
-    try
-        ismissing(settlement) && return
-        global n_total += 1
-        recs = VolSurfaceAnalysis._ctx_recs(ctx)
-        tau  = VolSurfaceAnalysis._ctx_tau(ctx)
-        tau <= 0.0 && return
-        tau * 365.25 > MAX_TAU_DAYS && (global n_skip += 1; return)
-        spot = ctx.surface.spot
-        F = spot * exp((RATE - DIV_YIELD) * tau)
+each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
+    ismissing(settlement) && return
+    global n_total += 1
+    dctx = delta_context(ctx; rate=RATE, div_yield=DIV_YIELD)
+    dctx === nothing && (global n_skip += 1; return)
+    dctx.tau * 365.25 > MAX_TAU_DAYS && (global n_skip += 1; return)
+    spot = dctx.spot
 
-        put_recs  = filter(r -> r.option_type == Put,  recs)
-        call_recs = filter(r -> r.option_type == Call, recs)
-        sp_K = VolSurfaceAnalysis._best_delta_strike(put_recs,  -PUT_DELTA,  spot, :put,  F, tau, RATE)
-        sc_K = VolSurfaceAnalysis._best_delta_strike(call_recs,  CALL_DELTA, spot, :call, F, tau, RATE)
-        (sp_K === nothing || sc_K === nothing) && (global n_skip += 1; return)
+    sp_K = delta_strike(dctx, -PUT_DELTA,  Put)
+    sc_K = delta_strike(dctx,  CALL_DELTA, Call)
+    (sp_K === nothing || sc_K === nothing) && (global n_skip += 1; return)
 
-        otm_put_recs  = filter(r -> r.strike < sp_K, put_recs)
-        otm_call_recs = filter(r -> r.strike > sc_K, call_recs)
-        (isempty(otm_put_recs) || isempty(otm_call_recs)) && (global n_skip += 1; return)
+    otm_put_recs  = filter(r -> r.strike < sp_K, dctx.put_recs)
+    otm_call_recs = filter(r -> r.strike > sc_K, dctx.call_recs)
+    (isempty(otm_put_recs) || isempty(otm_call_recs)) && (global n_skip += 1; return)
 
-        ps = Float64[]
-        ok = true
-        for ww in WING_WIDTHS
-            target_lp = sp_K - ww
-            target_lc = sc_K + ww
-            lp = otm_put_recs[argmin(abs.([r.strike - target_lp for r in otm_put_recs]))]
-            lc = otm_call_recs[argmin(abs.([r.strike - target_lc for r in otm_call_recs]))]
-            cp = Position[]
-            for t in (Trade(ctx.surface.underlying, sp_K, ctx.expiry, Put;  direction=-1, quantity=1.0),
-                      Trade(ctx.surface.underlying, sc_K, ctx.expiry, Call; direction=-1, quantity=1.0),
-                      Trade(ctx.surface.underlying, lp.strike, ctx.expiry, Put;  direction=+1, quantity=1.0),
-                      Trade(ctx.surface.underlying, lc.strike, ctx.expiry, Call; direction=+1, quantity=1.0))
-                p = open_position(t, ctx.surface)
-                p === nothing && (ok = false; break)
-                push!(cp, p)
-            end
-            !ok && break
-            length(cp) == 4 || (ok = false; break)
-            push!(ps, settle(cp, Float64(settlement)) * spot)
+    ps = Float64[]
+    ok = true
+    for ww in WING_WIDTHS
+        target_lp = sp_K - ww
+        target_lc = sc_K + ww
+        lp = otm_put_recs[argmin(abs.([r.strike - target_lp for r in otm_put_recs]))]
+        lc = otm_call_recs[argmin(abs.([r.strike - target_lc for r in otm_call_recs]))]
+        cp = Position[]
+        for t in (Trade(ctx.surface.underlying, sp_K, ctx.expiry, Put;  direction=-1, quantity=1.0),
+                  Trade(ctx.surface.underlying, sc_K, ctx.expiry, Call; direction=-1, quantity=1.0),
+                  Trade(ctx.surface.underlying, lp.strike, ctx.expiry, Put;  direction=+1, quantity=1.0),
+                  Trade(ctx.surface.underlying, lc.strike, ctx.expiry, Call; direction=+1, quantity=1.0))
+            p = open_position(t, ctx.surface)
+            p === nothing && (ok = false; break)
+            push!(cp, p)
         end
-        ok || (global n_skip += 1; return)
-        push!(dates, Date(ctx.surface.timestamp))
-        push!(pnls_by_width, ps)
-    finally
-        _evict!(source)
+        !ok && break
+        length(cp) == 4 || (ok = false; break)
+        push!(ps, settle(cp, Float64(settlement)) * spot)
     end
+    ok || (global n_skip += 1; return)
+    push!(dates, Date(ctx.surface.timestamp))
+    push!(pnls_by_width, ps)
 end
 println()
 n_kept = length(dates)

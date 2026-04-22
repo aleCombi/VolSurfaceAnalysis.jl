@@ -43,25 +43,11 @@ println("\n  $SYMBOL  $START_DATE → $END_DATE   1-DTE noon   shorts (Δp=$PUT_
 println("  Skip bottom percentile grid: $SKIP_PCTS")
 
 # --- Data source ------------------------------------------------------------
-store = DEFAULT_STORE
-all_dates = available_polygon_dates(store, SYMBOL)
-filtered = filter(d -> START_DATE <= d <= END_DATE, all_dates)
-println("\nLoading $SYMBOL ($(length(filtered)) trading days)...")
-
-entry_ts = build_entry_timestamps(filtered, ENTRY_TIME)
-entry_spots = read_polygon_spot_prices_for_timestamps(
-    polygon_spot_root(store), entry_ts; symbol=SYMBOL,
+println("\nLoading $SYMBOL  $START_DATE → $END_DATE ...")
+(; source, sched) = polygon_parquet_source(SYMBOL;
+    start_date=START_DATE, end_date=END_DATE, entry_time=ENTRY_TIME,
+    rate=RATE, div_yield=DIV_YIELD, spread_lambda=SPREAD_LAMBDA,
 )
-source = ParquetDataSource(entry_ts;
-    path_for_timestamp = ts -> polygon_options_path(store, Date(ts), SYMBOL),
-    read_records = (path; where="") -> read_polygon_option_records(
-        path, entry_spots; where=where, min_volume=0, warn=false,
-        spread_lambda=SPREAD_LAMBDA, rate=RATE, div_yield=DIV_YIELD,
-    ),
-    spot_root = polygon_spot_root(store),
-    spot_symbol = SYMBOL,
-)
-sched = filter(t -> t in Set(entry_ts), available_timestamps(source))
 
 # --- Features --------------------------------------------------------------
 logsig_feat = SpotMinuteLogSig(; lookback_hours=3, depth=3, min_points=100)
@@ -81,66 +67,54 @@ println("  base feats: $n_base   total feature dim: $n_feat")
 # --- Build dataset ---------------------------------------------------------
 dates = Date[]; pnls = Float64[]; features = Vector{Vector{Float64}}()
 n_total = 0; n_skip_pnl = 0; n_skip_feat = 0
-function _evict!(src::ParquetDataSource)
-    empty!(src.surface_cache); nothing
-end
 
 println("\nBuilding feature + PnL dataset...")
-each_entry(source, EXPIRY_INTERVAL, sched) do ctx, settlement
-    try
-        ismissing(settlement) && return
-        global n_total += 1
-        recs = VolSurfaceAnalysis._ctx_recs(ctx)
-        tau = VolSurfaceAnalysis._ctx_tau(ctx)
-        tau <= 0.0 && return
-        tau * 365.25 > MAX_TAU_DAYS && (global n_skip_pnl += 1; return)
-        spot = ctx.surface.spot
-        F = spot * exp((RATE - DIV_YIELD) * tau)
-        put_recs  = filter(r -> r.option_type == Put,  recs)
-        call_recs = filter(r -> r.option_type == Call, recs)
-        (isempty(put_recs) || isempty(call_recs)) && (global n_skip_pnl += 1; return)
+each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
+    ismissing(settlement) && return
+    global n_total += 1
+    dctx = delta_context(ctx; rate=RATE, div_yield=DIV_YIELD)
+    dctx === nothing && (global n_skip_pnl += 1; return)
+    dctx.tau * 365.25 > MAX_TAU_DAYS && (global n_skip_pnl += 1; return)
+    spot = dctx.spot
 
-        sp_K = VolSurfaceAnalysis._best_delta_strike(put_recs,  -PUT_DELTA,  spot, :put,  F, tau, RATE)
-        sc_K = VolSurfaceAnalysis._best_delta_strike(call_recs,  CALL_DELTA, spot, :call, F, tau, RATE)
-        (sp_K === nothing || sc_K === nothing) && (global n_skip_pnl += 1; return)
-        sp_rec = nothing; sc_rec = nothing
-        for r in put_recs;  r.strike == sp_K && (sp_rec = r; break); end
-        for r in call_recs; r.strike == sc_K && (sc_rec = r; break); end
-        (sp_rec === nothing || sc_rec === nothing) && (global n_skip_pnl += 1; return)
-        sp_bid = VolSurfaceAnalysis._extract_price(sp_rec, :bid)
-        sc_bid = VolSurfaceAnalysis._extract_price(sc_rec, :bid)
-        (sp_bid === nothing || sc_bid === nothing) && (global n_skip_pnl += 1; return)
-        spot_settle = Float64(settlement)
-        credit_usd = (sp_bid + sc_bid) * spot
-        intrinsic_usd = max(sp_K - spot_settle, 0.0) + max(spot_settle - sc_K, 0.0)
-        pnl = credit_usd - intrinsic_usd
+    sp_K = delta_strike(dctx, -PUT_DELTA,  Put)
+    sc_K = delta_strike(dctx,  CALL_DELTA, Call)
+    (sp_K === nothing || sc_K === nothing) && (global n_skip_pnl += 1; return)
+    sp_rec = nothing; sc_rec = nothing
+    for r in dctx.put_recs;  r.strike == sp_K && (sp_rec = r; break); end
+    for r in dctx.call_recs; r.strike == sc_K && (sc_rec = r; break); end
+    (sp_rec === nothing || sc_rec === nothing) && (global n_skip_pnl += 1; return)
+    sp_bid = extract_price(sp_rec, :bid)
+    sc_bid = extract_price(sc_rec, :bid)
+    (sp_bid === nothing || sc_bid === nothing) && (global n_skip_pnl += 1; return)
+    spot_settle = Float64(settlement)
+    credit_usd = (sp_bid + sc_bid) * spot
+    intrinsic_usd = max(sp_K - spot_settle, 0.0) + max(spot_settle - sc_K, 0.0)
+    pnl = credit_usd - intrinsic_usd
 
-        ls = logsig_feat(ctx)
-        ls === nothing && (global n_skip_feat += 1; return)
-        feat_vec = Float64[]
-        append!(feat_vec, ls)
-        ok = true
-        for f in base_feats
-            v = f(ctx)
-            if v === nothing
-                ok = false; break
-            end
-            if v isa AbstractVector
-                append!(feat_vec, v)
-            else
-                push!(feat_vec, Float64(v))
-            end
+    ls = logsig_feat(ctx)
+    ls === nothing && (global n_skip_feat += 1; return)
+    feat_vec = Float64[]
+    append!(feat_vec, ls)
+    ok = true
+    for f in base_feats
+        v = f(ctx)
+        if v === nothing
+            ok = false; break
         end
-        ok || (global n_skip_feat += 1; return)
-        length(feat_vec) == n_feat || (global n_skip_feat += 1; return)
-        any(!isfinite, feat_vec) && (global n_skip_feat += 1; return)
-
-        push!(dates, Date(ctx.surface.timestamp))
-        push!(pnls, pnl)
-        push!(features, feat_vec)
-    finally
-        _evict!(source)
+        if v isa AbstractVector
+            append!(feat_vec, v)
+        else
+            push!(feat_vec, Float64(v))
+        end
     end
+    ok || (global n_skip_feat += 1; return)
+    length(feat_vec) == n_feat || (global n_skip_feat += 1; return)
+    any(!isfinite, feat_vec) && (global n_skip_feat += 1; return)
+
+    push!(dates, Date(ctx.surface.timestamp))
+    push!(pnls, pnl)
+    push!(features, feat_vec)
 end
 
 ord = sortperm(dates); dates = dates[ord]; pnls = pnls[ord]; features = features[ord]
