@@ -8,6 +8,16 @@ Julia package for options volatility surface analysis and strategy backtesting. 
 
 After every task that requires user feedback -- especially tasks that change architecture, add features, modify the data pipeline, or restructure code -- update this file to reflect the current state. This ensures future Claude sessions start with accurate context.
 
+## Experiment Methodology
+
+New experiments follow a three-stage promotion path:
+
+1. **Scratch first** — prototype in `scratch/`, reusing existing `src/` code as much as possible. Iterate freely here; nothing in `scratch/` is load-bearing.
+2. **Consolidate into `src/`** — once the idea is validated, lift the reusable, interesting parts (new strategies, selectors, features, helpers) into `src/` with a clean interface.
+3. **Narrow script in `scripts/`** — the final script in `scripts/` should be mostly a spec/config: parameter block + a few calls into `src/`. Heavy logic belongs in `src/`, not the script.
+
+**Tests**: if the experiment has research interest (a result worth defending), add tests for the promoted `src/` components. This catches regressions when unrelated bugfixes or refactors later break the idea.
+
 ## Quick Commands
 
 ```bash
@@ -87,7 +97,6 @@ Scripts use `scripts/Project.toml` via `Pkg.activate(@__DIR__)`.
 
 - **`scripts/sizing_filter.jl`** -- Configurable experiment runner. Replaces 9 prior scripts by parameterizing symbols, feature sets, and ML variants. Config block at top; supports `Sizing` (binary/linear/sigmoid), `Classifier` (loss prediction + skip), and `DeltaRegression` variants. Shared infrastructure in `scripts/lib/experiment.jl`.
 - **`scripts/cross_symbol_filter.jl`** -- Cross-symbol training experiment. Trains on SPY+QQQ+IWM+SPXW, tests on SPY. Compares regressor vs classifier, detailed tail risk analysis (CVaR, loss severity buckets, filter forensics).
-- **`scripts/strike_selector.jl`** -- Separate: `ScoredCandidateSelector` pipeline (candidate enumeration + scoring), fundamentally different training data generation.
 
 ## Polygon IV inversion (rate / div_yield)
 
