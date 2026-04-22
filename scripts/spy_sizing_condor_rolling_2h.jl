@@ -50,25 +50,11 @@ println("Output: $run_dir")
 # Data source
 # =============================================================================
 
-store = DEFAULT_STORE
-all_dates = available_polygon_dates(store, SYMBOL)
-filtered = filter(d -> START_DATE <= d <= END_DATE, all_dates)
-println("\nLoading $SYMBOL  $START_DATE → $END_DATE  ($(length(filtered)) trading days)")
-
-entry_ts = build_entry_timestamps(filtered, ENTRY_TIME)
-entry_spots = read_polygon_spot_prices_for_timestamps(
-    polygon_spot_root(store), entry_ts; symbol=SYMBOL,
+println("\nLoading $SYMBOL  $START_DATE → $END_DATE")
+(; source, sched) = polygon_parquet_source(SYMBOL;
+    start_date=START_DATE, end_date=END_DATE, entry_time=ENTRY_TIME,
+    rate=RATE, div_yield=DIV_YIELD, spread_lambda=SPREAD_LAMBDA,
 )
-source = ParquetDataSource(entry_ts;
-    path_for_timestamp = ts -> polygon_options_path(store, Date(ts), SYMBOL),
-    read_records = (path; where="") -> read_polygon_option_records(
-        path, entry_spots; where=where, min_volume=0, warn=false,
-        spread_lambda=SPREAD_LAMBDA, rate=RATE, div_yield=DIV_YIELD,
-    ),
-    spot_root = polygon_spot_root(store),
-    spot_symbol = SYMBOL,
-)
-sched = filter(t -> t in Set(entry_ts), available_timestamps(source))
 
 # =============================================================================
 # Build dataset: for each entry compute PnL for ALL wing widths simultaneously

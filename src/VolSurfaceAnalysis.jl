@@ -91,6 +91,7 @@ export polygon_options_path, polygon_spot_path
 export deribit_history_path, deribit_delivery_path
 export available_polygon_dates, available_deribit_dates
 export build_entry_timestamps, load_minute_spots, load_surfaces_and_spots
+export polygon_parquet_source
 
 # ============================================================================
 # Exports: Pricing Models
