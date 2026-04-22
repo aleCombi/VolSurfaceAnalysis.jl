@@ -214,6 +214,42 @@ function delta_strike(
     return _best_delta_strike(recs, target_delta, dctx.spot, side, dctx.F, dctx.tau, dctx.rate)
 end
 
+"""
+    nearest_otm_strike(dctx, reference_K, width, opt_type::OptionType)
+        -> Float64 | nothing
+
+Wing-pick helper: return the strike strictly OTM relative to `reference_K`
+whose distance from `reference_K ± width` is minimal. For `Put`, the wing lies
+below `reference_K` at target `reference_K - width`; for `Call`, above at
+`reference_K + width`. `width` is a positive distance in strike-price units.
+Returns `nothing` when no strictly-OTM record exists on the requested side.
+"""
+function nearest_otm_strike(
+    dctx,
+    reference_K::Float64,
+    width::Float64,
+    opt_type::OptionType,
+)::Union{Nothing,Float64}
+    if opt_type == Put
+        otm = filter(r -> r.strike < reference_K, dctx.put_recs)
+        target = reference_K - width
+    else
+        otm = filter(r -> r.strike > reference_K, dctx.call_recs)
+        target = reference_K + width
+    end
+    isempty(otm) && return nothing
+    return otm[argmin(abs.([r.strike - target for r in otm]))].strike
+end
+
+"""
+    extract_price(rec, side::Symbol) -> Float64 | nothing
+
+Return `rec.bid_price` (`side=:bid`) or `rec.ask_price` (`side=:ask`), falling
+back to `rec.mark_price` when the primary is missing. Returns `nothing` if
+neither is available.
+"""
+extract_price(rec, side::Symbol) = _extract_price(rec, side)
+
 # =============================================================================
 # Asymmetric delta strangle strikes (used by condor selectors)
 # =============================================================================

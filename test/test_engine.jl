@@ -397,5 +397,63 @@ using DuckDB
         @test delta_strike(dctx,  0.30, Call) == strike
     end
 
+    # ============================================================
+    # 12. nearest_otm_strike + extract_price
+    # ============================================================
+    @testset "nearest_otm_strike + extract_price" begin
+        history = HistoricalView(DictDataSource(surfaces, settlement_spots), entry_ts)
+        # Build a surface with OTM strikes on both sides of spot.
+        K_short_put  = 100_000.0
+        K_short_call = 110_000.0
+        strikes_put  = [90_000.0, 95_000.0, 98_000.0, K_short_put]
+        strikes_call = [K_short_call, 112_000.0, 115_000.0, 120_000.0]
+        recs_multi = OptionRecord[]
+        for K in strikes_put
+            push!(recs_multi, OptionRecord("BTC-$K-P", Underlying("BTC"), expiry_ts, K, Put,
+                                           0.05, 0.06, 0.055, 80.0, 10.0, 100.0, entry_spot, entry_ts))
+        end
+        for K in strikes_call
+            push!(recs_multi, OptionRecord("BTC-$K-C", Underlying("BTC"), expiry_ts, K, Call,
+                                           0.05, 0.06, 0.055, 80.0, 10.0, 100.0, entry_spot, entry_ts))
+        end
+        surf_multi = build_surface(recs_multi)
+        ctx_multi = VolSurfaceAnalysis.StrikeSelectionContext(surf_multi, expiry_ts, history)
+        dctx_multi = delta_context(ctx_multi)
+        @test dctx_multi !== nothing
+
+        # Put wing: below short put. width=2000 → target 98_000 → exact match
+        @test nearest_otm_strike(dctx_multi, K_short_put, 2_000.0, Put)  == 98_000.0
+        # Put wing: width=5000 → target 95_000 → exact match
+        @test nearest_otm_strike(dctx_multi, K_short_put, 5_000.0, Put)  == 95_000.0
+        # Put wing: width=6000 → target 94_000 → snap to nearest OTM (95_000)
+        @test nearest_otm_strike(dctx_multi, K_short_put, 6_000.0, Put)  == 95_000.0
+
+        # Call wing: above short call. width=2000 → target 112_000 → exact match
+        @test nearest_otm_strike(dctx_multi, K_short_call, 2_000.0, Call) == 112_000.0
+        # Call wing: width=11000 → target 121_000 → snap to nearest OTM (120_000)
+        @test nearest_otm_strike(dctx_multi, K_short_call, 11_000.0, Call) == 120_000.0
+
+        # Put wing with no OTM: reference below all strikes → nothing
+        @test nearest_otm_strike(dctx_multi, 80_000.0, 5_000.0, Put) === nothing
+        # Call wing with no OTM: reference above all strikes → nothing
+        @test nearest_otm_strike(dctx_multi, 130_000.0, 5_000.0, Call) === nothing
+
+        # extract_price: bid / ask / mark fallback
+        rec_full = OptionRecord("BTC-F", Underlying("BTC"), expiry_ts, 100.0, Put,
+                                0.03, 0.04, 0.035, 80.0, 10.0, 100.0, 100.0, entry_ts)
+        @test extract_price(rec_full, :bid) == 0.03
+        @test extract_price(rec_full, :ask) == 0.04
+
+        rec_no_bid = OptionRecord("BTC-NB", Underlying("BTC"), expiry_ts, 100.0, Put,
+                                  missing, 0.04, 0.035, 80.0, 10.0, 100.0, 100.0, entry_ts)
+        @test extract_price(rec_no_bid, :bid) == 0.035   # fallback to mark
+        @test extract_price(rec_no_bid, :ask) == 0.04    # primary
+
+        rec_nothing = OptionRecord("BTC-NN", Underlying("BTC"), expiry_ts, 100.0, Put,
+                                   missing, missing, missing, 80.0, 10.0, 100.0, 100.0, entry_ts)
+        @test extract_price(rec_nothing, :bid) === nothing
+        @test extract_price(rec_nothing, :ask) === nothing
+    end
+
     try rm(tmpfile; force=true) catch end
 end

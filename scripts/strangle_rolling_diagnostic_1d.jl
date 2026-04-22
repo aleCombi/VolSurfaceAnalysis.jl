@@ -84,8 +84,8 @@ each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
         for r in dctx.put_recs;  r.strike == sp_K && (sp_rec = r; break); end
         for r in dctx.call_recs; r.strike == sc_K && (sc_rec = r; break); end
         (sp_rec === nothing || sc_rec === nothing) && continue
-        sp_bid = VolSurfaceAnalysis._extract_price(sp_rec, :bid)
-        sc_bid = VolSurfaceAnalysis._extract_price(sc_rec, :bid)
+        sp_bid = extract_price(sp_rec, :bid)
+        sc_bid = extract_price(sc_rec, :bid)
         (sp_bid === nothing || sc_bid === nothing) && continue
         credit_usd = (sp_bid + sc_bid) * spot
         intrinsic_usd = max(sp_K - spot_settle, 0.0) + max(spot_settle - sc_K, 0.0)

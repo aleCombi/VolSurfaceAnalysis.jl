@@ -99,23 +99,18 @@ each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
     sc_K = delta_strike(dctx,  CALL_DELTA, Call)
     (sp_K === nothing || sc_K === nothing) && (global n_skip += 1; return)
 
-    otm_put_recs  = filter(r -> r.strike < sp_K, dctx.put_recs)
-    otm_call_recs = filter(r -> r.strike > sc_K, dctx.call_recs)
-    (isempty(otm_put_recs) || isempty(otm_call_recs)) && (global n_skip += 1; return)
-
     # Compute PnL for each wing width by snapping to nearest available OTM strike
     pnls_this_entry = Float64[]
     ok = true
     for ww in WING_WIDTHS
-        target_lp = sp_K - ww
-        target_lc = sc_K + ww
-        lp_rec = otm_put_recs[argmin(abs.([r.strike - target_lp for r in otm_put_recs]))]
-        lc_rec = otm_call_recs[argmin(abs.([r.strike - target_lc for r in otm_call_recs]))]
+        lp_K = nearest_otm_strike(dctx, sp_K, ww, Put)
+        lc_K = nearest_otm_strike(dctx, sc_K, ww, Call)
+        (lp_K === nothing || lc_K === nothing) && (ok = false; break)
         condor_pos = Position[]
         for t in (Trade(ctx.surface.underlying, sp_K, ctx.expiry, Put;  direction=-1, quantity=1.0),
                   Trade(ctx.surface.underlying, sc_K, ctx.expiry, Call; direction=-1, quantity=1.0),
-                  Trade(ctx.surface.underlying, lp_rec.strike, ctx.expiry, Put;  direction=+1, quantity=1.0),
-                  Trade(ctx.surface.underlying, lc_rec.strike, ctx.expiry, Call; direction=+1, quantity=1.0))
+                  Trade(ctx.surface.underlying, lp_K, ctx.expiry, Put;  direction=+1, quantity=1.0),
+                  Trade(ctx.surface.underlying, lc_K, ctx.expiry, Call; direction=+1, quantity=1.0))
             p = open_position(t, ctx.surface)
             p === nothing && (ok = false; break)
             push!(condor_pos, p)

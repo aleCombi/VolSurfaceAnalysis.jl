@@ -84,18 +84,14 @@ each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
         if sp_K === nothing || sc_K === nothing
             push!(ps, NaN); continue
         end
-        otm_p = filter(r -> r.strike < sp_K, dctx.put_recs)
-        otm_c = filter(r -> r.strike > sc_K, dctx.call_recs)
-        (isempty(otm_p) || isempty(otm_c)) && (push!(ps, NaN); continue)
-        target_lp = sp_K - WING_WIDTH
-        target_lc = sc_K + WING_WIDTH
-        lp = otm_p[argmin(abs.([r.strike - target_lp for r in otm_p]))]
-        lc = otm_c[argmin(abs.([r.strike - target_lc for r in otm_c]))]
+        lp_K = nearest_otm_strike(dctx, sp_K, WING_WIDTH, Put)
+        lc_K = nearest_otm_strike(dctx, sc_K, WING_WIDTH, Call)
+        (lp_K === nothing || lc_K === nothing) && (push!(ps, NaN); continue)
         cp = Position[]
         for t in (Trade(ctx.surface.underlying, sp_K, ctx.expiry, Put;  direction=-1, quantity=1.0),
                   Trade(ctx.surface.underlying, sc_K, ctx.expiry, Call; direction=-1, quantity=1.0),
-                  Trade(ctx.surface.underlying, lp.strike, ctx.expiry, Put;  direction=+1, quantity=1.0),
-                  Trade(ctx.surface.underlying, lc.strike, ctx.expiry, Call; direction=+1, quantity=1.0))
+                  Trade(ctx.surface.underlying, lp_K, ctx.expiry, Put;  direction=+1, quantity=1.0),
+                  Trade(ctx.surface.underlying, lc_K, ctx.expiry, Call; direction=+1, quantity=1.0))
             p = open_position(t, ctx.surface)
             p === nothing && (ok = false; break)
             push!(cp, p)
