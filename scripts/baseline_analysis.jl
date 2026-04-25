@@ -1,29 +1,49 @@
+# scripts/baseline_analysis.jl
+#
+# Systematic SPY iron-condor baseline analysis: full pipeline (MODE=full)
+# runs the backtest, prints PnL distribution + per-month/per-year tables,
+# and additionally trains an expanding-window IntradayLogSig ridge classifier
+# on tail-loss labels with several skip thresholds. MODE=simple stops after
+# the distribution + monthly/annual tables.
+#
+# Replaces spy_baseline_analysis.jl and spy_baseline_analysis_simple.jl.
+#
+# Presets (preserve original behavior):
+#   # spy_baseline_analysis.jl (full):
+#   MODE=full ENTRY_HOUR=12 END_DATE=2024-01-31 BASE_MAX_LOSS=8
+#
+#   # spy_baseline_analysis_simple.jl:
+#   MODE=simple ENTRY_HOUR=10 END_DATE=2026-01-31 BASE_MAX_LOSS=15
+
 using Pkg; Pkg.activate(@__DIR__)
 using VolSurfaceAnalysis
 using Dates, Printf, Statistics, DataFrames, Plots
 
 # =============================================================================
-# Configuration
+# Configuration (override via ENV)
 # =============================================================================
 
-START_DATE      = Date(2016, 3, 28)
-END_DATE        = Date(2024, 1, 31)
-ENTRY_TIME      = Time(12, 0)
-EXPIRY_INTERVAL = Day(1)
+MODE            = lowercase(get(ENV, "MODE", "full"))
+SYMBOL          = get(ENV, "SYM", "SPY")
 
-SPREAD_LAMBDA   = 0.7
-RATE            = 0.045
-DIV_YIELD       = 0.013
-BASE_MAX_LOSS   = 8.0
-MAX_SPREAD_REL  = 0.50
-PUT_DELTA       = 0.2
-CALL_DELTA      = 0.2
+START_DATE      = Date(get(ENV, "START_DATE", "2016-03-28"))
+END_DATE        = Date(get(ENV, "END_DATE",   MODE == "simple" ? "2026-01-31" : "2024-01-31"))
+ENTRY_TIME      = Time(parse(Int, get(ENV, "ENTRY_HOUR", MODE == "simple" ? "10" : "12")), 0)
+EXPIRY_INTERVAL = Day(parse(Int, get(ENV, "EXPIRY_DAYS", "1")))
+
+SPREAD_LAMBDA   = parse(Float64, get(ENV, "SPREAD_LAMBDA", "0.7"))
+RATE            = parse(Float64, get(ENV, "RATE", "0.045"))
+DIV_YIELD       = parse(Float64, get(ENV, "DIV", "0.013"))
+BASE_MAX_LOSS   = parse(Float64, get(ENV, "BASE_MAX_LOSS", MODE == "simple" ? "15.0" : "8.0"))
+MAX_SPREAD_REL  = parse(Float64, get(ENV, "MAX_SPREAD_REL", "0.50"))
+PUT_DELTA       = parse(Float64, get(ENV, "PUT_DELTA", "0.2"))
+CALL_DELTA      = parse(Float64, get(ENV, "CALL_DELTA", "0.2"))
 
 # Tail loss label: RoR < this threshold (e.g. -0.5 = lost >50% of max_loss)
-TAIL_CUTOFF_ROR = -0.5
+TAIL_CUTOFF_ROR = parse(Float64, get(ENV, "TAIL_CUTOFF_ROR", "-0.5"))
 
 # =============================================================================
-# PnL distribution printer (from sizing_filter.jl)
+# PnL distribution printer
 # =============================================================================
 
 function print_pnl_distribution(label, result)
@@ -52,7 +72,6 @@ function print_pnl_distribution(label, result)
         quantile(pnls, 0.90), quantile(pnls, 0.95), quantile(pnls, 0.99))
     @printf("  TotalPnL=\$%.2f  Min=\$%.4f  Max=\$%.4f\n", sum(pnls), minimum(pnls), maximum(pnls))
 
-    # Histogram
     nbins = 20
     lo, hi = minimum(pnls), maximum(pnls)
     edges = range(lo, hi, length=nbins+1)
@@ -78,9 +97,9 @@ end
 # =============================================================================
 
 run_ts = Dates.format(now(), "yyyymmdd_HHMMSS")
-run_dir = joinpath(@__DIR__, "runs", "spy_baseline_$run_ts")
+run_dir = joinpath(@__DIR__, "runs", "baseline_analysis_$(MODE)_$(SYMBOL)_$run_ts")
 mkpath(run_dir)
-println("Output: $run_dir")
+println("Output: $run_dir   MODE=$MODE")
 
 store = DEFAULT_STORE
 
@@ -88,23 +107,23 @@ store = DEFAULT_STORE
 # Data source
 # =============================================================================
 
-println("\nLoading SPY data from $START_DATE to $END_DATE...")
-all_dates = available_polygon_dates(store, "SPY")
+println("\nLoading $SYMBOL data from $START_DATE to $END_DATE...")
+all_dates = available_polygon_dates(store, SYMBOL)
 filtered = filter(d -> d >= START_DATE && d <= END_DATE, all_dates)
 println("  $(length(filtered)) trading days with options data")
 
 entry_ts = build_entry_timestamps(filtered, ENTRY_TIME)
 entry_spots = read_polygon_spot_prices_for_timestamps(
-    polygon_spot_root(store), entry_ts; symbol="SPY")
+    polygon_spot_root(store), entry_ts; symbol=SYMBOL)
 println("  $(length(entry_spots)) spot prices loaded")
 
 source = ParquetDataSource(entry_ts;
-    path_for_timestamp=ts -> polygon_options_path(store, Date(ts), "SPY"),
+    path_for_timestamp=ts -> polygon_options_path(store, Date(ts), SYMBOL),
     read_records=(path; where="") -> read_polygon_option_records(
         path, entry_spots; where=where, min_volume=0, warn=false,
         spread_lambda=SPREAD_LAMBDA),
     spot_root=polygon_spot_root(store),
-    spot_symbol="SPY")
+    spot_symbol=SYMBOL)
 
 sched = filter(t -> t in Set(build_entry_timestamps(filtered, ENTRY_TIME)),
     available_timestamps(source))
@@ -114,7 +133,7 @@ println("  $(length(sched)) entry timestamps")
 # Strategy & backtest
 # =============================================================================
 
-println("\nRunning backtest: 16-delta condor, max_loss=\$$(BASE_MAX_LOSS), daily @ $(ENTRY_TIME)...")
+println("\nRunning backtest: $(round(Int,100*PUT_DELTA))-delta condor, max_loss=\$$(BASE_MAX_LOSS), daily @ $(ENTRY_TIME)...")
 
 selector = constrained_delta_selector(PUT_DELTA, CALL_DELTA;
     rate=RATE, div_yield=DIV_YIELD, max_loss=BASE_MAX_LOSS,
@@ -123,10 +142,6 @@ selector = constrained_delta_selector(PUT_DELTA, CALL_DELTA;
 strategy = IronCondorStrategy(sched, EXPIRY_INTERVAL, selector)
 result = backtest_strategy(strategy, source)
 
-# =============================================================================
-# Overall metrics
-# =============================================================================
-
 m = performance_metrics(result)
 if m === nothing
     println("ERROR: No valid trades produced.")
@@ -134,8 +149,8 @@ if m === nothing
 end
 
 println("\n", "=" ^ 70)
-println("  SPY Systematic Iron Condor — $(START_DATE) to $(END_DATE)")
-println("  16Δ put / 16Δ call, max_loss=\$$(BASE_MAX_LOSS), daily @ $(ENTRY_TIME)")
+println("  $SYMBOL Systematic Iron Condor — $(START_DATE) to $(END_DATE)")
+println("  $(round(Int,100*PUT_DELTA))Δ put / $(round(Int,100*CALL_DELTA))Δ call, max_loss=\$$(BASE_MAX_LOSS), daily @ $(ENTRY_TIME)")
 println("=" ^ 70)
 
 @printf("\n  Trades:        %d\n", m.count)
@@ -153,10 +168,6 @@ println("=" ^ 70)
 @printf("  Avg Spread:    %s (rel)\n",
     ismissing(m.avg_bid_ask_spread_rel) ? "n/a" : @sprintf("%.3f", m.avg_bid_ask_spread_rel))
 
-# =============================================================================
-# PnL distribution
-# =============================================================================
-
 print_pnl_distribution("Systematic Condor", result)
 
 # =============================================================================
@@ -169,10 +180,6 @@ df.RoR = [ismissing(r.ReturnOnRisk) ? missing : r.ReturnOnRisk for r in eachrow(
 df.Month = [Dates.format(Date(r.EntryTimestamp), "yyyy-mm") for r in eachrow(df)]
 df.Year = [year(Date(r.EntryTimestamp)) for r in eachrow(df)]
 
-# =============================================================================
-# Tail risk
-# =============================================================================
-
 println("\n  ── Worst 20 Trades ──")
 worst = sort(df, :PnL)[1:min(20, nrow(df)), :]
 @printf("  %-20s  %10s  %10s  %8s\n", "Entry", "PnL", "MaxLoss", "RoR")
@@ -184,13 +191,11 @@ for r in eachrow(worst)
         ismissing(r.ReturnOnRisk) ? 0.0 : r.ReturnOnRisk * 100)
 end
 
-# CVaR (expected shortfall at 5%)
 sorted_pnl = sort(Float64.(df.PnL))
 n_tail = max(1, floor(Int, 0.05 * length(sorted_pnl)))
 cvar_5 = mean(sorted_pnl[1:n_tail])
 @printf("\n  CVaR (5%%):  \$%.4f  (avg of worst %d trades)\n", cvar_5, n_tail)
 
-# Max drawdown on cumulative PnL
 dates_sorted = sort(df, :EntryTimestamp)
 cum_pnl = cumsum(Float64.(dates_sorted.PnL))
 peak = accumulate(max, cum_pnl)
@@ -200,11 +205,8 @@ max_dd_idx = argmin(drawdown)
 @printf("  Max Drawdown:  \$%.2f  (at trade #%d, %s)\n",
     max_dd, max_dd_idx,
     Dates.format(dates_sorted.EntryTimestamp[max_dd_idx], "yyyy-mm-dd"))
-    
-# =============================================================================
-# Annual breakdown
-# =============================================================================
 
+# Annual breakdown
 println("\n  ── Annual Breakdown ──")
 @printf("  %-6s  %6s  %10s  %8s  %8s  %8s\n",
     "Year", "Trades", "PnL", "AvgPnL", "WinRate", "AvgRoR")
@@ -223,10 +225,7 @@ for yr in sort(unique(df.Year))
         yr, nt, tp, ap, wr, ar)
 end
 
-# =============================================================================
-# Monthly breakdown (worst & best)
-# =============================================================================
-
+# Monthly
 monthly = combine(groupby(df, :Month),
     :PnL => sum => :TotalPnL,
     :PnL => length => :Trades,
@@ -247,29 +246,22 @@ for r in eachrow(sort(monthly, :TotalPnL, rev=true)[1:min(10, nrow(monthly)), :]
     @printf("  %-8s  %6d  %+10.2f  %7.1f%%\n", r.Month, r.Trades, r.TotalPnL, r.WinRate)
 end
 
-# =============================================================================
 # Plots
-# =============================================================================
-
 println("\n  Saving plots...")
-
 entry_dates = [DateTime(r.EntryTimestamp) for r in eachrow(dates_sorted)]
 trade_pnls = Union{Missing,Float64}[r.PnL for r in eachrow(dates_sorted)]
 
 save_pnl_and_equity_curve(entry_dates, trade_pnls,
     joinpath(run_dir, "equity_and_distribution.png");
-    title_prefix="SPY 16Δ Condor")
+    title_prefix="$SYMBOL $(round(Int,100*PUT_DELTA))Δ Condor")
 println("    equity_and_distribution.png")
 
 save_profit_curve(entry_dates, trade_pnls,
     joinpath(run_dir, "per_trade_pnl.png");
-    title="SPY 16Δ Condor — Per-Trade P&L")
+    title="$SYMBOL $(round(Int,100*PUT_DELTA))Δ Condor — Per-Trade P&L")
 println("    per_trade_pnl.png")
 
-# =============================================================================
 # CSV export
-# =============================================================================
-
 csv_path = joinpath(run_dir, "trades.csv")
 open(csv_path, "w") do io
     println(io, "EntryTimestamp,Expiry,PnL,Credit,MaxLoss,WidthPut,WidthCall,ReturnOnRisk")
@@ -285,14 +277,21 @@ open(csv_path, "w") do io
 end
 println("    trades.csv ($(nrow(df)) rows)")
 
+if MODE == "simple"
+    println("\nMODE=simple → stopping after distribution + tables.")
+    println("\nOutput: $run_dir")
+    println("Done.")
+    exit(0)
+end
+
 # =============================================================================
-# Expanding-window ridge classifier (IntradayLogSig features)
+# MODE=full: Expanding-window ridge classifier (IntradayLogSig features)
 # =============================================================================
 
 println("\n", "=" ^ 70)
 println("  EXPANDING-WINDOW RIDGE CLASSIFIER (TAIL LABEL)")
 println("  Features: IntradayLogSig(depth=3, 3ch) — spot + vol + skew")
-println("  Training: SPY + QQQ + IWM pooled")
+println("  Training: $SYMBOL + QQQ + IWM pooled")
 println("  Label: tail loss (RoR < $(TAIL_CUTOFF_ROR*100)%)")
 println("=" ^ 70)
 
@@ -301,7 +300,6 @@ CLS_FEATURES = Feature[
 ]
 CLS_THRESHOLDS = [0.1, 0.15, 0.2, 0.3]
 
-# Build data sources for additional training symbols
 TRAIN_SYMBOLS = ["QQQ", "IWM"]
 aux_sources = Dict{String, ParquetDataSource}()
 aux_scheds = Dict{String, Vector{DateTime}}()
@@ -333,10 +331,9 @@ for sym in TRAIN_SYMBOLS
     println("  $sym: $(length(aux_scheds[sym])) timestamps loaded")
 end
 
-# Build expanding windows: train from START_DATE..end_of_year, test next year
-first_full_year = year(START_DATE) + 1  # first year with full data = 2017
+first_full_year = year(START_DATE) + 1
 last_test_year = year(END_DATE)
-if month(END_DATE) < 6; last_test_year -= 1; end  # need meaningful test period
+if month(END_DATE) < 6; last_test_year -= 1; end
 
 windows = Tuple{Date,Date,Date,Date}[]
 for test_yr in first_full_year:last_test_year
@@ -351,7 +348,6 @@ for (i, (ts, te, vs, ve)) in enumerate(windows)
     println("    Window $i: Train $ts → $te, Test $vs → $ve")
 end
 
-# Collect walk-forward results
 wf_dates = DateTime[]
 wf_pnls_baseline = Float64[]
 wf_rors_baseline = Float64[]
@@ -374,7 +370,6 @@ println()
 for (i, (train_start, train_end, test_start, test_end)) in enumerate(windows)
     test_yr = year(test_start)
 
-    # Split schedules
     train_sched = filter(t -> Date(t) >= train_start && Date(t) <= train_end, sched)
     test_sched = filter(t -> Date(t) >= test_start && Date(t) <= test_end, sched)
 
@@ -383,13 +378,11 @@ for (i, (train_start, train_end, test_start, test_end)) in enumerate(windows)
         continue
     end
 
-    # Baseline for this test period (from full backtest result)
     bl_df = filter(r -> Date(r.EntryTimestamp) >= test_start && Date(r.EntryTimestamp) <= test_end, dates_sorted)
     bl_pnl = isempty(bl_df) ? 0.0 : sum(bl_df.PnL)
     bl_trades = nrow(bl_df)
     bl_wr = bl_trades > 0 ? count(>(0), bl_df.PnL) / bl_trades * 100 : 0.0
 
-    # Compute baseline Sharpe for this window
     bl_rors = Float64[]
     if bl_trades > 0
         bl_full = filter(r -> Date(r.EntryTimestamp) >= test_start && Date(r.EntryTimestamp) <= test_end, df)
@@ -397,7 +390,6 @@ for (i, (train_start, train_end, test_start, test_end)) in enumerate(windows)
     end
     bl_sharpe = length(bl_rors) > 1 && std(bl_rors) > 0 ? mean(bl_rors) / std(bl_rors) * sqrt(252) : 0.0
 
-    # Collect baseline walk-forward
     bl_full = filter(r -> Date(r.EntryTimestamp) >= test_start && Date(r.EntryTimestamp) <= test_end, df)
     for r in eachrow(bl_full)
         push!(wf_dates, r.EntryTimestamp)
@@ -405,7 +397,6 @@ for (i, (train_start, train_end, test_start, test_end)) in enumerate(windows)
         push!(wf_rors_baseline, ismissing(r.RoR) ? 0.0 : r.RoR)
     end
 
-    # Generate training data — pool SPY + auxiliary symbols
     all_examples = VolSurfaceAnalysis.SizingTrainingExample[]
 
     spy_examples = generate_sizing_training_data(source, EXPIRY_INTERVAL,
@@ -430,20 +421,17 @@ for (i, (train_start, train_end, test_start, test_end)) in enumerate(windows)
     X = hcat([e.surface_features for e in all_examples]...)
     pnl_vec = Float32[e.pnl for e in all_examples]
 
-    # Tail label: bottom 10% of pooled PnL distribution
     tail_pnl_cutoff = quantile(pnl_vec, 0.10)
     Y_cls = reshape(Float32[p < tail_pnl_cutoff ? 1.0f0 : 0.0f0 for p in pnl_vec], 1, :)
     n_spy = length(spy_examples)
     n_aux = length(all_examples) - n_spy
     n_tail = count(==(1.0f0), Y_cls)
 
-    # Train ridge classifier (alpha=0)
     model, means, stds, _ = train_glmnet_classifier!(nothing, X, Y_cls; alpha=0.0)
 
     @printf("  %-8d  %3d+%3d %4d  %+10.2f  %5.1f%%  %+6.2f  │",
         test_yr, n_spy, n_aux, length(test_sched), bl_pnl, bl_wr, bl_sharpe)
 
-    # Test each threshold
     for t in CLS_THRESHOLDS
         skip_thresh = t
         policy = function(logit::Float64)
@@ -463,7 +451,6 @@ for (i, (train_start, train_end, test_start, test_end)) in enumerate(windows)
                 cm.total_pnl, cm.count, ismissing(cm.win_rate) ? 0.0 : cm.win_rate * 100,
                 ismissing(cm.sharpe) ? 0.0 : cm.sharpe)
 
-            # Collect walk-forward PnLs for this threshold
             cls_df = condor_trade_table(cls_result.positions, cls_result.pnl)
             cls_df = filter(r -> !ismissing(r.PnL) && !ismissing(r.MaxLoss) && r.MaxLoss > 0, cls_df)
             for r in eachrow(sort(cls_df, :EntryTimestamp))
@@ -476,10 +463,7 @@ for (i, (train_start, train_end, test_start, test_end)) in enumerate(windows)
     println()
 end
 
-# =============================================================================
-# Walk-forward aggregate (concatenated test periods)
-# =============================================================================
-
+# Walk-forward aggregate
 println("\n  ── Walk-Forward Aggregate ──")
 println("  (concatenated out-of-sample test periods)")
 
@@ -517,9 +501,8 @@ for t in CLS_THRESHOLDS
         tail, tail/n*100, tail_pnl, cvar)
 end
 
-# Skipped trade analysis for best threshold
 if !isempty(wf_pnls_baseline)
-    best_t = CLS_THRESHOLDS[1]  # most aggressive
+    best_t = CLS_THRESHOLDS[1]
     cls_dates_set = Set(wf_dates_cls[best_t])
     skipped_idx = [i for i in 1:length(wf_dates) if wf_dates[i] ∉ cls_dates_set]
     if !isempty(skipped_idx)
@@ -543,13 +526,7 @@ if !isempty(wf_pnls_baseline)
     end
 end
 
-# =============================================================================
-# Walk-forward equity curve plot
-# =============================================================================
-
 println("\n  Saving walk-forward plots...")
-
-# Baseline walk-forward equity curve
 if !isempty(wf_dates)
     order = sortperm(wf_dates)
     sorted_wf_dates = wf_dates[order]
