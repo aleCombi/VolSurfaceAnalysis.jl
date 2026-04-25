@@ -141,6 +141,7 @@ export IronCondorStrategy, FixedSize, StrikeSelectionContext
 export sigma_selector, delta_selector, delta_condor_selector, constrained_delta_selector
 export ShortStrangleStrategy, delta_strangle_selector
 export RollingWingCondorSelector
+export RollingDeltaStrangleSelector
 export open_condor_positions, open_strangle_positions
 
 # Strike selection helpers (used by scripts)
