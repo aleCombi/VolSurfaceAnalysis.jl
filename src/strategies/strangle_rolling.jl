@@ -415,12 +415,14 @@ function _print_full_summary(io::IO, ensemble)
     println(io, "  Full-period summary by z")
     println(io, "=" ^ 80)
     @printf io "  %-6s  %5s  %+9s  %+8s  %+8s  %+8s  %5s\n" "z" "trades" "total" "Sharpe" "MeanYr" "MinYr" "+yrs"
+    _safe_mean(v) = isempty(v) ? NaN : mean(v)
+    _safe_min(v)  = isempty(v) ? NaN : minimum(v)
     for r in ensemble
         p = r.oos_pnls
         full_sh = isempty(p) || std(p) == 0 ? NaN : mean(p) / std(p) * sqrt(252)
         yr_sh = filter(!isnan, [_annual_sharpe(p, r.oos_dates, y) for y in years])
         @printf io "  z=%-4.1f  %5d  %+9.0f  %+8.2f  %+8.2f  %+8.2f  %2d/%-2d\n" (
-            r.z, length(p), sum(p), full_sh, mean(yr_sh), minimum(yr_sh),
+            r.z, length(p), sum(p), full_sh, _safe_mean(yr_sh), _safe_min(yr_sh),
             count(>(0), yr_sh), length(yr_sh),
         )...
     end
@@ -428,7 +430,7 @@ function _print_full_summary(io::IO, ensemble)
     b_full_sh = isempty(bp) || std(bp) == 0 ? NaN : mean(bp) / std(bp) * sqrt(252)
     b_yr_sh = filter(!isnan, [_annual_sharpe(bp, bd, y) for y in years])
     @printf io "  %-6s  %5d  %+9.0f  %+8.2f  %+8.2f  %+8.2f  %2d/%-2d\n" (
-        "fixed", length(bp), sum(bp), b_full_sh, mean(b_yr_sh), minimum(b_yr_sh),
+        "fixed", length(bp), sum(bp), b_full_sh, _safe_mean(b_yr_sh), _safe_min(b_yr_sh),
         count(>(0), b_yr_sh), length(b_yr_sh),
     )...
 end
