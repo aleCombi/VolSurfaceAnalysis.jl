@@ -27,6 +27,22 @@
 #
 #   # Other symbol-specific DIV_YIELDs used previously:
 #   #   GLD=0.00  TSLA=0.00  SMH=0.00  XLE=0.03  TLT=0.036  QQQ=0.006  IWM=0.013
+#
+# FEATURE_KIND env switches the feature stack. Defaults to "2ch_minute"
+# (the original SpotMinuteLogSig path). Other kinds:
+#
+#   FEATURE_KIND=3ch_intraday   replaces logsig_ic_3ch_2019.jl. Uses
+#                               IntradayLogSig(channels=3, depth=3,
+#                               min_points=30, skew_moneyness=0.95).
+#                               Recommended preset:
+#                                 START_YEAR=2019 ENTRY_HOUR=12 TENOR=1d
+#                                 TRAIN_DAYS=1095 TEST_DAYS=90 STEP_DAYS=90
+#                                 MIN_TRAIN=200
+#
+#   FEATURE_KIND=3ch_atm        replaces logsig_ic_3ch_atm_2019.jl. Uses a
+#                               custom TimeSpotIVLogSig (time + log-return +
+#                               ATM-IV path) backed by VolSurfaceAnalysis._bulk_atm_iv.
+#                               Same preset as 3ch_intraday.
 
 using Pkg; Pkg.activate(@__DIR__)
 using VolSurfaceAnalysis
@@ -65,12 +81,82 @@ MAX_TAU_DAYS        = parse(Float64, get(ENV, "MAX_TAU_DAYS", "0.5"))
 PUT_DELTA           = parse(Float64, get(ENV, "PUT_DELTA",  "0.20"))
 CALL_DELTA          = parse(Float64, get(ENV, "CALL_DELTA", "0.05"))
 
+FEATURE_KIND        = get(ENV, "FEATURE_KIND", "2ch_minute")
+
 # Feature: SpotMinuteLogSig. Daily scripts used (3, 100); intraday (5, 150).
 LOGSIG_LOOKBACK_HRS = parse(Int, get(ENV, "LOOKBACK",  "5"))
 LOGSIG_MIN_POINTS   = parse(Int, get(ENV, "MIN_PTS",   "150"))
-FEATURES            = Feature[
-    SpotMinuteLogSig(lookback_hours=LOGSIG_LOOKBACK_HRS, depth=3, min_points=LOGSIG_MIN_POINTS),
-]
+
+if FEATURE_KIND == "2ch_minute"
+    FEATURES = Feature[
+        SpotMinuteLogSig(lookback_hours=LOGSIG_LOOKBACK_HRS, depth=3, min_points=LOGSIG_MIN_POINTS),
+    ]
+elseif FEATURE_KIND == "3ch_intraday"
+    FEATURES = Feature[
+        IntradayLogSig(
+            channels       = 3,
+            depth          = 3,
+            rate           = RATE,
+            div_yield      = DIV_YIELD,
+            min_points     = parse(Int, get(ENV, "MIN_PTS", "30")),
+            skew_moneyness = 0.95,
+        ),
+    ]
+elseif FEATURE_KIND == "3ch_atm"
+    using ChenSignatures: prepare, logsig as chen_logsig
+
+    # Custom feature: (time, log_return, ATM_IV) 3-channel logsig. Reuses
+    # production _bulk_atm_iv + BarCache. Lifted verbatim from
+    # logsig_ic_3ch_atm_2019.jl.
+    struct TimeSpotIVLogSig <: Feature
+        depth::Int
+        rate::Float64
+        div_yield::Float64
+        min_points::Int
+        cache::VolSurfaceAnalysis.BarCache
+        basis::Any
+    end
+
+    function TimeSpotIVLogSig(; depth::Int=3, rate::Float64=0.0, div_yield::Float64=0.0,
+                              min_points::Int=30, store=DEFAULT_STORE)
+        basis = prepare(3, depth)
+        TimeSpotIVLogSig(depth, rate, div_yield, min_points,
+                         VolSurfaceAnalysis.BarCache(store), basis)
+    end
+
+    VolSurfaceAnalysis.logsig_dim(f::TimeSpotIVLogSig) = length(f.basis.lynds)
+
+    function (f::TimeSpotIVLogSig)(ctx::StrikeSelectionContext)::Union{Vector{Float64},Nothing}
+        ts = ctx.surface.timestamp
+        open_utc = et_to_utc(Date(ts), Time(9, 30))
+        spot_dict = get_spots(ctx.history, open_utc, ts)
+        isempty(spot_dict) && return nothing
+        iv_dict = VolSurfaceAnalysis._bulk_atm_iv(
+            f.cache, ctx.surface.underlying, Date(ts), spot_dict,
+            open_utc, ts; rate=f.rate, div_yield=f.div_yield, spot_hint=ctx.surface.spot,
+        )
+        isempty(iv_dict) && return nothing
+        common_ts = sort(intersect(collect(keys(spot_dict)), collect(keys(iv_dict))))
+        length(common_ts) < f.min_points && return nothing
+        spots = [spot_dict[t] for t in common_ts]
+        ivs   = [iv_dict[t]   for t in common_ts]
+        n = length(common_ts)
+        path = Matrix{Float64}(undef, n, 3)
+        @inbounds for i in 1:n
+            path[i, 1] = (i - 1) / (n - 1)
+            path[i, 2] = log(spots[i] / spots[1])
+            path[i, 3] = ivs[i] - ivs[1]
+        end
+        return Vector{Float64}(chen_logsig(path, f.basis))
+    end
+
+    FEATURES = Feature[
+        TimeSpotIVLogSig(depth=3, rate=RATE, div_yield=DIV_YIELD,
+                         min_points=parse(Int, get(ENV, "MIN_PTS", "30"))),
+    ]
+else
+    error("Unknown FEATURE_KIND: $FEATURE_KIND (use 2ch_minute|3ch_intraday|3ch_atm)")
+end
 
 # Walk-forward windows
 TRAIN_WINDOW_DAYS   = parse(Int, get(ENV, "TRAIN_DAYS", "365"))
@@ -127,7 +213,20 @@ n_skip_strk   = 0
 
 println("\nBuilding dataset...")
 report_every = 100
+
+function _evict_feature_caches!(feats)
+    for f in feats
+        if f isa IntradayLogSig
+            empty!(f.cache.data)
+        elseif FEATURE_KIND == "3ch_atm" && isdefined(@__MODULE__, :TimeSpotIVLogSig) && f isa TimeSpotIVLogSig
+            empty!(f.cache.data)
+        end
+    end
+    nothing
+end
+
 each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
+    try
     ismissing(settlement) && return
     global n_total += 1
 
@@ -163,6 +262,9 @@ each_entry(source, EXPIRY_INTERVAL, sched; clear_cache=true) do ctx, settlement
 
     if n_total % report_every == 0
         @printf "  %5d entries processed  (kept %d)\r" n_total length(dates)
+    end
+    finally
+        _evict_feature_caches!(FEATURES)
     end
 end
 println()
