@@ -142,6 +142,7 @@ export sigma_selector, delta_selector, delta_condor_selector, constrained_delta_
 export ShortStrangleStrategy, delta_strangle_selector
 export RollingWingCondorSelector
 export RollingDeltaStrangleSelector
+export run_strangle_rolling, run_strangle_rolling_ensemble, report_strangle_rolling
 export open_condor_positions, open_strangle_positions
 
 # Strike selection helpers (used by scripts)
