@@ -95,8 +95,11 @@ root/
 
 Scripts use `scripts/Project.toml` via `Pkg.activate(@__DIR__)`.
 
-- **`scripts/sizing_filter.jl`** -- Configurable experiment runner. Replaces 9 prior scripts by parameterizing symbols, feature sets, and ML variants. Config block at top; supports `Sizing` (binary/linear/sigmoid), `Classifier` (loss prediction + skip), and `DeltaRegression` variants. Shared infrastructure in `scripts/lib/experiment.jl`.
-- **`scripts/cross_symbol_filter.jl`** -- Cross-symbol training experiment. Trains on SPY+QQQ+IWM+SPXW, tests on SPY. Compares regressor vs classifier, detailed tail risk analysis (CVaR, loss severity buckets, filter forensics).
+- **`scripts/condor_grid.jl`** -- Non-rolling iron-condor grid runner across symbols, deltas, and max-loss caps.
+- **`scripts/condor_rolling.jl`** -- Rolling iron-condor selector runner (`MODE=delta|wing|joint|2stage|cross_tenor`).
+- **`scripts/strangle_grid.jl`** -- Non-rolling short-strangle grid analysis, including long-strangle and condor-combo diagnostics.
+- **`scripts/strangle_rolling.jl`** -- Rolling short-strangle delta selector with CVaR regularization.
+- **`scripts/smile_with_condors.jl`** -- Vol-smile / condor structure visualization for one surface snapshot.
 
 ## Polygon IV inversion (rate / div_yield)
 
