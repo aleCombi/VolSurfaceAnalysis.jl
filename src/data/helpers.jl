@@ -58,6 +58,50 @@ function load_minute_spots(
 end
 
 """
+    polygon_parquet_source(symbol; start_date, end_date, entry_time,
+                           rate=0.0, div_yield=0.0, spread_lambda=0.0,
+                           min_volume=0, store=DEFAULT_STORE)
+        -> (source::ParquetDataSource, sched::Vector{DateTime})
+
+Assemble a lazy Polygon `ParquetDataSource` over `[start_date, end_date]` with
+one entry per trading day at `entry_time`. Accepts either a single `Time` or a
+`Vector{Time}` for multiple entries per day. Closes over entry spots loaded
+up front so IV inversion uses the proper spot at each entry. Returns the
+source plus its sorted entry schedule.
+"""
+function polygon_parquet_source(
+    symbol::AbstractString;
+    start_date::Date,
+    end_date::Date,
+    entry_time::Union{Time,Vector{Time}},
+    rate::Float64=0.0,
+    div_yield::Float64=0.0,
+    spread_lambda::Float64=0.0,
+    min_volume::Real=0,
+    store::LocalDataStore=DEFAULT_STORE,
+)
+    sym = uppercase(String(symbol))
+    all_dates = available_polygon_dates(store, sym)
+    filtered = filter(d -> start_date <= d <= end_date, all_dates)
+
+    entry_ts = build_entry_timestamps(filtered, entry_time)
+    entry_spots = read_polygon_spot_prices_for_timestamps(
+        polygon_spot_root(store), entry_ts; symbol=sym,
+    )
+    source = ParquetDataSource(entry_ts;
+        path_for_timestamp = ts -> polygon_options_path(store, Date(ts), sym),
+        read_records = (path; where="") -> read_polygon_option_records(
+            path, entry_spots;
+            where=where, min_volume=min_volume, warn=false,
+            spread_lambda=spread_lambda, rate=rate, div_yield=div_yield,
+        ),
+        spot_root = polygon_spot_root(store),
+        spot_symbol = sym,
+    )
+    return (source=source, sched=available_timestamps(source))
+end
+
+"""
     load_surfaces_and_spots(start_date, end_date; kwargs...) -> (surfaces, entry_spots, settlement_spots)
 
 Load volatility surfaces and spot prices for a date range. Returns a tuple of:

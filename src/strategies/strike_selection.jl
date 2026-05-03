@@ -166,6 +166,100 @@ function _atm_iv_from_records(
 end
 
 # =============================================================================
+# Public delta-strike helpers (for scripts that need per-entry primitives)
+# =============================================================================
+
+"""
+    delta_context(ctx; rate=0.0, div_yield=0.0)
+        -> (; put_recs, call_recs, spot, F, tau, rate) | nothing
+
+Resolve the per-entry quantities needed for delta-based strike lookup:
+records filtered by option type, spot, forward `F = spot * exp((rate-div_yield)*tau)`,
+and tau. Returns `nothing` if `tau <= 0` or either put or call records are empty.
+
+Pair with `delta_strike(dctx, target_delta, opt_type)` to pick strikes.
+"""
+function delta_context(
+    ctx;
+    rate::Float64=0.0,
+    div_yield::Float64=0.0,
+)
+    tau = _ctx_tau(ctx)
+    tau <= 0.0 && return nothing
+    recs = _ctx_recs(ctx)
+    put_recs  = filter(r -> r.option_type == Put,  recs)
+    call_recs = filter(r -> r.option_type == Call, recs)
+    (isempty(put_recs) || isempty(call_recs)) && return nothing
+    spot = ctx.surface.spot
+    F = spot * exp((rate - div_yield) * tau)
+    return (put_recs=put_recs, call_recs=call_recs, spot=spot, F=F, tau=tau, rate=rate)
+end
+
+"""
+    delta_strike(dctx, target_delta, opt_type::OptionType) -> Float64 | nothing
+
+Return the OTM strike whose Black-76 delta is closest to `target_delta` for the
+given option type (`Put` or `Call`). `target_delta` follows the standard sign
+convention (negative for puts, positive for calls). `dctx` is the NamedTuple
+returned by `delta_context`. Returns `nothing` when no viable record has a
+computable delta.
+"""
+function delta_strike(
+    dctx,
+    target_delta::Float64,
+    opt_type::OptionType,
+)::Union{Nothing,Float64}
+    recs = opt_type == Put ? dctx.put_recs : dctx.call_recs
+    side = opt_type == Put ? :put : :call
+    return _best_delta_strike(recs, target_delta, dctx.spot, side, dctx.F, dctx.tau, dctx.rate)
+end
+
+"""
+    nearest_otm_strike(dctx, reference_K, width, opt_type::OptionType)
+        -> Float64 | nothing
+
+Wing-pick helper: return the strike strictly OTM relative to `reference_K`
+whose distance from `reference_K ± width` is minimal. For `Put`, the wing lies
+below `reference_K` at target `reference_K - width`; for `Call`, above at
+`reference_K + width`. `width` is a positive distance in strike-price units.
+Returns `nothing` when no strictly-OTM record exists on the requested side.
+"""
+function nearest_otm_strike(
+    dctx,
+    reference_K::Float64,
+    width::Float64,
+    opt_type::OptionType,
+)::Union{Nothing,Float64}
+    if opt_type == Put
+        otm = filter(r -> r.strike < reference_K, dctx.put_recs)
+        target = reference_K - width
+    else
+        otm = filter(r -> r.strike > reference_K, dctx.call_recs)
+        target = reference_K + width
+    end
+    isempty(otm) && return nothing
+    return otm[argmin(abs.([r.strike - target for r in otm]))].strike
+end
+
+"""
+    extract_price(rec, side::Symbol) -> Float64 | nothing
+
+Return `rec.bid_price` (`side=:bid`) or `rec.ask_price` (`side=:ask`), falling
+back to `rec.mark_price` when the primary is missing. Returns `nothing` if
+neither is available.
+"""
+extract_price(rec, side::Symbol) = _extract_price(rec, side)
+
+"""
+    find_record_at_strike(recs, strike) -> OptionRecord | nothing
+
+Return the first record in `recs` whose `.strike` equals `strike` exactly,
+or `nothing` when no match exists.
+"""
+find_record_at_strike(recs::Vector{OptionRecord}, strike::Float64) =
+    _find_rec_by_strike(recs, strike)
+
+# =============================================================================
 # Asymmetric delta strangle strikes (used by condor selectors)
 # =============================================================================
 

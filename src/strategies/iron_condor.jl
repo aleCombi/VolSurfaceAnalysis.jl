@@ -85,3 +85,29 @@ function entry_positions(
 
     return _open_positions(trades, surface)
 end
+
+"""
+    open_condor_positions(ctx, sp_K, sc_K, lp_K, lc_K; quantity=1.0)
+        -> Vector{Position}
+
+Open the four legs of an iron condor at `ctx.surface` / `ctx.expiry`:
+short put at `sp_K`, short call at `sc_K`, long put wing at `lp_K`, long call
+wing at `lc_K`. Returns an empty `Vector{Position}` if any leg cannot be
+opened (missing record, missing bid/ask, etc.). Callers should check
+`length(positions) == 4`.
+"""
+function open_condor_positions(
+    ctx,
+    sp_K::Float64, sc_K::Float64, lp_K::Float64, lc_K::Float64;
+    quantity::Float64=1.0,
+)::Vector{Position}
+    surface = ctx.surface
+    expiry = ctx.expiry
+    trades = Trade[
+        Trade(surface.underlying, sp_K, expiry, Put;  direction=-1, quantity=quantity),
+        Trade(surface.underlying, sc_K, expiry, Call; direction=-1, quantity=quantity),
+        Trade(surface.underlying, lp_K, expiry, Put;  direction=+1, quantity=quantity),
+        Trade(surface.underlying, lc_K, expiry, Call; direction=+1, quantity=quantity),
+    ]
+    return _open_positions(trades, surface)
+end

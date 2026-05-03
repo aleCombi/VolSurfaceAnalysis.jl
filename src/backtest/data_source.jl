@@ -66,6 +66,16 @@ Default implementation returns an empty dict.
 get_spots(::BacktestDataSource, ::DateTime, ::DateTime)::Dict{DateTime, Float64} =
     Dict{DateTime, Float64}()
 
+"""
+    clear_cache!(source::BacktestDataSource) -> nothing
+
+Drop any internal per-timestamp or per-date caches so memory does not grow
+unbounded during long single-pass sweeps. Default is a no-op; data sources
+that cache (e.g. `ParquetDataSource`) override it. See also the
+`clear_cache` kwarg on `each_entry`.
+"""
+clear_cache!(::BacktestDataSource) = nothing
+
 # ============================================================================
 # DictDataSource — wraps pre-loaded Dict{DateTime, VolatilitySurface} + spots
 # ============================================================================
@@ -212,6 +222,12 @@ function get_spots(s::ParquetDataSource, from::DateTime, to::DateTime)::Dict{Dat
         d += Day(1)
     end
     return result
+end
+
+function clear_cache!(s::ParquetDataSource)
+    empty!(s.surface_cache)
+    empty!(s.spot_date_cache)
+    return nothing
 end
 
 # ============================================================================

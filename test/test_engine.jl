@@ -280,5 +280,265 @@ using DuckDB
         @test pos3[1].trade.strike == strike
     end
 
+    # ============================================================
+    # 10. clear_cache!: no-op default, ParquetDataSource empties, idempotent
+    # ============================================================
+    @testset "clear_cache! default no-op" begin
+        source = DictDataSource(surfaces, settlement_spots)
+        @test VolSurfaceAnalysis.clear_cache!(source) === nothing
+        # Still functional after "clearing"
+        @test get_surface(source, entry_ts) isa VolatilitySurface
+    end
+
+    @testset "clear_cache! on ParquetDataSource empties caches" begin
+        # Seed a ParquetDataSource directly — no parquet I/O needed.
+        p = ParquetDataSource(
+            [entry_ts];
+            path_for_timestamp = _ -> "/nonexistent",
+            read_records       = (path; where="") -> OptionRecord[],
+            spot_root          = "/nonexistent",
+            spot_symbol        = "BTC",
+        )
+        # Manually populate both caches
+        p.surface_cache[entry_ts] = surfaces[entry_ts]
+        p.spot_date_cache[Date(entry_ts)] = Dict(entry_ts => 1.0)
+        @test !isempty(p.surface_cache)
+        @test !isempty(p.spot_date_cache)
+
+        VolSurfaceAnalysis.clear_cache!(p)
+        @test isempty(p.surface_cache)
+        @test isempty(p.spot_date_cache)
+
+        # Idempotent
+        @test VolSurfaceAnalysis.clear_cache!(p) === nothing
+        @test isempty(p.surface_cache)
+    end
+
+    @testset "each_entry clear_cache kwarg drives clear_cache!" begin
+        # Custom data source that counts clear_cache! invocations.
+        mutable struct CountingDataSource <: BacktestDataSource
+            inner::DictDataSource
+            clears::Int
+        end
+        VolSurfaceAnalysis.available_timestamps(s::CountingDataSource) =
+            available_timestamps(s.inner)
+        VolSurfaceAnalysis.get_surface(s::CountingDataSource, ts::DateTime) =
+            get_surface(s.inner, ts)
+        VolSurfaceAnalysis.get_settlement_spot(s::CountingDataSource, ts::DateTime) =
+            get_settlement_spot(s.inner, ts)
+        VolSurfaceAnalysis.get_spot(s::CountingDataSource, ts::DateTime) =
+            get_spot(s.inner, ts)
+        VolSurfaceAnalysis.clear_cache!(s::CountingDataSource) = (s.clears += 1; nothing)
+
+        inner = DictDataSource(surfaces, settlement_spots)
+
+        # clear_cache=false (default): no clears
+        cs1 = CountingDataSource(inner, 0)
+        n_cb1 = 0
+        each_entry(cs1, Day(1), [entry_ts]) do _, _
+            n_cb1 += 1
+        end
+        @test n_cb1 == 1
+        @test cs1.clears == 0
+
+        # clear_cache=true: one clear per callback
+        cs2 = CountingDataSource(inner, 0)
+        n_cb2 = 0
+        each_entry(cs2, Day(1), [entry_ts]; clear_cache=true) do _, _
+            n_cb2 += 1
+        end
+        @test n_cb2 == 1
+        @test cs2.clears == 1
+
+        # Callback throws → finally still clears
+        cs3 = CountingDataSource(inner, 0)
+        @test_throws ErrorException each_entry(cs3, Day(1), [entry_ts]; clear_cache=true) do _, _
+            error("boom")
+        end
+        @test cs3.clears == 1
+    end
+
+    # ============================================================
+    # 11. delta_context + delta_strike public helpers
+    # ============================================================
+    @testset "delta_context + delta_strike" begin
+        source = DictDataSource(surfaces, settlement_spots)
+        history = HistoricalView(source, entry_ts)
+        ctx = VolSurfaceAnalysis.StrikeSelectionContext(
+            surfaces[entry_ts], expiry_ts, history,
+        )
+
+        # Happy path: ctx has only a call record in the fixture, so put-side
+        # records are empty — delta_context returns nothing.
+        @test delta_context(ctx) === nothing
+
+        # Construct a two-record surface (one put + one call) inline to exercise
+        # the happy path.
+        instr_put  = "BTC-26JAN26-100000-P"
+        instr_call = "BTC-26JAN26-100000-C"
+        rec_put  = OptionRecord(instr_put,  Underlying("BTC"), expiry_ts, strike, Put,
+                                0.05, 0.06, 0.055, 80.0, 10.0, 100.0, entry_spot, entry_ts)
+        rec_call = OptionRecord(instr_call, Underlying("BTC"), expiry_ts, strike, Call,
+                                bid,  ask,  0.045, 80.0, 10.0, 100.0, entry_spot, entry_ts)
+        surf = build_surface([rec_put, rec_call])
+        ctx_pc = VolSurfaceAnalysis.StrikeSelectionContext(surf, expiry_ts, history)
+
+        dctx = delta_context(ctx_pc; rate=0.0, div_yield=0.0)
+        @test dctx !== nothing
+        @test length(dctx.put_recs)  == 1
+        @test length(dctx.call_recs) == 1
+        @test dctx.spot == entry_spot
+        @test dctx.tau > 0.0
+        # F = spot * exp(0) == spot when rate=div=0
+        @test dctx.F == entry_spot
+
+        # delta_strike: with only one strike, that strike is chosen
+        @test delta_strike(dctx, -0.30, Put)  == strike
+        @test delta_strike(dctx,  0.30, Call) == strike
+    end
+
+    # ============================================================
+    # 12. nearest_otm_strike + extract_price
+    # ============================================================
+    @testset "nearest_otm_strike + extract_price" begin
+        history = HistoricalView(DictDataSource(surfaces, settlement_spots), entry_ts)
+        # Build a surface with OTM strikes on both sides of spot.
+        K_short_put  = 100_000.0
+        K_short_call = 110_000.0
+        strikes_put  = [90_000.0, 95_000.0, 98_000.0, K_short_put]
+        strikes_call = [K_short_call, 112_000.0, 115_000.0, 120_000.0]
+        recs_multi = OptionRecord[]
+        for K in strikes_put
+            push!(recs_multi, OptionRecord("BTC-$K-P", Underlying("BTC"), expiry_ts, K, Put,
+                                           0.05, 0.06, 0.055, 80.0, 10.0, 100.0, entry_spot, entry_ts))
+        end
+        for K in strikes_call
+            push!(recs_multi, OptionRecord("BTC-$K-C", Underlying("BTC"), expiry_ts, K, Call,
+                                           0.05, 0.06, 0.055, 80.0, 10.0, 100.0, entry_spot, entry_ts))
+        end
+        surf_multi = build_surface(recs_multi)
+        ctx_multi = VolSurfaceAnalysis.StrikeSelectionContext(surf_multi, expiry_ts, history)
+        dctx_multi = delta_context(ctx_multi)
+        @test dctx_multi !== nothing
+
+        # Put wing: below short put. width=2000 → target 98_000 → exact match
+        @test nearest_otm_strike(dctx_multi, K_short_put, 2_000.0, Put)  == 98_000.0
+        # Put wing: width=5000 → target 95_000 → exact match
+        @test nearest_otm_strike(dctx_multi, K_short_put, 5_000.0, Put)  == 95_000.0
+        # Put wing: width=6000 → target 94_000 → snap to nearest OTM (95_000)
+        @test nearest_otm_strike(dctx_multi, K_short_put, 6_000.0, Put)  == 95_000.0
+
+        # Call wing: above short call. width=2000 → target 112_000 → exact match
+        @test nearest_otm_strike(dctx_multi, K_short_call, 2_000.0, Call) == 112_000.0
+        # Call wing: width=11000 → target 121_000 → snap to nearest OTM (120_000)
+        @test nearest_otm_strike(dctx_multi, K_short_call, 11_000.0, Call) == 120_000.0
+
+        # Put wing with no OTM: reference below all strikes → nothing
+        @test nearest_otm_strike(dctx_multi, 80_000.0, 5_000.0, Put) === nothing
+        # Call wing with no OTM: reference above all strikes → nothing
+        @test nearest_otm_strike(dctx_multi, 130_000.0, 5_000.0, Call) === nothing
+
+        # extract_price: bid / ask / mark fallback
+        rec_full = OptionRecord("BTC-F", Underlying("BTC"), expiry_ts, 100.0, Put,
+                                0.03, 0.04, 0.035, 80.0, 10.0, 100.0, 100.0, entry_ts)
+        @test extract_price(rec_full, :bid) == 0.03
+        @test extract_price(rec_full, :ask) == 0.04
+
+        rec_no_bid = OptionRecord("BTC-NB", Underlying("BTC"), expiry_ts, 100.0, Put,
+                                  missing, 0.04, 0.035, 80.0, 10.0, 100.0, 100.0, entry_ts)
+        @test extract_price(rec_no_bid, :bid) == 0.035   # fallback to mark
+        @test extract_price(rec_no_bid, :ask) == 0.04    # primary
+
+        rec_nothing = OptionRecord("BTC-NN", Underlying("BTC"), expiry_ts, 100.0, Put,
+                                   missing, missing, missing, 80.0, 10.0, 100.0, 100.0, entry_ts)
+        @test extract_price(rec_nothing, :bid) === nothing
+        @test extract_price(rec_nothing, :ask) === nothing
+    end
+
+    # ============================================================
+    # 13. open_condor_positions
+    # ============================================================
+    @testset "open_condor_positions" begin
+        history = HistoricalView(DictDataSource(surfaces, settlement_spots), entry_ts)
+        # Build a surface with 2 puts + 2 calls so a condor has 4 distinct legs.
+        K_sp, K_lp = 100_000.0, 95_000.0   # short put, long put wing
+        K_sc, K_lc = 110_000.0, 115_000.0  # short call, long call wing
+        recs = OptionRecord[
+            OptionRecord("BTC-SP", Underlying("BTC"), expiry_ts, K_sp, Put,
+                         0.05, 0.06, 0.055, 80.0, 10.0, 100.0, entry_spot, entry_ts),
+            OptionRecord("BTC-LP", Underlying("BTC"), expiry_ts, K_lp, Put,
+                         0.02, 0.03, 0.025, 80.0, 10.0, 100.0, entry_spot, entry_ts),
+            OptionRecord("BTC-SC", Underlying("BTC"), expiry_ts, K_sc, Call,
+                         0.05, 0.06, 0.055, 80.0, 10.0, 100.0, entry_spot, entry_ts),
+            OptionRecord("BTC-LC", Underlying("BTC"), expiry_ts, K_lc, Call,
+                         0.02, 0.03, 0.025, 80.0, 10.0, 100.0, entry_spot, entry_ts),
+        ]
+        surf = build_surface(recs)
+        ctx_condor = VolSurfaceAnalysis.StrikeSelectionContext(surf, expiry_ts, history)
+
+        positions = open_condor_positions(ctx_condor, K_sp, K_sc, K_lp, K_lc)
+        @test length(positions) == 4
+        # Order: short put, short call, long put, long call
+        @test positions[1].trade.option_type == Put  && positions[1].trade.direction == -1 && positions[1].trade.strike == K_sp
+        @test positions[2].trade.option_type == Call && positions[2].trade.direction == -1 && positions[2].trade.strike == K_sc
+        @test positions[3].trade.option_type == Put  && positions[3].trade.direction ==  1 && positions[3].trade.strike == K_lp
+        @test positions[4].trade.option_type == Call && positions[4].trade.direction ==  1 && positions[4].trade.strike == K_lc
+        # Short legs fill at bid, long legs at ask (trade.direction convention)
+        @test positions[1].entry_price == 0.05
+        @test positions[3].entry_price == 0.03
+
+        # Missing record for one leg → empty vector
+        empty = open_condor_positions(ctx_condor, K_sp, K_sc, 80_000.0, K_lc)
+        @test isempty(empty)
+
+        # Quantity propagates
+        positions_q = open_condor_positions(ctx_condor, K_sp, K_sc, K_lp, K_lc; quantity=2.5)
+        @test all(p.trade.quantity == 2.5 for p in positions_q)
+    end
+
+    # ============================================================
+    # 14. open_strangle_positions + find_record_at_strike
+    # ============================================================
+    @testset "open_strangle_positions + find_record_at_strike" begin
+        history = HistoricalView(DictDataSource(surfaces, settlement_spots), entry_ts)
+        K_sp, K_sc = 100_000.0, 110_000.0
+        recs = OptionRecord[
+            OptionRecord("BTC-SP", Underlying("BTC"), expiry_ts, K_sp, Put,
+                         0.05, 0.06, 0.055, 80.0, 10.0, 100.0, entry_spot, entry_ts),
+            OptionRecord("BTC-SC", Underlying("BTC"), expiry_ts, K_sc, Call,
+                         0.04, 0.05, 0.045, 80.0, 10.0, 100.0, entry_spot, entry_ts),
+        ]
+        surf = build_surface(recs)
+        ctx_strangle = VolSurfaceAnalysis.StrikeSelectionContext(surf, expiry_ts, history)
+
+        # Default direction = -1 (short). Short fills at bid.
+        short_pos = open_strangle_positions(ctx_strangle, K_sp, K_sc)
+        @test length(short_pos) == 2
+        @test short_pos[1].trade.option_type == Put  && short_pos[1].trade.direction == -1
+        @test short_pos[2].trade.option_type == Call && short_pos[2].trade.direction == -1
+        @test short_pos[1].entry_price == 0.05   # bid
+        @test short_pos[2].entry_price == 0.04   # bid
+
+        # direction = +1 (long) fills at ask.
+        long_pos = open_strangle_positions(ctx_strangle, K_sp, K_sc; direction=+1)
+        @test length(long_pos) == 2
+        @test all(p.trade.direction == +1 for p in long_pos)
+        @test long_pos[1].entry_price == 0.06   # ask
+        @test long_pos[2].entry_price == 0.05   # ask
+
+        # Missing record → empty
+        @test isempty(open_strangle_positions(ctx_strangle, 80_000.0, K_sc))
+
+        # Quantity propagates
+        qty_pos = open_strangle_positions(ctx_strangle, K_sp, K_sc; quantity=3.0)
+        @test all(p.trade.quantity == 3.0 for p in qty_pos)
+
+        # find_record_at_strike
+        @test find_record_at_strike(recs, K_sp) === recs[1]
+        @test find_record_at_strike(recs, K_sc) === recs[2]
+        @test find_record_at_strike(recs, 99_999.0) === nothing
+        @test find_record_at_strike(OptionRecord[], K_sp) === nothing
+    end
+
     try rm(tmpfile; force=true) catch end
 end

@@ -13,5 +13,6 @@ using Dates
     include("test_viz.jl")
     include("test_short_strangle.jl")
     include("test_rolling_wing_selector.jl")
+    include("test_rolling_delta_strangle_selector.jl")
 end
 

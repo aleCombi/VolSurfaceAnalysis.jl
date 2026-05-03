@@ -88,3 +88,28 @@ function delta_strangle_selector(put_delta::Float64, call_delta::Float64;
         )
     end
 end
+
+"""
+    open_strangle_positions(ctx, sp_K, sc_K; direction=-1, quantity=1.0)
+        -> Vector{Position}
+
+Open the two legs of a strangle at `ctx.surface` / `ctx.expiry`:
+a put at `sp_K` and a call at `sc_K`, both with the same `direction`
+(`-1` = short / sell at bid, `+1` = long / buy at ask) and `quantity`.
+Returns an empty `Vector{Position}` if either leg cannot be opened.
+Callers should check `length(positions) == 2`.
+"""
+function open_strangle_positions(
+    ctx,
+    sp_K::Float64, sc_K::Float64;
+    direction::Int=-1,
+    quantity::Float64=1.0,
+)::Vector{Position}
+    surface = ctx.surface
+    expiry = ctx.expiry
+    trades = Trade[
+        Trade(surface.underlying, sp_K, expiry, Put;  direction=direction, quantity=quantity),
+        Trade(surface.underlying, sc_K, expiry, Call; direction=direction, quantity=quantity),
+    ]
+    return _open_positions(trades, surface)
+end

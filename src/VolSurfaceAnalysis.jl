@@ -58,6 +58,18 @@ include("viz.jl")                  # Smile / condor diagrams
 include("data/helpers.jl")         # Shared data-loading helpers for scripts
 
 # ============================================================================
+# Experiment helpers (for scripts)
+# ============================================================================
+include("experiments/common.jl")   # Run dirs, folds, finite-PnL stats, CSV
+include("experiments/reports.jl")  # Grid reports and reusable plots
+include("experiments/condor.jl")   # Iron-condor experiment extraction/reporting
+include("experiments/condor_rolling_workflow.jl") # Rolling condor workflow
+include("experiments/strangle.jl") # Strangle grid extraction/reporting
+include("experiments/strangle_rolling_workflow.jl") # Rolling strangle workflow
+include("experiments/strangle_selector_sweep_workflow.jl") # Selector triplet sweep
+include("experiments/smile.jl")    # Smile snapshot aggregation
+
+# ============================================================================
 # Exports: Data Types
 # ============================================================================
 # Core types
@@ -91,6 +103,7 @@ export polygon_options_path, polygon_spot_path
 export deribit_history_path, deribit_delivery_path
 export available_polygon_dates, available_deribit_dates
 export build_entry_timestamps, load_minute_spots, load_surfaces_and_spots
+export polygon_parquet_source
 
 # ============================================================================
 # Exports: Pricing Models
@@ -126,7 +139,7 @@ export backtest_strategy, each_entry
 
 # Data sources
 export BacktestDataSource, DictDataSource, ParquetDataSource, HistoricalView
-export available_timestamps, get_surface, get_settlement_spot, get_spot, get_spots
+export available_timestamps, get_surface, get_settlement_spot, get_spot, get_spots, clear_cache!
 export PerformanceMetrics
 export aggregate_pnl, performance_metrics, profit_curve, average_entry_spread
 export condor_group_stats, condor_trade_table, condor_max_loss_by_key
@@ -140,8 +153,19 @@ export IronCondorStrategy, FixedSize, StrikeSelectionContext
 export sigma_selector, delta_selector, delta_condor_selector, constrained_delta_selector
 export ShortStrangleStrategy, delta_strangle_selector
 export RollingWingCondorSelector
+export RollingDeltaStrangleSelector
+export run_strangle_rolling, run_strangle_rolling_ensemble, report_strangle_rolling
+
+# Composable selector components (post-hoc replay sweep)
+export Conditioning, Unconditional, RVBinary, RVTertile, MomSign, RVxMom
+export Score, MeanScore, MeanVarScore, SharpeScore, SharpeHeldOut, CVaRScore
+export Picker, ArgmaxPicker, TopKPicker, ShrinkagePicker, StickyPicker
+export n_bins, fit_threshold, classify, score_pnls, pick
+export compute_strangle_state, compute_pnl_grid
+export open_condor_positions, open_strangle_positions
 
 # Strike selection helpers (used by scripts)
+export delta_context, delta_strike, nearest_otm_strike, extract_price, find_record_at_strike
 export _delta_strangle_strikes_asymmetric
 
 # ML features
@@ -169,5 +193,30 @@ export GLMNetModel, train_ridge!, train_glmnet_classifier!
 
 # Visualization
 export CondorSpec, plot_smile_with_condors
+
+# Experiment helpers
+export Fold, make_run_dir, parse_tenor
+export finite_values, annualized_sharpe, max_drawdown, pnl_summary, cvar_left
+export pnl_distribution_stats, build_folds, write_namedtuple_csv
+export lookup_grid_row, print_metric_grid, print_delta_grid, save_delta_heatmap
+export print_monthly_sharpe, save_cumulative_pnl, save_cumulative_pnl_comparison
+export save_fold_choice_scatter
+export CondorGridSummaryRow, condor_trade_pnls, condor_grid_summary_row
+export build_combo_wing_dataset, print_condor_percentile_ladder
+export print_condor_cross_symbol_comparison
+export StrangleTrade, run_strangle_grid, strangle_trades_dataframe
+export strangle_grid_metrics, long_strangle_grid_metrics
+export print_top_bottom_delta_cells, print_yearly_for_top_cells
+export print_selected_yearly_sharpe, print_selected_yearly_avg_pnl
+export save_selected_cumulative_pnl, save_selected_rolling_sharpe
+export print_selected_monthly_seasonality, save_short_strangle_payoff_diagrams
+export strangle_trade_index, evaluate_condor_combinations, print_condor_results
+export print_top_condor_yearly, print_loss_anatomy
+export run_condor_grid_experiment, run_condor_rolling_experiment
+export run_strangle_grid_experiment
+export run_strangle_rolling_experiment
+export run_strangle_selector_sweep
+export aggregate_option_records_vwap, save_smile_with_condors_snapshot
+export run_smile_with_condors_experiment
 
 end # module
