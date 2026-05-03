@@ -66,6 +66,7 @@ include("experiments/condor.jl")   # Iron-condor experiment extraction/reporting
 include("experiments/condor_rolling_workflow.jl") # Rolling condor workflow
 include("experiments/strangle.jl") # Strangle grid extraction/reporting
 include("experiments/strangle_rolling_workflow.jl") # Rolling strangle workflow
+include("experiments/strangle_selector_sweep_workflow.jl") # Selector triplet sweep
 include("experiments/smile.jl")    # Smile snapshot aggregation
 
 # ============================================================================
@@ -154,6 +155,13 @@ export ShortStrangleStrategy, delta_strangle_selector
 export RollingWingCondorSelector
 export RollingDeltaStrangleSelector
 export run_strangle_rolling, run_strangle_rolling_ensemble, report_strangle_rolling
+
+# Composable selector components (post-hoc replay sweep)
+export Conditioning, Unconditional, RVBinary, RVTertile, MomSign, RVxMom
+export Score, MeanScore, MeanVarScore, SharpeScore, SharpeHeldOut, CVaRScore
+export Picker, ArgmaxPicker, TopKPicker, ShrinkagePicker, StickyPicker
+export n_bins, fit_threshold, classify, score_pnls, pick
+export compute_strangle_state, compute_pnl_grid
 export open_condor_positions, open_strangle_positions
 
 # Strike selection helpers (used by scripts)
@@ -207,6 +215,7 @@ export print_top_condor_yearly, print_loss_anatomy
 export run_condor_grid_experiment, run_condor_rolling_experiment
 export run_strangle_grid_experiment
 export run_strangle_rolling_experiment
+export run_strangle_selector_sweep
 export aggregate_option_records_vwap, save_smile_with_condors_snapshot
 export run_smile_with_condors_experiment
 
