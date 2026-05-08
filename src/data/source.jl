@@ -4,6 +4,9 @@ function available_timestamps end
 function get_chain end
 function get_spot end
 function get_spots end
+function clear_cache! end
+
+clear_cache!(::DataSource) = nothing
 
 struct InMemoryDataSource <: DataSource
     underlying::Underlying
@@ -49,6 +52,12 @@ function InMemoryDataSource(
 end
 
 available_timestamps(s::InMemoryDataSource) = s.chain_timestamps
+
+function available_timestamps(s::InMemoryDataSource, from::DateTime, to::DateTime)
+    lo = searchsortedfirst(s.chain_timestamps, from)
+    hi = searchsortedlast(s.chain_timestamps, to)
+    s.chain_timestamps[lo:hi]
+end
 
 function get_chain(s::InMemoryDataSource, ts::DateTime)::Union{Vector{OptionQuote},Nothing}
     i = searchsortedfirst(s.chain_timestamps, ts)
