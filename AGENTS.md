@@ -6,19 +6,20 @@ This is the `rebuilt` branch -- a deliberate clean slate. The full codebase
 lives on `master` and is the reference we mine from. Everything here is being
 built up one small, deliberate piece at a time.
 
-## Rebuild order
+Rebuild order:
 
-1. Data loading -- read raw parquet files into typed records.
-2. Strategy backtesting -- one strategy, end-to-end PnL.
-3. Reporting -- minimal performance summary.
-4. Experiment orchestration -- thin scripts that wire the above.
+1. **Data** -- done.
+2. **Modelling** (vol surface) -- next.
+3. **Backtesting**.
+4. **Metric computation**.
+5. **Experiment orchestration**.
 
-Each piece lands as its own commit with a short rationale. We grow an
-abstraction only when a concrete second use forces it.
+Visualization is added incrementally alongside each stage, not as a phase
+of its own.
 
-## Conventions
+## General rules
 
-- Julia 1.10+
-- `Float64` for domain values
-- `missing` for absent optional data, `nothing` for "computation failed / skip"
-- Commit messages: never mention Claude, AI, or assistant tooling
+1. Follow the rules in [docs/design.md](docs/design.md).
+2. When a user prompt implies a new rule or a change to an existing one
+   (in `docs/design.md` or any module doc), propose the edit explicitly
+   and surface it before applying it -- don't quietly absorb it.
