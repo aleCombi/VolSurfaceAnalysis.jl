@@ -4,6 +4,7 @@ using Dates
 
 include("data/quotes.jl")
 include("data/source.jl")
+include("viz/spot.jl")
 
 export OptionType, Call, Put,
        Underlying, ticker,
