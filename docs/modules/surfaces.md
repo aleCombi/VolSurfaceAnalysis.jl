@@ -54,8 +54,10 @@ build_surface(chain::Vector{OptionQuote}, spot::Float64,
    OTM side has no usable mark.
 4. Inverts BS for sigma from the picked mark. Strikes with no mark,
    zero/negative mark, or out-of-bracket prices are dropped.
-5. Builds an `ExpirySlice` per surviving expiry; throws if every
-   slice ends up empty.
+5. Builds an `ExpirySlice` per surviving expiry. Throws on an empty
+   input chain (programmer error). Returns `nothing` when no slices
+   survive (e.g. every expiry has passed); callers treat that as
+   "no surface at this timestamp."
 
 Today this is the only builder method and handles only the
 mark-price convention (`ParquetDataSource`'s output). The seam for

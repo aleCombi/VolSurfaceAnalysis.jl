@@ -114,12 +114,12 @@ end
     @test_throws ArgumentError build_surface(OptionQuote[], 100.0, 0.04, 0.0)
 end
 
-@testset "build_surface: all-expired throws" begin
+@testset "build_surface: all-expired returns nothing" begin
     ts = DateTime(2024, 1, 15, 15, 30)
     e_past = DateTime(2024, 1, 10, 21, 0)
     q = OptionQuote("X", _SURF_UNDERLYING, e_past, 100.0, Call,
                     missing, missing, 1.0, missing, missing, missing, ts)
-    @test_throws ArgumentError build_surface([q], 100.0, 0.04, 0.0)
+    @test build_surface([q], 100.0, 0.04, 0.0) === nothing
 end
 
 @testset "Surface queries: error on unknown expiry" begin

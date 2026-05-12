@@ -65,10 +65,13 @@ the OTM-side mark. Strikes where neither side has a usable mark, or where
 IV inversion fails (price outside `[intrinsic, deep-vol limit]`), are
 dropped. Expiries with no usable strikes are dropped.
 
-Throws on an empty chain or if every slice ends up empty.
+Throws on an empty chain. Returns `nothing` if every expiry is dropped
+(e.g. all already expired, or no usable marks anywhere) -- callers
+(notably `ModelDataSource.get_surface`) treat this as "no surface at
+this timestamp" and cache it.
 """
 function build_surface(chain::Vector{OptionQuote}, spot::Float64,
-                       rate::Float64, div::Float64)::RawSurface
+                       rate::Float64, div::Float64)::Union{RawSurface,Nothing}
     isempty(chain) && throw(ArgumentError("cannot build surface from empty chain"))
     ts = chain[1].timestamp
     underlying = chain[1].underlying
@@ -87,8 +90,7 @@ function build_surface(chain::Vector{OptionQuote}, spot::Float64,
         push!(slices, sl)
     end
 
-    isempty(slices) &&
-        throw(ArgumentError("no usable expiries in chain (all dropped during IV inversion)"))
+    isempty(slices) && return nothing
 
     return RawSurface(underlying, ts, spot, rate, div, slices)
 end
