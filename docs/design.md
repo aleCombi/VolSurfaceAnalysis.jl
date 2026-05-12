@@ -16,3 +16,10 @@
 4. **Keep [status.md](status.md) current.** When work materially
    advances the rebuild or changes its order, update status.md in
    the same commit.
+
+5. **Check current community conventions before locking design
+   decisions.** When introducing a new module, type hierarchy, or
+   public API shape, look up current Julia (or relevant ecosystem)
+   conventions for naming, layout, interface declaration, and
+   testing structure. Cite the findings in the design discussion so
+   the choice is traceable.
