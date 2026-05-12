@@ -18,6 +18,7 @@ mutable struct ParquetDataSource <: DataSource
     spot_cache::OrderedDict{Date,SpotDay}
     contract_cache::Dict{String,ContractMeta}
     con::DuckDB.DB
+    closed::Bool
 end
 
 const DEFAULT_OPTIONS_SUBDIR = "options_1min"
@@ -39,6 +40,7 @@ function ParquetDataSource(
         OrderedDict{Date,SpotDay}(),
         Dict{String,ContractMeta}(),
         DuckDB.DB(":memory:"),
+        false,
     )
     finalizer(_close_con, ds)
     ds
@@ -61,9 +63,12 @@ function ParquetDataSource(
 end
 
 function _close_con(ds::ParquetDataSource)
-    try
-        DBInterface.close!(ds.con)
-    catch
+    if !ds.closed
+        try
+            DBInterface.close!(ds.con)
+        catch
+        end
+        ds.closed = true
     end
 end
 
@@ -72,6 +77,33 @@ function Base.close(ds::ParquetDataSource)
     empty!(ds.chain_cache)
     empty!(ds.spot_cache)
     return ds
+end
+
+Base.isopen(ds::ParquetDataSource) = !ds.closed
+
+function _assert_open(ds::ParquetDataSource)
+    isopen(ds) || throw(ArgumentError("ParquetDataSource is closed"))
+end
+
+"""
+    with_parquet_source(f, args...; kwargs...)
+
+Construct a `ParquetDataSource`, call `f(ds)`, and close the source in
+a `finally` block. Supports Julia's `do`-block style:
+
+```julia
+with_parquet_source("SPY", root) do ds
+    get_spots(ds, from, to)
+end
+```
+"""
+function with_parquet_source(f::Function, args...; kwargs...)
+    ds = ParquetDataSource(args...; kwargs...)
+    try
+        return f(ds)
+    finally
+        close(ds)
+    end
 end
 
 option_path(ds::ParquetDataSource, d::Date) = joinpath(
@@ -196,6 +228,7 @@ function _load_spot_day(ds::ParquetDataSource, d::Date)::SpotDay
 end
 
 function _ensure_chain_day!(ds::ParquetDataSource, d::Date)
+    _assert_open(ds)
     if haskey(ds.chain_cache, d)
         _lru_touch!(ds.chain_cache, d)
     else
@@ -206,6 +239,7 @@ function _ensure_chain_day!(ds::ParquetDataSource, d::Date)
 end
 
 function _ensure_spot_day!(ds::ParquetDataSource, d::Date)
+    _assert_open(ds)
     if haskey(ds.spot_cache, d)
         _lru_touch!(ds.spot_cache, d)
     else

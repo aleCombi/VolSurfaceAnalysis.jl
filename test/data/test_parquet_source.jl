@@ -281,6 +281,23 @@ mktempdir() do root
         close(ds); GC.gc()
     end
 
+    @testset "with_parquet_source closes after callback" begin
+        ds_ref = Ref{Any}(nothing)
+        n = with_parquet_source("SPY", root) do ds
+            ds_ref[] = ds
+            length(get_chain(ds, fx.t1a))
+        end
+        ds = ds_ref[]::ParquetDataSource
+        @test n == 2
+        @test !isopen(ds)
+        @test isempty(ds.chain_cache)
+        @test isempty(ds.spot_cache)
+        @test_throws ArgumentError get_chain(ds, fx.t1a)
+        ds_ref[] = nothing
+        ds = nothing
+        GC.gc()
+    end
+
     @testset "Single-root constructor: missing root throws" begin
         @test_throws ArgumentError ParquetDataSource("SPY", joinpath(root, "nonexistent"))
     end

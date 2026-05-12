@@ -27,6 +27,10 @@ failed / skip.
 Reads Polygon-style options and spot parquet on demand, with bounded
 memory and sequential-access-friendly caching.
 
+Scoped reads can use `with_parquet_source(args...; kwargs...) do ds ... end`,
+which constructs a `ParquetDataSource`, runs the callback, and closes the
+source in a `finally` block.
+
 ### Responsibility boundaries
 
 **Owns:** path resolution, column-projected DuckDB reads, ticker parsing,
@@ -75,7 +79,8 @@ flowchart LR
 | **Hive layout: `options_1min/` + `spots_1min/`, both keyed by `symbol=<T>`** | Matches the `options-collector` output exactly. Single-root constructor `ParquetDataSource("AAPL", root)` derives both subdirs; explicit-roots constructor remains for non-standard layouts. |
 | **Prefer `parsed_*` columns over ticker regex** | The collector already emits `parsed_underlying`, `parsed_expiry`, `parsed_strike`, `parsed_option_type` per row. When present, they're authoritative — saves one regex match per row and survives any ticker formats the collector handled but our parser doesn't. Ticker regex is the fallback. |
 | **Ticker-underlying mismatch throws** | Path partitioning makes a foreign ticker an indicator of corrupt data, not legitimate input. Silent skipping would hide bugs. |
-| **DuckDB connection per source, finalizer + `close(ds)`** | Reuses internal buffers across day loads. Explicit `close` exists because Windows file locks otherwise outlive GC. |
+| **DuckDB connection per source, finalizer + `close(ds)`** | Reuses internal buffers across day loads. Explicit `close` exists because Windows file locks otherwise outlive GC. Closed sources reject reads with `ArgumentError` instead of touching the closed DuckDB handle. |
+| **`with_parquet_source` for scoped use** | Mirrors Julia's `open(...) do io` resource-management idiom. Scripts and short-lived reads should prefer it over manually pairing construction and `close`. |
 
 ## Schema mapping (Polygon → `OptionQuote`)
 

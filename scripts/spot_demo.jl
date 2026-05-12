@@ -14,9 +14,10 @@ const DEMO_DATE = Date(get(ENV, "VSA_DEMO_DATE", "2016-03-28"))
 # ---- real series from ParquetDataSource ----
 
 function load_real_spots(symbol, root, date)
-    isdir(root) || (@warn "skipping parquet load — $root not found"; return SpotPrice[])
-    ds = ParquetDataSource(symbol, root)
-    spots = get_spots(ds, DateTime(date), DateTime(date, Time(23, 59, 59)))
+    isdir(root) || (@warn "skipping parquet load - $root not found"; return SpotPrice[])
+    spots = with_parquet_source(symbol, root) do ds
+        get_spots(ds, DateTime(date), DateTime(date, Time(23, 59, 59)))
+    end
     isempty(spots) && @warn "no spot rows for $symbol on $date under $root"
     return spots
 end
