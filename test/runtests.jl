@@ -7,5 +7,6 @@ using Dates
     include("data/test_source.jl")
     include("data/test_polygon.jl")
     include("data/test_parquet_source.jl")
+    include("model_data/test_curves.jl")
     include("viz/test_spot.jl")
 end

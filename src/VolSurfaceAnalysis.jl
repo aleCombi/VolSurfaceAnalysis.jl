@@ -6,6 +6,7 @@ include("data/quotes.jl")
 include("data/polygon.jl")
 include("data/source.jl")
 include("data/parquet_source.jl")
+include("model_data/curves.jl")
 include("viz/spot.jl")
 
 export OptionType, Call, Put,
@@ -14,6 +15,7 @@ export OptionType, Call, Put,
        DataSource, InMemoryDataSource, ParquetDataSource,
        SpotDay, option_path, spot_path,
        parse_polygon_ticker, et_to_utc,
-       available_timestamps, get_chain, get_spot, get_spots, clear_cache!
+       available_timestamps, get_chain, get_spot, get_spots, clear_cache!,
+       Curve, FlatCurve, PCCurve
 
 end
