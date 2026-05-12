@@ -7,7 +7,8 @@ built up one small, deliberate piece at a time.
 Rebuild order:
 
 1. **Data** -- done.
-2. **Modelling** (vol surface) -- next.
+2. **Modelling** (vol surface) -- in progress. Curves and surfaces
+   landed; `ModelDataSource` composition next.
 3. **Backtesting**.
 4. **Metric computation**.
 5. **Experiment orchestration**.
