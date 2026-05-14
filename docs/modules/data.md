@@ -48,23 +48,6 @@ per-day LRU caching, mapping rows to `OptionQuote` / `SpotPrice`.
 The rule: this module turns parquet bytes into typed records, nothing more.
 Pricing models, surfaces, and strategies are downstream concerns.
 
-## Architecture
-
-```mermaid
-flowchart LR
-    Caller[Backtest / Surface Builder] --> DS[ParquetDataSource]
-    subgraph state[Per-source state]
-        ChainLRU[(Chain LRU)]
-        SpotLRU[(Spot LRU)]
-        Contracts[(Contract metadata)]
-        Conn[DuckDB connection]
-    end
-    DS --> state
-    Conn --> Parquet[(Parquet files)]
-    Abstract[abstract DataSource] --- DS
-    Abstract --- InMem[InMemoryDataSource]
-```
-
 ## Key decisions
 
 | Decision | Why |

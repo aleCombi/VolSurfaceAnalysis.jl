@@ -120,24 +120,16 @@ end
 
 ```mermaid
 flowchart LR
-    User["User setup script"] -->|constructs| MDS
-    PDS[ParquetDataSource] --> CS["chain_source ::DataSource"]
-    PDS -.default.-> SS["spot_source ::DataSource"]
-    AltSpot["e.g. SPX cash source"] -.optional.-> SS
-    FCr["FlatCurve / PCCurve"] --> RT["rate ::Curve"]
-    FCd["FlatCurve / PCCurve"] --> DV["div ::Curve"]
+    Engine["Engine<br/>(any consumer)"] -->|"model data requests"| MDS["one ModelDataSource"]
 
-    subgraph MDS["ModelDataSource"]
-        CS
-        SS
-        RT
-        DV
-        CACHE[("surface_cache")]
-    end
+    MDS -->|"DataSource protocol: get_chain(ts)"| ChainSource["chain_source"]
+    MDS -->|"DataSource protocol: get_spot(ts)"| SpotSource["spot_source"]
+    MDS -->|"direct memory: rate(ts)"| RateCurve["rate Curve"]
+    MDS -->|"direct memory: div(ts)"| DivCurve["div Curve"]
+    MDS <-->|"direct memory: cache"| Cache[("surface_cache")]
 
-    Engine[Backtest / Strategy] -->|"get_surface, get_spot, get_rate, get_div"| MDS
-    MDS -->|"build_surface(chain, spot, r, q)"| Builder["build_surface (surfaces module)"]
-    Builder --> CACHE
+    MDS -->|"build_surface(chain, spot, r, q)"| Builder["build_surface"]
+    Builder --> Cache
 ```
 
 ## Responsibility boundaries
