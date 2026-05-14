@@ -11,5 +11,7 @@ using Dates
     include("surfaces/test_bs.jl")
     include("surfaces/test_surface.jl")
     include("model_data/test_source.jl")
+    include("positions/test_trade.jl")
+    include("positions/test_position.jl")
     include("viz/test_spot.jl")
 end

@@ -9,9 +9,13 @@ Rebuild order:
 1. **Data** -- done.
 2. **Modelling** (vol surface) -- done. `Curve`s, `surfaces` module,
    and `ModelDataSource` composition are in place.
-3. **Backtesting** -- next.
-4. **Metric computation**.
-5. **Experiment orchestration**.
+3. **Positions** -- done. `Trade` / `Position` records and the pure
+   `payoff` / `open_position` / `entry_cost` / `pnl` primitives. No
+   backtest or trading engine yet -- positions stand alone as the layer
+   both will consume.
+4. **Backtesting** -- next.
+5. **Metric computation**.
+6. **Experiment orchestration**.
 
 Visualization is added incrementally alongside each stage, not as a phase
 of its own.
