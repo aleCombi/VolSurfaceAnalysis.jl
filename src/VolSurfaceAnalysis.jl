@@ -13,6 +13,9 @@ include("surfaces/build.jl")
 include("model_data/source.jl")
 include("positions/trade.jl")
 include("positions/position.jl")
+include("backtest/time_cut.jl")
+include("strategies/strategy.jl")
+include("backtest/engine.jl")
 include("viz/spot.jl")
 
 export OptionType, Call, Put,
@@ -28,6 +31,9 @@ export OptionType, Call, Put,
        build_surface,
        bs_price, bs_delta, bs_gamma, bs_vega, implied_vol, time_to_expiry,
        ModelDataSource, get_surface, get_rate, get_div,
-       Trade, Position, payoff, open_position, entry_cost, pnl
+       Trade, Position, payoff, open_position, entry_cost, realized_pnl,
+       TimeCutModelDataSource,
+       Strategy, NoOpStrategy, decide,
+       resolve_quote, run_backtest
 
 end

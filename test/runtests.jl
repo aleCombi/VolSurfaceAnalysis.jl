@@ -13,5 +13,8 @@ using Dates
     include("model_data/test_source.jl")
     include("positions/test_trade.jl")
     include("positions/test_position.jl")
+    include("backtest/test_time_cut.jl")
+    include("strategies/test_strategy.jl")
+    include("backtest/test_engine.jl")
     include("viz/test_spot.jl")
 end

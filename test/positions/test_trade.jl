@@ -11,6 +11,10 @@ const _EXP = DateTime(2024, 3, 15, 21, 0)
     @test short.direction == -1
     @test short.quantity == 2.0
 
+    int_inputs = Trade(_SPY, 100, _EXP, Call; quantity=1)
+    @test int_inputs.strike === 100.0
+    @test int_inputs.quantity === 1.0
+
     @test_throws ArgumentError Trade(_SPY, 100.0, _EXP, Call; direction=0)
     @test_throws ArgumentError Trade(_SPY, 100.0, _EXP, Call; direction=2)
     @test_throws ArgumentError Trade(_SPY, 100.0, _EXP, Call; quantity=0.0)

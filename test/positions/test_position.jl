@@ -12,13 +12,13 @@ function _mk_quote(; underlying=_POS_UND, strike=100.0, expiry=_POS_EXP,
 end
 
 @testset "open_position: long fills at ask" begin
-    t = Trade(_POS_UND, 100.0, _POS_EXP, Call)
+    t = Trade(_POS_UND, 100, _POS_EXP, Call)
     q = _mk_quote(bid=1.20, ask=1.25)
-    pos = open_position(t, q, 99.5)
+    pos = open_position(t, q, 100)
 
     @test pos.trade === t
     @test pos.entry_price == 1.25
-    @test pos.entry_spot  == 99.5
+    @test pos.entry_spot  === 100.0
     @test pos.entry_bid   == 1.20
     @test pos.entry_ask   == 1.25
     @test pos.entry_timestamp == _POS_TS
@@ -67,29 +67,29 @@ end
     @test entry_cost(pos2) == 3.75
 end
 
-@testset "pnl: payoff minus entry_cost" begin
+@testset "realized_pnl: payoff minus entry_cost" begin
     # Long call: paid 1.25, expires at spot=110 (intrinsic 10) -> PnL 8.75
     long = open_position(Trade(_POS_UND, 100.0, _POS_EXP, Call),
                          _mk_quote(bid=1.20, ask=1.25), 99.5)
-    @test pnl(long, 110.0) ==  10.0 - 1.25
-    @test pnl(long,  95.0) == -1.25
+    @test realized_pnl(long, 110.0) ==  10.0 - 1.25
+    @test realized_pnl(long,  95.0) == -1.25
 
     # Short put: received 1.20, expires at spot=95 (put ITM -5 for the short) -> PnL -5 - (-1.20) = -3.80
     short_put = open_position(Trade(_POS_UND, 100.0, _POS_EXP, Put; direction=-1),
                               _mk_quote(option_type=Put, bid=1.20, ask=1.25), 99.5)
-    @test pnl(short_put,  95.0) ≈ -5.0 + 1.20  atol=1e-12
-    @test pnl(short_put, 105.0) ==  1.20      # OTM expiry, keep the premium
+    @test realized_pnl(short_put,  95.0) ≈ -5.0 + 1.20  atol=1e-12
+    @test realized_pnl(short_put, 105.0) ==  1.20      # OTM expiry, keep the premium
 end
 
-@testset "pnl: vector sums across legs" begin
+@testset "realized_pnl: vector sums across legs" begin
     # Buy + sell same contract: payoffs cancel, PnL = -(ask - bid) per share.
     q = _mk_quote(bid=1.20, ask=1.25)
     long  = open_position(Trade(_POS_UND, 100.0, _POS_EXP, Call),                   q, 99.5)
     short = open_position(Trade(_POS_UND, 100.0, _POS_EXP, Call; direction=-1),     q, 99.5)
 
-    @test pnl([long, short], 100.0) ≈ -(1.25 - 1.20) atol=1e-12
-    @test pnl([long, short], 150.0) ≈ -(1.25 - 1.20) atol=1e-12
+    @test realized_pnl([long, short], 100.0) ≈ -(1.25 - 1.20) atol=1e-12
+    @test realized_pnl([long, short], 150.0) ≈ -(1.25 - 1.20) atol=1e-12
 
     # Empty vector returns 0.
-    @test pnl(Position[], 100.0) == 0.0
+    @test realized_pnl(Position[], 100.0) == 0.0
 end

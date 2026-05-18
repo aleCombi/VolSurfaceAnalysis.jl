@@ -10,10 +10,13 @@ Rebuild order:
 2. **Modelling** (vol surface) -- done. `Curve`s, `surfaces` module,
    and `ModelDataSource` composition are in place.
 3. **Positions** -- done. `Trade` / `Position` records and the pure
-   `payoff` / `open_position` / `entry_cost` / `pnl` primitives. No
-   backtest or trading engine yet -- positions stand alone as the layer
-   both will consume.
-4. **Backtesting** -- next.
+   `payoff` / `open_position` / `entry_cost` / `realized_pnl` primitives.
+4. **Strategy + backtesting** -- minimal slice landed.
+   `Strategy` abstract type with stateless `decide(s, t, cut, positions)
+   -> Vector{Trade}`; `TimeCutModelDataSource` gives no-lookahead a
+   supported-interface guarantee; `run_backtest` drives the tick loop
+   and returns a bare `Vector{Position}` ledger. Reporting, result wrappers, and
+   concrete strategy types (iron condor, strangle, ...) are next.
 5. **Metric computation**.
 6. **Experiment orchestration**.
 

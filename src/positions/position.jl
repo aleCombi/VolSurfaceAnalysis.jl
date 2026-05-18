@@ -27,7 +27,7 @@ struct Position
 end
 
 """
-    open_position(trade::Trade, qte::OptionQuote, spot::Float64) -> Position
+    open_position(trade::Trade, qte::OptionQuote, spot::Real) -> Position
 
 Fill `trade` against `qte`: longs cross the ask, shorts cross the bid. The
 opposite side is recorded as-is (may be `missing`). `entry_timestamp` is
@@ -37,7 +37,7 @@ Throws `ArgumentError` when the quote does not describe the same contract
 (underlying / strike / expiry / option type), or when the fill side
 (`ask` for longs, `bid` for shorts) is `missing`.
 """
-function open_position(trade::Trade, qte::OptionQuote, spot::Float64)::Position
+function open_position(trade::Trade, qte::OptionQuote, spot::Real)::Position
     qte.underlying == trade.underlying ||
         throw(ArgumentError("quote underlying $(qte.underlying) != trade underlying $(trade.underlying)"))
     qte.strike == trade.strike ||
@@ -51,7 +51,7 @@ function open_position(trade::Trade, qte::OptionQuote, spot::Float64)::Position
     ismissing(fill_price) &&
         throw(ArgumentError("fill side ($(trade.direction > 0 ? :ask : :bid)) is missing on quote"))
 
-    return Position(trade, fill_price, spot, qte.bid, qte.ask, qte.timestamp)
+    return Position(trade, fill_price, Float64(spot), qte.bid, qte.ask, qte.timestamp)
 end
 
 """
@@ -64,18 +64,18 @@ entry_cost(p::Position)::Float64 =
     p.entry_price * p.trade.direction * p.trade.quantity
 
 """
-    pnl(position::Position, settlement_spot::Float64) -> Float64
+    realized_pnl(position::Position, settlement_spot::Real) -> Float64
 
 Realized PnL at expiry: `payoff(trade, settlement_spot) - entry_cost(position)`.
 """
-pnl(p::Position, settlement_spot::Float64)::Float64 =
+realized_pnl(p::Position, settlement_spot::Real)::Float64 =
     payoff(p.trade, settlement_spot) - entry_cost(p)
 
 """
-    pnl(positions::AbstractVector{Position}, settlement_spot::Float64) -> Float64
+    realized_pnl(positions::AbstractVector{Position}, settlement_spot::Real) -> Float64
 
-Sum of [`pnl`](@ref) across legs of a multi-leg structure cash-settled at the
-same spot.
+Sum of [`realized_pnl`](@ref) across legs of a multi-leg structure cash-settled
+at the same spot.
 """
-pnl(positions::AbstractVector{Position}, settlement_spot::Float64)::Float64 =
-    sum(pnl(p, settlement_spot) for p in positions; init=0.0)
+realized_pnl(positions::AbstractVector{Position}, settlement_spot::Real)::Float64 =
+    sum(realized_pnl(p, settlement_spot) for p in positions; init=0.0)
