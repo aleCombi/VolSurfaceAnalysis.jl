@@ -18,6 +18,7 @@ include("policies/policy.jl")
 include("agents/agent.jl")
 include("backtest/engine.jl")
 include("metrics/pnl_series.jl")
+include("metrics/core.jl")
 include("viz/spot.jl")
 
 export OptionType, Call, Put,
@@ -38,6 +39,7 @@ export OptionType, Call, Put,
        Policy, NoOpPolicy, decide,
        Agent, StaticAgent, current_policy,
        resolve_quote, run_backtest,
-       PnLSeries, pnl_series, equity_curve
+       PnLSeries, pnl_series, equity_curve,
+       total_pnl, n_round_trips, hit_rate
 
 end

@@ -65,6 +65,30 @@ equity_curve(series::PnLSeries) -> Vector{Float64}
 
 `cumsum(series.pnl)`. Empty input returns an empty vector.
 
+## Always-on metrics
+
+Cheap, unparameterized, universally interesting. The orchestrator
+computes these unconditionally on every call -- they are not listed
+in `Experiment.metrics`, because that field is for opt-in optional
+metrics with kwargs.
+
+| Function | Returns | Empty-series behavior |
+|---|---|---|
+| `total_pnl(series)` | `Float64` | `0.0` |
+| `n_round_trips(series)` | `Int` | `0` |
+| `hit_rate(series)` | `Float64` | `NaN` |
+
+`hit_rate` returns `NaN` (not `0.0`) on an empty series because hit
+rate is genuinely undefined with no trades; `NaN` propagates honestly
+through downstream math instead of silently reading as "0% wins."
+`hit_rate` counts strictly positive PnL -- breakeven trades (PnL
+exactly zero) are not wins.
+
+`series.n_opens` and `series.n_closes` are exposed as struct fields,
+not as separate metric functions, because they already live on
+`PnLSeries` and adding `n_opens(series)` would be a one-line
+forwarder that earns nothing.
+
 ## Key decisions
 
 | Decision | Why |
@@ -79,9 +103,10 @@ equity_curve(series::PnLSeries) -> Vector{Float64}
 ## Responsibility boundaries
 
 **Owns:** `PnLSeries`, the round-trip aggregation logic, derived
-read-only views like `equity_curve`. Will own (added in later
-commits) individual metric functions and the symbol-dispatch
-`compute_metrics` entry point.
+read-only views like `equity_curve`, and the always-on core metric
+functions (`total_pnl`, `n_round_trips`, `hit_rate`). Will own
+(added in the next commit) the optional symbol-addressable metric
+set and the `compute_metrics` dispatch entry point.
 
 **Does NOT own:**
 
@@ -101,8 +126,10 @@ commits) individual metric functions and the symbol-dispatch
 
 ## Future work
 
-- Always-on metric functions and a symbol-dispatch
-  `compute_metrics(series, requested; kwargs)` entry point (next commits).
+- Optional symbol-addressable metrics (Sharpe, Sortino,
+  max-drawdown, volatility, profit-factor) and a `compute_metrics`
+  entry point that takes a `Vector{Symbol}` and an optional
+  per-metric kwargs override map (next commit).
 - Per-contract metric views (Sharpe / win-rate broken out by
   underlying or expiry bucket).
 - Resampling to a regular time grid for return-based metrics
@@ -113,9 +140,11 @@ commits) individual metric functions and the symbol-dispatch
 ```
 src/metrics/
     pnl_series.jl   # PnLSeries struct + pnl_series + equity_curve
+    core.jl         # total_pnl + n_round_trips + hit_rate
 
 test/metrics/
     test_pnl_series.jl
+    test_core.jl
 ```
 
 All files are `include`d into the top-level `VolSurfaceAnalysis`
