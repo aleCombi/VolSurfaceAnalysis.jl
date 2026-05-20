@@ -1,0 +1,35 @@
+# First end-to-end experiment: NoOpPolicy over a real ParquetDataSource.
+#
+# This config is the canonical "does the experiment runner wire together
+# correctly" smoke test. The policy never trades, so the run produces
+# zero positions and zero PnL -- the value is in confirming that
+# loader, engine, metrics, and printer cooperate end to end.
+#
+# Running it requires a Polygon-style parquet tree at `source.root`
+# (options under `options_1min/`, spots under `spots_1min/`). Edit the
+# path or run the script with `VSA_POLYGON_ROOT=...` to override.
+
+name = "noop_smoke"
+from = 2024-01-16T14:30:00
+to   = 2024-01-16T14:35:00
+metrics = ["sharpe", "max_drawdown"]
+
+[source]
+type            = "parquet"
+underlying      = "SPY"
+root            = "C:/repos/options-collector/data/massive"
+max_days_cached = 3
+
+[source.rate]
+type  = "flat"
+value = 0.04
+
+[source.div]
+type  = "flat"
+value = 0.015
+
+[agent]
+type = "static"
+
+[agent.policy]
+type = "noop"

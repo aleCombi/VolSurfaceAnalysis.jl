@@ -22,6 +22,8 @@ include("metrics/core.jl")
 include("metrics/optional.jl")
 include("metrics/dispatch.jl")
 include("experiment/experiment.jl")
+include("experiment/show.jl")
+include("experiment/config.jl")
 include("viz/spot.jl")
 
 export OptionType, Call, Put,
@@ -46,6 +48,7 @@ export OptionType, Call, Put,
        total_pnl, n_round_trips, hit_rate,
        sharpe, sortino, max_drawdown, volatility, profit_factor,
        compute_metrics,
-       Experiment, ExperimentResult, run_experiment
+       Experiment, ExperimentResult, run_experiment,
+       load_experiment, build_agent, build_policy, build_curve, build_data_source
 
 end

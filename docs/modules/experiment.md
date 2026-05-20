@@ -86,7 +86,7 @@ freely, and only data strictly after the current tick is blocked.
 | **Result carries the full `Experiment`, not just `name`** | Rerun is the primary use case for provenance. `run_experiment(result.experiment)` is the obvious primitive; a bare `name` would force a sidecar registry to look up the rest. The cost is one cheap struct reference. |
 | **Settlement spot = `get_spot(source, last_ts_in_window)`** | The metrics layer needs a number, not a policy. Using the last available timestamp `<= exp.to` keeps the contract single-decision and avoids per-leg expiry lookups in this slice. Documented as "mark-to-spot at window end" so `total_pnl` semantics are unambiguous; per-leg-expiry settlement is future work. |
 | **Always-on metrics not in `Experiment.metrics`** | They are computed unconditionally and cost nothing extra. Listing them in `metrics` would force every experiment to repeat a boilerplate list and would imply they were opt-in, which they are not. |
-| **`metrics::Vector{Symbol}`, not `Vector{Function}`** | Symbols survive serialization to disk, read cleanly in config dumps, and let `compute_metrics` carry the per-symbol default kwargs in one place ([`compute_metrics`](metrics.md)). Function references would skip the table at the cost of looking less like a config artifact. |
+| **`metrics::Vector{Symbol}`, not `Vector{Function}`** | Symbols survive serialization to disk (now exercised by the TOML config loader), read cleanly in config dumps, and let `compute_metrics` carry the per-symbol default kwargs in one place ([`compute_metrics`](metrics.md)). Function references would skip the table at the cost of looking less like a config artifact. |
 | **No per-metric kwargs on `Experiment` yet** | The optional kwargs path lives on `compute_metrics` (`kwargs::Dict{Symbol,NamedTuple}`); callers who want non-default Sharpe can compute it themselves on `result.pnl_series`. Promotes the override to `Experiment` only once a workflow needs the kwargs to survive into provenance. |
 | **No persistence in this slice** | Writing results to disk, building a knowledge base of completed experiments, and indexing by name / config hash are the reporting layer's job. `Experiment` and `ExperimentResult` are pure value types today; serialization is a downstream decision. |
 | **`run_experiment` errors loudly on missing data** | Empty time window or a missing settlement spot both indicate the experiment is mis-specified or the data source has gaps the caller did not expect. Silent zeros would invent a "result" that doesn't exist. |
@@ -119,6 +119,59 @@ resolving the settlement spot at the window end.
 | Agent / Policy never trades | `result.positions` and `result.pnl_series.pnl` are empty; always-on metrics are `0.0` / `0` / `NaN` per their empty-series conventions. |
 | Spot present but no fills happened | Settlement spot is recorded on `pnl_series` even when unused -- harmless and keeps the field non-optional. |
 
+## Config loading
+
+A TOML file resolves to an `Experiment` via `load_experiment(path)`.
+Schema is a flat header (`name`, `from`, `to`, optional `metrics`)
+plus two nested tables (`[source]`, `[agent]`). Every sum-type
+(`DataSource`, `Curve`, `Policy`, `Agent`) is keyed by a string
+`type` discriminator; the rest of that table is forwarded to the
+matching builder.
+
+```toml
+name = "noop_smoke"
+from = 2024-01-16T14:30:00
+to   = 2024-01-16T14:35:00
+metrics = ["sharpe", "max_drawdown"]
+
+[source]
+type       = "parquet"
+underlying = "SPY"
+root       = "C:/data/polygon"
+
+[source.rate]
+type  = "flat"
+value = 0.04
+
+[source.div]
+type  = "flat"
+value = 0.015
+
+[agent]
+type = "static"
+
+[agent.policy]
+type = "noop"
+```
+
+New concrete types register themselves by adding one entry to the
+relevant builder table (`_DATA_SOURCE_BUILDERS`, `_CURVE_BUILDERS`,
+`_POLICY_BUILDERS`, `_AGENT_BUILDERS`) -- same pattern as
+`_METRIC_TABLE` in [`metrics`](metrics.md). The today-vocabulary is
+intentionally tiny (`parquet`, `flat`/`pc`, `noop`, `static`); the
+spine is what the loader is delivering.
+
+Run from the CLI:
+
+```
+julia --project=. scripts/run_experiment.jl configs/noop_smoke.toml
+```
+
+The script loads the config, runs the experiment, and prints the
+result via `Base.show(::IO, ::MIME"text/plain", ::ExperimentResult)`.
+Persistence is the next slice (see below); for now the result is
+screen-only.
+
 ## Future work
 
 - Per-leg expiry settlement (Q1 in the design discussion): mark
@@ -128,12 +181,12 @@ resolving the settlement spot at the window end.
 - Persistence: serializable projection of `Experiment` (name +
   agent descriptor + source descriptor + window + metrics) plus a
   knowledge-base writer that indexes completed `ExperimentResult`s.
+  The config side is now in place; the inverse (dump result + the
+  resolved config snapshot to a `runs/<name>_<ts>/` directory) is
+  the remaining half.
 - Parallel sweeps: an `experiments::Vector{Experiment}` runner that
   parallelizes across runs (the engine is single-threaded; the
   parallelism layer is here).
-- Config-file loading: TOML / YAML descriptors that resolve to
-  `Experiment` values, so a rerun can come from a file rather than
-  a Julia expression.
 - Live-trading sibling: same `Experiment` shape with `run_backtest`
   swapped for a live loop driver.
 
@@ -142,10 +195,19 @@ resolving the settlement spot at the window end.
 ```
 src/experiment/
     experiment.jl     # Experiment + ExperimentResult + run_experiment
+    show.jl           # Base.show(::IO, ::MIME"text/plain", ::ExperimentResult)
+    config.jl         # load_experiment + builder registries
+
+configs/              # versioned TOML experiment configs
+    noop_smoke.toml
+
+scripts/
+    run_experiment.jl # CLI entry: load_experiment -> run_experiment -> show
 
 test/experiment/
     test_experiment.jl
+    test_config.jl
 ```
 
-All files are `include`d into the top-level `VolSurfaceAnalysis`
-module; no submodule wrappers.
+All `src/experiment/*.jl` files are `include`d into the top-level
+`VolSurfaceAnalysis` module; no submodule wrappers.

@@ -30,14 +30,18 @@ Rebuild order:
    `compute_metrics`. Per-metric default kwargs live on the dispatch
    table; experiment-level overrides are deferred until a workflow
    needs them.
-6. **Experiment orchestration** -- skeleton landed. `Experiment`
-   wires `(Agent, ModelDataSource, [from, to], requested metrics)`
-   into a single rerunnable record; `run_experiment(exp)` returns
-   an `ExperimentResult` with positions, the PnL intermediate
+6. **Experiment orchestration** -- minimal end-to-end runnable.
+   `Experiment` wires `(Agent, ModelDataSource, [from, to], requested
+   metrics)` into a single rerunnable record; `run_experiment(exp)`
+   returns an `ExperimentResult` with positions, the PnL intermediate
    (marked to spot at the window end), and the computed metrics.
-   Settlement uses the last available timestamp in the window;
-   per-leg-expiry settlement, persistence, and parallel sweeps are
-   future work.
+   TOML configs resolve to `Experiment` values via `load_experiment`
+   (stdlib `TOML` + per-sum-type builder registries), and
+   `scripts/run_experiment.jl <config.toml>` prints the result via
+   `Base.show(::IO, ::MIME"text/plain", ::ExperimentResult)`.
+   Settlement uses the last available timestamp in the window.
+   Per-leg-expiry settlement, persistence (sidecar dump of config +
+   metrics), and parallel sweeps are future work.
 
 Visualization is added incrementally alongside each stage, not as a phase
 of its own.
