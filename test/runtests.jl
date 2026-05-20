@@ -14,7 +14,8 @@ using Dates
     include("positions/test_trade.jl")
     include("positions/test_position.jl")
     include("backtest/test_time_cut.jl")
-    include("strategies/test_strategy.jl")
+    include("policies/test_policy.jl")
+    include("agents/test_agent.jl")
     include("backtest/test_engine.jl")
     include("viz/test_spot.jl")
 end

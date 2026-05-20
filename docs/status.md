@@ -11,12 +11,17 @@ Rebuild order:
    and `ModelDataSource` composition are in place.
 3. **Positions** -- done. `Trade` / `Position` records and the pure
    `payoff` / `open_position` / `entry_cost` / `realized_pnl` primitives.
-4. **Strategy + backtesting** -- minimal slice landed.
-   `Strategy` abstract type with stateless `decide(s, t, cut, positions)
-   -> Vector{Trade}`; `TimeCutModelDataSource` gives no-lookahead a
-   supported-interface guarantee; `run_backtest` drives the tick loop
-   and returns a bare `Vector{Position}` ledger. Reporting, result wrappers, and
-   concrete strategy types (iron condor, strangle, ...) are next.
+4. **Policy + Agent + backtesting** -- minimal slice landed.
+   `Policy` abstract type with stateless `decide(p, t, cut, positions)
+   -> Vector{Trade}`; `Agent` abstract type with `current_policy(a, t,
+   cut, positions) -> Policy` (the layer that owns refit / learning /
+   policy evolution); `StaticAgent` wraps a fixed Policy.
+   `TimeCutModelDataSource` gives no-lookahead a supported-interface
+   guarantee; `run_backtest(agent, ...)` drives the tick loop and
+   `run_backtest(policy, ...)` is a `StaticAgent` wrapper for
+   training / evaluation. Returns a bare `Vector{Position}` ledger.
+   Reporting, result wrappers, and concrete policy / agent types
+   (iron condor, strangle, walk-forward refit, ...) are next.
 5. **Metric computation**.
 6. **Experiment orchestration**.
 

@@ -26,8 +26,8 @@ function _en_fixture()
     (mds=mds, ts1=ts1, ts2=ts2, ts3=ts3, expiry=expiry, spot=spot)
 end
 
-# A test strategy that opens one long call at ts1 and nothing else.
-struct _OpenOnceAt <: Strategy
+# A test policy that opens one long call at ts1 and nothing else.
+struct _OpenOnceAt <: Policy
     when::DateTime
     trade::Trade
 end
@@ -38,8 +38,8 @@ function VolSurfaceAnalysis.decide(s::_OpenOnceAt, t::DateTime,
     return t == s.when ? Trade[s.trade] : Trade[]
 end
 
-# A test strategy that opens at ts1 and closes (counter-trade) at ts2.
-struct _OpenThenClose <: Strategy
+# A test policy that opens at ts1 and closes (counter-trade) at ts2.
+struct _OpenThenClose <: Policy
     open_at::DateTime
     close_at::DateTime
     contract::Trade        # the open trade; close is its mirror
@@ -59,13 +59,13 @@ function VolSurfaceAnalysis.decide(s::_OpenThenClose, t::DateTime,
     end
 end
 
-@testset "run_backtest: NoOpStrategy yields empty ledger" begin
+@testset "run_backtest(policy): NoOpPolicy yields empty ledger" begin
     f = _en_fixture()
-    positions = run_backtest(NoOpStrategy(), f.mds, f.ts1, f.ts3)
+    positions = run_backtest(NoOpPolicy(), f.mds, f.ts1, f.ts3)
     @test isempty(positions)
 end
 
-@testset "run_backtest: single fill at scheduled tick" begin
+@testset "run_backtest(policy): single fill at scheduled tick" begin
     f = _en_fixture()
     trd = Trade(_EN_UND, 480.0, f.expiry, Call)
     positions = run_backtest(_OpenOnceAt(f.ts2, trd), f.mds, f.ts1, f.ts3)
@@ -77,7 +77,7 @@ end
     @test pos.entry_spot  == f.spot
 end
 
-@testset "run_backtest: counter-trade close lands in ledger" begin
+@testset "run_backtest(policy): counter-trade close lands in ledger" begin
     f = _en_fixture()
     open_trade = Trade(_EN_UND, 480.0, f.expiry, Call)
     s = _OpenThenClose(f.ts1, f.ts3, open_trade)
@@ -92,6 +92,43 @@ end
     @test positions[1].trade.strike      == positions[2].trade.strike
     @test positions[1].trade.expiry      == positions[2].trade.expiry
     @test positions[1].trade.option_type == positions[2].trade.option_type
+end
+
+@testset "run_backtest(agent): StaticAgent matches bare-policy result" begin
+    f = _en_fixture()
+    trd = Trade(_EN_UND, 480.0, f.expiry, Call)
+    p = _OpenOnceAt(f.ts2, trd)
+    via_policy = run_backtest(p, f.mds, f.ts1, f.ts3)
+    via_agent  = run_backtest(StaticAgent(p), f.mds, f.ts1, f.ts3)
+    @test length(via_agent) == length(via_policy) == 1
+    @test via_agent[1].trade === via_policy[1].trade
+    @test via_agent[1].entry_timestamp == via_policy[1].entry_timestamp
+    @test via_agent[1].entry_price == via_policy[1].entry_price
+end
+
+# An agent that swaps from NoOpPolicy to _OpenOnceAt at a chosen instant.
+# Demonstrates the engine actually re-queries current_policy each tick.
+struct _SwapAgent <: Agent
+    swap_at::DateTime
+    after::Policy
+end
+
+function VolSurfaceAnalysis.current_policy(a::_SwapAgent, t::DateTime,
+                                           ::TimeCutModelDataSource,
+                                           ::AbstractVector{Position})
+    t < a.swap_at ? NoOpPolicy() : a.after
+end
+
+@testset "run_backtest(agent): swap-mid-run agent acts only after swap" begin
+    f = _en_fixture()
+    trd = Trade(_EN_UND, 480.0, f.expiry, Call)
+    # Active policy fires at ts3; agent only swaps it in starting at ts2,
+    # so a swap at ts2 still produces the ts3 fill, but a swap after ts3
+    # produces nothing.
+    agent_fires = _SwapAgent(f.ts2, _OpenOnceAt(f.ts3, trd))
+    agent_silent = _SwapAgent(f.ts3 + Second(1), _OpenOnceAt(f.ts3, trd))
+    @test length(run_backtest(agent_fires,  f.mds, f.ts1, f.ts3)) == 1
+    @test isempty(run_backtest(agent_silent, f.mds, f.ts1, f.ts3))
 end
 
 @testset "resolve_quote: strike not in chain errors" begin

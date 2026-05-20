@@ -14,7 +14,8 @@ include("model_data/source.jl")
 include("positions/trade.jl")
 include("positions/position.jl")
 include("backtest/time_cut.jl")
-include("strategies/strategy.jl")
+include("policies/policy.jl")
+include("agents/agent.jl")
 include("backtest/engine.jl")
 include("viz/spot.jl")
 
@@ -33,7 +34,8 @@ export OptionType, Call, Put,
        ModelDataSource, get_surface, get_rate, get_div,
        Trade, Position, payoff, open_position, entry_cost, realized_pnl,
        TimeCutModelDataSource,
-       Strategy, NoOpStrategy, decide,
+       Policy, NoOpPolicy, decide,
+       Agent, StaticAgent, current_policy,
        resolve_quote, run_backtest
 
 end
