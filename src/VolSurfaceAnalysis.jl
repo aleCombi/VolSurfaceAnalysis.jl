@@ -17,6 +17,7 @@ include("backtest/time_cut.jl")
 include("policies/policy.jl")
 include("agents/agent.jl")
 include("backtest/engine.jl")
+include("metrics/pnl_series.jl")
 include("viz/spot.jl")
 
 export OptionType, Call, Put,
@@ -36,6 +37,7 @@ export OptionType, Call, Put,
        TimeCutModelDataSource,
        Policy, NoOpPolicy, decide,
        Agent, StaticAgent, current_policy,
-       resolve_quote, run_backtest
+       resolve_quote, run_backtest,
+       PnLSeries, pnl_series, equity_curve
 
 end

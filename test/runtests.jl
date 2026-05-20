@@ -17,5 +17,6 @@ using Dates
     include("policies/test_policy.jl")
     include("agents/test_agent.jl")
     include("backtest/test_engine.jl")
+    include("metrics/test_pnl_series.jl")
     include("viz/test_spot.jl")
 end
