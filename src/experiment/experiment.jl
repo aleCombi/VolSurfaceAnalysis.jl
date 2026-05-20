@@ -1,0 +1,86 @@
+# Experiment: the one-shot orchestrator that wires
+# (Agent, ModelDataSource, time window, requested metrics) into a
+# single rerunnable record. `run_experiment(exp)` does the backtest,
+# builds the canonical `PnLSeries` (marked to spot at the window
+# end), and returns an `ExperimentResult` carrying the originating
+# `Experiment` for provenance and rerun.
+#
+# Train/val/test splits, refit cadence, and learning live inside the
+# `Agent`; the `Experiment` only sees the evaluation window.
+
+"""
+    Experiment
+
+One-shot configuration record for a backtest + metrics computation.
+
+# Fields
+- `name::String`            -- short human label; carried into `ExperimentResult`.
+- `agent::Agent`            -- the [`Agent`](@ref) that produces the policy per tick.
+- `source::ModelDataSource` -- the data the engine ticks through.
+- `from::DateTime`          -- evaluation window start (inclusive).
+- `to::DateTime`            -- evaluation window end (inclusive).
+- `metrics::Vector{Symbol}` -- opt-in optional metrics (see [`compute_metrics`](@ref));
+                               always-on core metrics are not listed.
+
+A kwarg constructor is provided with a default empty `metrics`.
+"""
+struct Experiment
+    name    :: String
+    agent   :: Agent
+    source  :: ModelDataSource
+    from    :: DateTime
+    to      :: DateTime
+    metrics :: Vector{Symbol}
+end
+
+Experiment(; name::AbstractString, agent::Agent, source::ModelDataSource,
+           from::DateTime, to::DateTime,
+           metrics::Vector{Symbol}=Symbol[]) =
+    Experiment(String(name), agent, source, from, to, metrics)
+
+"""
+    ExperimentResult
+
+Output of [`run_experiment`](@ref): the ledger, the canonical PnL
+intermediate, the computed metrics, and the originating `Experiment`
+itself so the run can be reproduced via
+`run_experiment(result.experiment)`.
+
+# Fields
+- `experiment::Experiment`
+- `positions::Vector{Position}`
+- `pnl_series::PnLSeries`
+- `metrics::NamedTuple`
+"""
+struct ExperimentResult
+    experiment :: Experiment
+    positions  :: Vector{Position}
+    pnl_series :: PnLSeries
+    metrics    :: NamedTuple
+end
+
+"""
+    run_experiment(exp::Experiment) -> ExperimentResult
+
+Run the backtest defined by `exp`, build the canonical [`PnLSeries`](@ref)
+marked to spot at the last available timestamp in `[exp.from, exp.to]`,
+compute always-on metrics plus any metrics requested by symbol, and
+return the result.
+
+Errors loudly if the time window is empty, the settlement spot is
+missing at the window end, or any requested metric symbol is unknown.
+"""
+function run_experiment(exp::Experiment)::ExperimentResult
+    positions = run_backtest(exp.agent, exp.source, exp.from, exp.to)
+    ts_list = available_timestamps(exp.source, exp.from, exp.to)
+    isempty(ts_list) && error(
+        "run_experiment: no available timestamps in [$(exp.from), $(exp.to)] " *
+        "for experiment $(exp.name)")
+    settle_ts = last(ts_list)
+    spot = get_spot(exp.source, settle_ts)
+    ismissing(spot) && error(
+        "run_experiment: settlement spot missing at $(settle_ts) for experiment $(exp.name)")
+    series  = pnl_series(positions, Float64(spot); settlement_timestamp=settle_ts)
+    metrics = compute_metrics(series, exp.metrics)
+    return ExperimentResult(exp, positions, series, metrics)
+end

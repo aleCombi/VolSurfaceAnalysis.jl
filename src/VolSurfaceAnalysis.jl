@@ -21,6 +21,7 @@ include("metrics/pnl_series.jl")
 include("metrics/core.jl")
 include("metrics/optional.jl")
 include("metrics/dispatch.jl")
+include("experiment/experiment.jl")
 include("viz/spot.jl")
 
 export OptionType, Call, Put,
@@ -44,6 +45,7 @@ export OptionType, Call, Put,
        PnLSeries, pnl_series, equity_curve,
        total_pnl, n_round_trips, hit_rate,
        sharpe, sortino, max_drawdown, volatility, profit_factor,
-       compute_metrics
+       compute_metrics,
+       Experiment, ExperimentResult, run_experiment
 
 end

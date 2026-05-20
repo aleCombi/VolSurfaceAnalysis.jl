@@ -21,5 +21,6 @@ using Dates
     include("metrics/test_core.jl")
     include("metrics/test_optional.jl")
     include("metrics/test_dispatch.jl")
+    include("experiment/test_experiment.jl")
     include("viz/test_spot.jl")
 end
