@@ -19,5 +19,7 @@ using Dates
     include("backtest/test_engine.jl")
     include("metrics/test_pnl_series.jl")
     include("metrics/test_core.jl")
+    include("metrics/test_optional.jl")
+    include("metrics/test_dispatch.jl")
     include("viz/test_spot.jl")
 end

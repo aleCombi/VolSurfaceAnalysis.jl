@@ -22,7 +22,14 @@ Rebuild order:
    training / evaluation. Returns a bare `Vector{Position}` ledger.
    Reporting, result wrappers, and concrete policy / agent types
    (iron condor, strangle, walk-forward refit, ...) are next.
-5. **Metric computation**.
+5. **Metric computation** -- done. `PnLSeries` round-trip
+   intermediate (`src/metrics/pnl_series.jl`) plus always-on core
+   metrics (`total_pnl`, `n_round_trips`, `hit_rate`) and a
+   symbol-addressable optional set (`sharpe`, `sortino`,
+   `max_drawdown`, `volatility`, `profit_factor`) dispatched by
+   `compute_metrics`. Per-metric default kwargs live on the dispatch
+   table; experiment-level overrides are deferred until a workflow
+   needs them.
 6. **Experiment orchestration**.
 
 Visualization is added incrementally alongside each stage, not as a phase
