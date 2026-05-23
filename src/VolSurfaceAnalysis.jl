@@ -25,6 +25,7 @@ include("metrics/dispatch.jl")
 include("experiment/experiment.jl")
 include("experiment/show.jl")
 include("experiment/config.jl")
+include("persistence/store.jl")
 include("viz/spot.jl")
 
 export OptionType, Call, Put,
@@ -52,6 +53,7 @@ export OptionType, Call, Put,
        compute_metrics,
        Experiment, ExperimentResult, run_experiment,
        load_experiment, build_agent, build_policy, build_curve, build_data_source,
-       build_synthesizer
+       build_synthesizer,
+       RunStore, with_run_store, save_run, run_id, run_dir
 
 end
