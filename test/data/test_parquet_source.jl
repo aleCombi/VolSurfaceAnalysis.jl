@@ -7,21 +7,31 @@ using DuckDB: DBInterface
 # ---------- fixture helpers ----------
 
 function _write_options_parquet(path::AbstractString, rows::Vector{<:NamedTuple};
-                                include_volume::Bool=true)
+                                include_volume::Bool=true,
+                                include_ohlc::Bool=true)
     mkpath(dirname(path))
     db = DuckDB.DB(":memory:")
-    DBInterface.execute(db, "CREATE TABLE bars (ticker VARCHAR, close DOUBLE, " *
-                            (include_volume ? "volume DOUBLE, " : "") *
-                            "timestamp TIMESTAMP)")
+    schema_parts = ["ticker VARCHAR", "close DOUBLE"]
+    include_volume && push!(schema_parts, "volume DOUBLE")
+    if include_ohlc
+        push!(schema_parts, "open DOUBLE")
+        push!(schema_parts, "high DOUBLE")
+        push!(schema_parts, "low DOUBLE")
+    end
+    push!(schema_parts, "timestamp TIMESTAMP")
+    DBInterface.execute(db, "CREATE TABLE bars (" * join(schema_parts, ", ") * ")")
+    _val(r, k) = haskey(r, k) ? string(getfield(r, k)) : "NULL"
     for r in rows
         ts_str = Dates.format(r.timestamp, "yyyy-mm-dd HH:MM:SS")
-        if include_volume
-            DBInterface.execute(db,
-                "INSERT INTO bars VALUES ('$(r.ticker)', $(r.close), $(r.volume), '$ts_str')")
-        else
-            DBInterface.execute(db,
-                "INSERT INTO bars VALUES ('$(r.ticker)', $(r.close), '$ts_str')")
+        vals = ["'$(r.ticker)'", string(r.close)]
+        include_volume && push!(vals, _val(r, :volume))
+        if include_ohlc
+            push!(vals, _val(r, :open))
+            push!(vals, _val(r, :high))
+            push!(vals, _val(r, :low))
         end
+        push!(vals, "'$ts_str'")
+        DBInterface.execute(db, "INSERT INTO bars VALUES (" * join(vals, ", ") * ")")
     end
     p = replace(path, "\\" => "/")
     DBInterface.execute(db, "COPY bars TO '$p' (FORMAT PARQUET)")
@@ -54,14 +64,18 @@ function _build_fixture(root::AbstractString)
     _write_options_parquet(
         joinpath(opts, "date=2024-01-15", "symbol=SPY", "data.parquet"),
         [
-            (ticker="O:SPY240129C00406000", close=1.05, volume=12.0, timestamp=t1a),
-            (ticker="O:SPY240129P00400000", close=2.10, volume=5.0,  timestamp=t1a),
-            (ticker="O:SPY240129C00406000", close=1.07, volume=20.0, timestamp=t1b),
+            (ticker="O:SPY240129C00406000", close=1.05, volume=12.0,
+             open=1.00, high=1.10, low=0.95, timestamp=t1a),
+            (ticker="O:SPY240129P00400000", close=2.10, volume=5.0,
+             open=2.05, high=2.20, low=2.00, timestamp=t1a),
+            (ticker="O:SPY240129C00406000", close=1.07, volume=20.0,
+             open=1.05, high=1.12, low=1.04, timestamp=t1b),
         ],
     )
     _write_options_parquet(
         joinpath(opts, "date=2024-01-16", "symbol=SPY", "data.parquet"),
-        [(ticker="O:SPY240129C00406000", close=1.20, volume=30.0, timestamp=t2a)],
+        [(ticker="O:SPY240129C00406000", close=1.20, volume=30.0,
+          open=1.18, high=1.25, low=1.15, timestamp=t2a)],
     )
 
     _write_spot_parquet(
@@ -78,9 +92,12 @@ end
 
 # ---------- tests ----------
 
+const _SYNTH = SpreadFromOHLCV(0.7)
+
 mktempdir() do root
     fx = _build_fixture(root)
-    ds = ParquetDataSource("SPY"; options_root=fx.opts_root, spot_root=fx.spot_root, max_days_cached=2)
+    ds = ParquetDataSource("SPY"; options_root=fx.opts_root, spot_root=fx.spot_root,
+                           synthesizer=_SYNTH, max_days_cached=2)
 
     @testset "Path layout: options_1min and spots_1min, both keyed by symbol=" begin
         op = option_path(ds, fx.d1)
@@ -99,7 +116,8 @@ mktempdir() do root
         @test all(q -> ticker(q.underlying) == "SPY", chain)
         @test any(q -> q.option_type == Call && q.strike == 406.0, chain)
         @test any(q -> q.option_type == Put && q.strike == 400.0, chain)
-        @test all(q -> ismissing(q.bid) && ismissing(q.ask) && ismissing(q.iv) && ismissing(q.open_interest), chain)
+        @test all(q -> !ismissing(q.bid) && !ismissing(q.ask), chain)
+        @test all(q -> ismissing(q.iv) && ismissing(q.open_interest), chain)
         @test get_chain(ds, fx.t1a) === chain || length(get_chain(ds, fx.t1a)) == 2
 
         @test get_chain(ds, DateTime(fx.d1, Time(16, 0))) === nothing
@@ -111,6 +129,27 @@ mktempdir() do root
         c = first(filter(q -> q.option_type == Call, chain))
         @test c.mark == 1.05
         @test c.volume == 12.0
+    end
+
+    @testset "Synthesized bid/ask: SpreadFromOHLCV(0.7) applied at load" begin
+        chain = get_chain(ds, fx.t1a)
+        c = first(filter(q -> q.option_type == Call, chain))
+        # high=1.10, low=0.95, close=1.05, λ=0.7
+        # bid = 0.95 + 0.7*(1.05-0.95) = 1.02
+        # ask = 1.10 - 0.7*(1.10-1.05) = 1.065
+        @test c.bid ≈ 1.02
+        @test c.ask ≈ 1.065
+    end
+
+    @testset "open_position: fills against a ParquetDataSource chain" begin
+        chain = get_chain(ds, fx.t1a)
+        q = first(filter(qq -> qq.option_type == Call, chain))
+        trd = Trade(q.underlying, q.strike, q.expiry, q.option_type;
+                    direction=+1, quantity=1.0)
+        pos = open_position(trd, q, 480.0)
+        @test pos.entry_price == q.ask
+        @test pos.entry_bid == q.bid
+        @test pos.entry_ask == q.ask
     end
 
     @testset "Contract cache populated" begin
@@ -190,7 +229,7 @@ mktempdir() do root
     _write_options_parquet(
         joinpath(opts, "date=2024-01-15", "symbol=SPY", "data.parquet"),
         [(ticker="O:SPY240129C00406000", close=1.05, timestamp=t)];
-        include_volume=false,
+        include_volume=false, include_ohlc=false,
     )
     # spot file stub so isdir passes
     _write_spot_parquet(
@@ -198,13 +237,21 @@ mktempdir() do root
         [t], [480.0],
     )
 
-    ds = ParquetDataSource("SPY"; options_root=opts, spot_root=spot)
+    ds = ParquetDataSource("SPY"; options_root=opts, spot_root=spot, synthesizer=_SYNTH)
 
     @testset "Volume column absent -> missing" begin
         chain = get_chain(ds, t)
         @test chain !== nothing
         @test ismissing(first(chain).volume)
         @test first(chain).mark == 1.05
+    end
+
+    @testset "OHLC columns absent -> synthesized bid/ask missing, mark still close" begin
+        chain = get_chain(ds, t)
+        q = first(chain)
+        @test ismissing(q.bid)
+        @test ismissing(q.ask)
+        @test q.mark == 1.05
     end
     close(ds); GC.gc()
 end
@@ -225,7 +272,7 @@ mktempdir() do root
         [t], [480.0],
     )
 
-    ds = ParquetDataSource("SPY"; options_root=opts, spot_root=spot)
+    ds = ParquetDataSource("SPY"; options_root=opts, spot_root=spot, synthesizer=_SYNTH)
 
     @testset "Ticker-underlying mismatch throws" begin
         @test_throws ArgumentError get_chain(ds, t)
@@ -237,7 +284,8 @@ end
 
 mktempdir() do root
     fx = _build_fixture(root)
-    parquet_ds = ParquetDataSource("SPY"; options_root=fx.opts_root, spot_root=fx.spot_root)
+    parquet_ds = ParquetDataSource("SPY"; options_root=fx.opts_root, spot_root=fx.spot_root,
+                                   synthesizer=_SYNTH)
 
     # build in-memory mirror by reading via the parquet ds itself
     chains = Dict{DateTime,Vector{OptionQuote}}()
@@ -272,7 +320,7 @@ mktempdir() do root
     fx = _build_fixture(root)
 
     @testset "Single-root constructor derives options_1min and spots_1min" begin
-        ds = ParquetDataSource("SPY", root)
+        ds = ParquetDataSource("SPY", root; synthesizer=_SYNTH)
         @test ds.options_root == joinpath(root, "options_1min")
         @test ds.spot_root == joinpath(root, "spots_1min")
         chain = get_chain(ds, fx.t1a)
@@ -283,7 +331,7 @@ mktempdir() do root
 
     @testset "with_parquet_source closes after callback" begin
         ds_ref = Ref{Any}(nothing)
-        n = with_parquet_source("SPY", root) do ds
+        n = with_parquet_source("SPY", root; synthesizer=_SYNTH) do ds
             ds_ref[] = ds
             length(get_chain(ds, fx.t1a))
         end
@@ -299,7 +347,8 @@ mktempdir() do root
     end
 
     @testset "Single-root constructor: missing root throws" begin
-        @test_throws ArgumentError ParquetDataSource("SPY", joinpath(root, "nonexistent"))
+        @test_throws ArgumentError ParquetDataSource("SPY", joinpath(root, "nonexistent");
+                                                    synthesizer=_SYNTH)
     end
 end
 
@@ -335,7 +384,7 @@ mktempdir() do root
     _write_spot_parquet(joinpath(spot, "date=2024-01-15", "symbol=SPY", "data.parquet"),
                         [t], [480.0])
 
-    ds = ParquetDataSource("SPY"; options_root=opts, spot_root=spot)
+    ds = ParquetDataSource("SPY"; options_root=opts, spot_root=spot, synthesizer=_SYNTH)
 
     @testset "parsed_* columns are authoritative over ticker text" begin
         chain = get_chain(ds, t)
@@ -352,7 +401,7 @@ end
 
 if haskey(ENV, "VSA_POLYGON_ROOT")
     @testset "Real-data smoke (VSA_POLYGON_ROOT)" begin
-        ds = ParquetDataSource("AAPL", ENV["VSA_POLYGON_ROOT"])
+        ds = ParquetDataSource("AAPL", ENV["VSA_POLYGON_ROOT"]; synthesizer=_SYNTH)
         @info "smoke: probing one date for AAPL"
         d = Date(2016, 3, 28)
         ts = available_timestamps(ds, DateTime(d), DateTime(d, Time(23, 59)))

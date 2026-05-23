@@ -20,6 +20,10 @@ underlying      = "SPY"
 root            = "C:/repos/options-collector/data/massive"
 max_days_cached = 3
 
+[source.synthesizer]
+type   = "ohlcv_spread"
+lambda = 0.7
+
 [source.rate]
 type  = "flat"
 value = 0.04

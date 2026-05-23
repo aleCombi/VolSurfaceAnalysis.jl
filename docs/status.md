@@ -6,7 +6,9 @@ built up one small, deliberate piece at a time.
 
 Rebuild order:
 
-1. **Data** -- done.
+1. **Data** -- done. Includes the `OptionBar` + `QuoteSynthesizer`
+   adapter that closes the Polygon OHLCV → bid/ask gap; data sources
+   declare their synthesizer (e.g. `SpreadFromOHLCV(0.7)`) at construction.
 2. **Modelling** (vol surface) -- done. `Curve`s, `surfaces` module,
    and `ModelDataSource` composition are in place.
 3. **Positions** -- done. `Trade` / `Position` records and the pure

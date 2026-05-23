@@ -4,6 +4,7 @@ using Dates
 
 include("data/quotes.jl")
 include("data/polygon.jl")
+include("data/synth.jl")
 include("data/source.jl")
 include("data/parquet_source.jl")
 include("model_data/curves.jl")
@@ -29,6 +30,7 @@ include("viz/spot.jl")
 export OptionType, Call, Put,
        Underlying, ticker,
        OptionQuote, SpotPrice,
+       OptionBar, QuoteSynthesizer, SpreadFromOHLCV, synthesize,
        DataSource, InMemoryDataSource, ParquetDataSource,
        SpotDay, option_path, spot_path, with_parquet_source,
        parse_polygon_ticker, et_to_utc,
@@ -49,6 +51,7 @@ export OptionType, Call, Put,
        sharpe, sortino, max_drawdown, volatility, profit_factor,
        compute_metrics,
        Experiment, ExperimentResult, run_experiment,
-       load_experiment, build_agent, build_policy, build_curve, build_data_source
+       load_experiment, build_agent, build_policy, build_curve, build_data_source,
+       build_synthesizer
 
 end

@@ -31,6 +31,31 @@ end
     @test_throws ErrorException build_curve(Dict{String,Any}("value" => 0.0))
 end
 
+@testset "build_synthesizer: ohlcv_spread from Dict" begin
+    s = build_synthesizer(Dict{String,Any}("type" => "ohlcv_spread", "lambda" => 0.7))
+    @test s isa SpreadFromOHLCV
+    @test s.lambda == 0.7
+end
+
+@testset "build_synthesizer: missing lambda errors" begin
+    @test_throws ErrorException build_synthesizer(Dict{String,Any}("type" => "ohlcv_spread"))
+end
+
+@testset "build_synthesizer: unknown type errors with known list" begin
+    @test_throws ErrorException build_synthesizer(
+        Dict{String,Any}("type" => "bogus", "lambda" => 0.7))
+end
+
+@testset "build_data_source: parquet requires [source.synthesizer]" begin
+    # `_require` errors before any filesystem touch, so no parquet tree needed.
+    @test_throws ErrorException build_data_source(Dict{String,Any}(
+        "type"         => "parquet",
+        "underlying"   => "SPY",
+        "options_root" => "/nonexistent/opts",
+        "spot_root"    => "/nonexistent/spot",
+    ))
+end
+
 @testset "build_policy: noop" begin
     @test build_policy(Dict{String,Any}("type" => "noop")) isa NoOpPolicy
 end
@@ -109,6 +134,10 @@ end
             underlying   = "SPY"
             options_root = "$(replace(tree.options_root, "\\" => "/"))"
             spot_root    = "$(replace(tree.spot_root,    "\\" => "/"))"
+
+            [source.synthesizer]
+            type   = "ohlcv_spread"
+            lambda = 0.7
 
             [source.rate]
             type  = "flat"

@@ -58,14 +58,33 @@ function build_curve(d::AbstractDict)::Curve
     return _dispatch(_CURVE_BUILDERS, t, "curve")(d)
 end
 
+# ---- QuoteSynthesizer builders -----------------------------------------
+
+function _build_ohlcv_spread(d::AbstractDict)::QuoteSynthesizer
+    λ = _require(d, "lambda", "synthesizer(ohlcv_spread)")
+    return SpreadFromOHLCV(Float64(λ))
+end
+
+const _SYNTHESIZER_BUILDERS = Dict{String, Function}(
+    "ohlcv_spread" => _build_ohlcv_spread,
+)
+
+function build_synthesizer(d::AbstractDict)::QuoteSynthesizer
+    t = _pop_type!(d, "synthesizer")
+    return _dispatch(_SYNTHESIZER_BUILDERS, t, "synthesizer")(d)
+end
+
 # ---- DataSource builders ------------------------------------------------
 
 function _build_parquet_source(d::AbstractDict)::DataSource
     underlying = _require(d, "underlying", "source(parquet)")
+    synth_tbl  = _require(d, "synthesizer", "source(parquet)")
+    synth = build_synthesizer(Dict{String,Any}(synth_tbl))
     max_days = haskey(d, "max_days_cached") ? Int(d["max_days_cached"]) : 3
     if haskey(d, "root")
         return ParquetDataSource(
             String(underlying), String(d["root"]);
+            synthesizer     = synth,
             max_days_cached = max_days,
         )
     end
@@ -75,6 +94,7 @@ function _build_parquet_source(d::AbstractDict)::DataSource
         String(underlying);
         options_root    = String(options_root),
         spot_root       = String(spot_root),
+        synthesizer     = synth,
         max_days_cached = max_days,
     )
 end
@@ -97,7 +117,8 @@ function _build_model_data_source(d::AbstractDict)::ModelDataSource
     div_ = build_curve(Dict{String,Any}(div_tbl))
     # `build_data_source` reads its own "type"/fields from the top-level
     # source table; strip the curve sub-tables so they don't leak into
-    # the source kwargs.
+    # the source kwargs. (The synthesizer sub-table is consumed by the
+    # source builder itself, so it stays in.)
     source_only = Dict{String,Any}(k => v for (k, v) in d
                                    if k != "rate" && k != "div")
     chain_src = build_data_source(source_only)
@@ -158,6 +179,10 @@ metrics = ["sharpe", "max_drawdown"]
 type       = "parquet"
 underlying = "SPY"
 root       = "C:/data/polygon"
+
+[source.synthesizer]
+type   = "ohlcv_spread"
+lambda = 0.7
 
 [source.rate]
 type = "flat"

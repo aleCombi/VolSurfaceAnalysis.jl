@@ -7,6 +7,15 @@ workloads) and `ParquetDataSource` (lazy reads from a partitioned local
 parquet store). Callers are written against the abstract type and don't
 care which one they got.
 
+Also owns a small adapter layer for sources whose underlying record is a
+bar rather than a quote: `OptionBar` mirrors a Polygon OHLCV row and a
+`QuoteSynthesizer` strategy (concrete: `SpreadFromOHLCV(λ)`) turns it
+into an `OptionQuote`. The Polygon parquet store has no bid/ask feed,
+so a data source built on it declares its synthesizer at construction
+and consults it at row-load time. A future live-bid/ask source needs no
+synthesizer at all -- the seam is the data source's choice, not a
+hardcoded assumption downstream.
+
 ## `DataSource` protocol
 
 - `available_timestamps(ds)` — sorted timestamps with chains; only
@@ -25,7 +34,9 @@ failed / skip.
 ## `ParquetDataSource`
 
 Reads Polygon-style options and spot parquet on demand, with bounded
-memory and sequential-access-friendly caching.
+memory and sequential-access-friendly caching. Carries a
+`QuoteSynthesizer` (required at construction) used to project each loaded
+OHLCV row into the `OptionQuote` shape downstream code consumes.
 
 Scoped reads can use `with_parquet_source(args...; kwargs...) do ds ... end`,
 which constructs a `ParquetDataSource`, runs the callback, and closes the
@@ -34,19 +45,24 @@ source in a `finally` block.
 ### Responsibility boundaries
 
 **Owns:** path resolution, column-projected DuckDB reads, ticker parsing,
-per-day LRU caching, mapping rows to `OptionQuote` / `SpotPrice`.
+per-day LRU caching, building an `OptionBar` per row and projecting it
+through the declared `QuoteSynthesizer` into an `OptionQuote`, mapping
+spot rows to `SpotPrice`.
 
 **Does NOT own:**
 
+- The synthesis *policy* itself — the data source declares which
+  synthesizer it carries, but the math (`SpreadFromOHLCV` etc.) lives
+  on the synthesizer type, swappable per source.
 - IV inversion or implied vol — leaves `iv = missing`.
-- Synthetic bid/ask from OHLC — leaves `bid = ask = missing`.
 - Surface construction, smoothing, filtering.
 - Schedule / timeline ownership — callers ask for the timestamps they want.
 - Data acquisition (Polygon API, network).
 - Concurrency — single-threaded; reads mutate cache state.
 
-The rule: this module turns parquet bytes into typed records, nothing more.
-Pricing models, surfaces, and strategies are downstream concerns.
+The rule: this module turns parquet bytes into typed records via a
+declared synthesis policy, nothing more. Pricing models, surfaces, and
+strategies are downstream concerns.
 
 ## Key decisions
 
@@ -59,18 +75,25 @@ Pricing models, surfaces, and strategies are downstream concerns.
 | **Row iteration via `Tables.rows`, no `DataFrame`** | Avoids materializing a full intermediate table; rows stream straight into `OptionQuote`. |
 | **Column-projected SELECT, schema probed first** | Reads only `ticker, close, volume, timestamp` (chains) or `timestamp, close` (spots). DuckDB pre-validates column existence, so optional columns (e.g. `volume`) are checked via `parquet_schema()` before SELECT, not after. |
 | **`available_timestamps(ds, from, to)` is bounded; no-arg form throws** | Unbounded discovery would silently scan the entire dataset. Bounded form reuses the chain cache for free. |
-| **Hive layout: `options_1min/` + `spots_1min/`, both keyed by `symbol=<T>`** | Matches the `options-collector` output exactly. Single-root constructor `ParquetDataSource("AAPL", root)` derives both subdirs; explicit-roots constructor remains for non-standard layouts. |
+| **Hive layout: `options_1min/` + `spots_1min/`, both keyed by `symbol=<T>`** | Matches the `options-collector` output exactly. Single-root constructor `ParquetDataSource("AAPL", root; synthesizer=...)` derives both subdirs; explicit-roots constructor remains for non-standard layouts. |
+| **Source declares its `QuoteSynthesizer` at construction (required kwarg)** | Polygon has only OHLCV; we have to invent bid/ask to fill anything. Making the policy part of the source's declaration (rather than a wrapper, a downstream default, or a backtest-engine knob) keeps it visible in every experiment record. A future live-feed source carries a passthrough (or skips the type entirely); a robustness sweep just constructs the same source with `SpreadFromOHLCV(0.0)` vs `(1.0)`. |
 | **Prefer `parsed_*` columns over ticker regex** | The collector already emits `parsed_underlying`, `parsed_expiry`, `parsed_strike`, `parsed_option_type` per row. When present, they're authoritative — saves one regex match per row and survives any ticker formats the collector handled but our parser doesn't. Ticker regex is the fallback. |
 | **Ticker-underlying mismatch throws** | Path partitioning makes a foreign ticker an indicator of corrupt data, not legitimate input. Silent skipping would hide bugs. |
 | **DuckDB connection per source, finalizer + `close(ds)`** | Reuses internal buffers across day loads. Explicit `close` exists because Windows file locks otherwise outlive GC. Closed sources reject reads with `ArgumentError` instead of touching the closed DuckDB handle. |
 | **`with_parquet_source` for scoped use** | Mirrors Julia's `open(...) do io` resource-management idiom. Scripts and short-lived reads should prefer it over manually pairing construction and `close`. |
 
-## Schema mapping (Polygon → `OptionQuote`)
+## Schema mapping (Polygon → `OptionBar` → `OptionQuote`)
 
-`mark = close`. `bid`, `ask`, `iv`, `open_interest` are always `missing`.
-`volume` is `missing` when the column is absent. `expiry`, `strike`,
-`option_type` come from parsing the Polygon ticker (4 PM ET → UTC,
-DST-aware via `TimeZones.jl`).
+Per row, the loader builds an `OptionBar` carrying `open`, `high`, `low`,
+`close`, `volume` (each `missing` when the column or value is absent),
+then calls `synthesize(ds.synthesizer, bar)` to produce the
+`OptionQuote` stored in the cache. With `SpreadFromOHLCV(λ)` this means
+`mark = close`, and `bid`/`ask` are interpolated from `low`/`high`/`close`
+via the synthesizer (or `missing` when any of the three OHLC inputs is
+absent). `iv` and `open_interest` are always `missing`. `expiry`,
+`strike`, `option_type` come from `parsed_*` columns when present,
+otherwise from parsing the Polygon ticker (4 PM ET → UTC, DST-aware via
+`TimeZones.jl`).
 
 ## Failure modes
 
@@ -91,5 +114,6 @@ bounded form.
   unblocks no-arg `available_timestamps`.
 - Concurrent-safe caching (lock or per-day stripes) — needed before any
   multi-threaded backtest engine.
-- Pricing-layer wrapper that adds synthetic `bid`/`ask` and inverted `iv`,
-  keeping this module purely a data accessor.
+- IV inversion on the synthesized quote (still `missing` today).
+- Additional `QuoteSynthesizer` policies (e.g. a fixed-spread variant,
+  or one that uses tick-size rounding) as experiments demand.

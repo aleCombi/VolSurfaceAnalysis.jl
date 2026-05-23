@@ -11,6 +11,7 @@ end
 
 mutable struct ParquetDataSource <: DataSource
     underlying::Underlying
+    synthesizer::QuoteSynthesizer
     options_root::String
     spot_root::String
     max_days_cached::Int
@@ -28,6 +29,7 @@ function ParquetDataSource(
     underlying::Union{Underlying,AbstractString};
     options_root::AbstractString,
     spot_root::AbstractString,
+    synthesizer::QuoteSynthesizer,
     max_days_cached::Int=3,
 )
     max_days_cached >= 1 || throw(ArgumentError("max_days_cached must be >= 1"))
@@ -35,7 +37,7 @@ function ParquetDataSource(
     isdir(spot_root) || throw(ArgumentError("spot_root not a directory: $spot_root"))
     u = underlying isa Underlying ? underlying : Underlying(underlying)
     ds = ParquetDataSource(
-        u, String(options_root), String(spot_root), max_days_cached,
+        u, synthesizer, String(options_root), String(spot_root), max_days_cached,
         OrderedDict{Date,Dict{DateTime,Vector{OptionQuote}}}(),
         OrderedDict{Date,SpotDay}(),
         Dict{String,ContractMeta}(),
@@ -49,6 +51,7 @@ end
 function ParquetDataSource(
     underlying::Union{Underlying,AbstractString},
     root::AbstractString;
+    synthesizer::QuoteSynthesizer,
     options_subdir::AbstractString=DEFAULT_OPTIONS_SUBDIR,
     spot_subdir::AbstractString=DEFAULT_SPOTS_SUBDIR,
     max_days_cached::Int=3,
@@ -58,6 +61,7 @@ function ParquetDataSource(
         underlying;
         options_root=joinpath(root, options_subdir),
         spot_root=joinpath(root, spot_subdir),
+        synthesizer=synthesizer,
         max_days_cached=max_days_cached,
     )
 end
@@ -159,11 +163,17 @@ function _load_chain_day(ds::ParquetDataSource, d::Date)::Dict{DateTime,Vector{O
 
     cols = _parquet_columns(ds, path)
     has_volume = :volume in cols
+    has_open   = :open in cols
+    has_high   = :high in cols
+    has_low    = :low in cols
     has_parsed = :parsed_expiry in cols && :parsed_strike in cols &&
                  :parsed_option_type in cols && :parsed_underlying in cols
 
     base = "ticker, close, timestamp"
     base = has_volume ? base * ", volume" : base
+    base = has_open   ? base * ", open"   : base
+    base = has_high   ? base * ", high"   : base
+    base = has_low    ? base * ", low"    : base
     select_list = has_parsed ?
         base * ", parsed_underlying, parsed_expiry, parsed_strike, parsed_option_type" :
         base
@@ -192,8 +202,10 @@ function _load_chain_day(ds::ParquetDataSource, d::Date)::Dict{DateTime,Vector{O
             meta = m
             ds.contract_cache[tk] = meta
         end
-        close_val = row.close
-        mark = close_val === missing ? missing : Float64(close_val)
+        close_val = row.close === missing ? missing : Float64(row.close)
+        open_val  = has_open ? (row.open === missing ? missing : Float64(row.open)) : missing
+        high_val  = has_high ? (row.high === missing ? missing : Float64(row.high)) : missing
+        low_val   = has_low  ? (row.low  === missing ? missing : Float64(row.low))  : missing
         vol = if has_volume
             v = row.volume
             v === missing ? missing : Float64(v)
@@ -201,10 +213,11 @@ function _load_chain_day(ds::ParquetDataSource, d::Date)::Dict{DateTime,Vector{O
             missing
         end
         ts = _coerce_dt(row.timestamp)
-        q = OptionQuote(
+        bar = OptionBar(
             tk, ds.underlying, meta.expiry, meta.strike, meta.option_type,
-            missing, missing, mark, missing, missing, vol, ts,
+            open_val, high_val, low_val, close_val, vol, ts,
         )
+        q = synthesize(ds.synthesizer, bar)
         push!(get!(() -> OptionQuote[], by_ts, ts), q)
     end
     by_ts
