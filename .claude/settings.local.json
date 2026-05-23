@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(ls:*)",
-      "Bash(julia -e:*)",
-      "Bash(julia:*)"
-    ]
-  }
-}
