@@ -52,8 +52,9 @@ export OptionType, Call, Put,
        sharpe, sortino, max_drawdown, volatility, profit_factor,
        compute_metrics,
        Experiment, ExperimentResult, run_experiment,
-       load_experiment, build_agent, build_policy, build_curve, build_data_source,
+       load_experiment, load_experiment_str,
+       build_agent, build_policy, build_curve, build_data_source,
        build_synthesizer,
-       RunStore, with_run_store, save_run, run_id, run_dir
+       RunStore, with_run_store, save_run, load_run, run_id, run_dir
 
 end

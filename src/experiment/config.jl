@@ -202,7 +202,21 @@ type = "noop"
 Errors loudly on missing required keys or unknown `type` discriminators.
 """
 function load_experiment(path::AbstractString)::Experiment
-    cfg = TOML.parsefile(String(path))
+    return _experiment_from_cfg(TOML.parsefile(String(path)))
+end
+
+"""
+    load_experiment_str(toml::AbstractString) -> Experiment
+
+Parse `toml` content (not a path) and construct the [`Experiment`](@ref).
+Same schema and validation as [`load_experiment`](@ref); useful for
+rehydrating from a config string stored alongside a persisted run.
+"""
+function load_experiment_str(toml::AbstractString)::Experiment
+    return _experiment_from_cfg(TOML.parse(String(toml)))
+end
+
+function _experiment_from_cfg(cfg::AbstractDict)::Experiment
     name = String(_require(cfg, "name", "config"))
     from = DateTime(_require(cfg, "from", "config"))
     to   = DateTime(_require(cfg, "to",   "config"))

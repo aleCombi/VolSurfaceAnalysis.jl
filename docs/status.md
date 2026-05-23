@@ -43,13 +43,17 @@ Rebuild order:
    `Base.show(::IO, ::MIME"text/plain", ::ExperimentResult)`.
    Settlement uses the last available timestamp in the window.
    Per-leg-expiry settlement and parallel sweeps are future work.
-7. **Persistence (slice 1: save)** -- `RunStore` writes runs to a
-   Hive-partitioned parquet tree at `<root>/runs/run_id=<hash>/`
-   (config.toml verbatim + manifest / metrics / positions / pnl_series
-   parquet files). Identity is SHA-256 of the TOML bytes truncated to
-   16 hex chars. Cross-run queries are DuckDB SQL against the parquet
-   glob -- no Julia query API. `load_run` (rehydrate) and canonical
-   config hashing are the next slices.
+7. **Persistence** -- `RunStore` writes runs to a Hive-partitioned
+   parquet tree at `<root>/runs/run_id=<hash>/` (config.toml verbatim
+   plus manifest / metrics / positions / pnl_series parquet files).
+   Identity is SHA-256 of the TOML bytes truncated to 16 hex chars.
+   `save_run(store, result, config_toml)` writes, `load_run(store,
+   run_id)` reads back into an `ExperimentResult` -- the rebuilt
+   `Experiment.source` validates lazily so loading works even when the
+   data is on a different machine. Cross-run queries are DuckDB SQL
+   against the parquet glob -- no Julia query API. Atomic
+   write-to-temp-rename and canonical config hashing are the next
+   slices.
 
 Visualization is added incrementally alongside each stage, not as a phase
 of its own.

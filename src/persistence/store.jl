@@ -288,3 +288,132 @@ function _write_pnl_series(store::RunStore, dir::AbstractString, id::AbstractStr
     end
     _write_parquet(store, joinpath(dir, "pnl_series.parquet"), schema, inserts)
 end
+
+# --- load_run ------------------------------------------------------------
+
+# Always-on metrics in `compute_metrics` are emitted in this fixed order;
+# `n_round_trips`, `n_opens`, and `n_closes` are integers, everything
+# else is Float64. The load path uses this to round-trip the NamedTuple
+# faithfully (integers stay integers, key order matches `compute_metrics`).
+const _ALWAYS_ON_METRIC_KEYS = (:total_pnl, :n_round_trips, :n_opens, :n_closes, :hit_rate)
+const _INT_METRIC_KEYS = (:n_round_trips, :n_opens, :n_closes)
+
+"""
+    load_run(store::RunStore, run_id::AbstractString) -> ExperimentResult
+
+Rehydrate a previously [`save_run`](@ref)-saved run back into an
+`ExperimentResult`. Reads the four parquet artifacts plus the saved
+`config.toml`, rebuilds the live `Experiment` via
+[`load_experiment_str`](@ref), and reconstructs `positions`,
+`pnl_series`, and the `metrics` NamedTuple (preserving the integer
+types of `n_round_trips`, `n_opens`, `n_closes`).
+
+The underlying data source declared by the saved config does not need
+to be present on disk -- `ParquetDataSource` validates roots lazily, so
+the rebuilt `Experiment.source` simply throws on first read if the
+data has moved. Inspecting the persisted fields (`positions`,
+`pnl_series`, `metrics`) needs no source data at all.
+
+Throws `ArgumentError` if the run folder or any of the expected files
+is missing.
+"""
+function load_run(store::RunStore, run_id::AbstractString)::ExperimentResult
+    _assert_open(store)
+    dir = run_dir(store, run_id)
+    isdir(dir) || throw(ArgumentError("load_run: no run folder for id $run_id at $dir"))
+
+    cfg_path = joinpath(dir, "config.toml")
+    isfile(cfg_path) || throw(ArgumentError("load_run: missing config.toml in $dir"))
+    config_toml = read(cfg_path, String)
+    exp = load_experiment_str(config_toml)
+
+    manifest = _load_manifest(store, dir)
+    positions = _load_positions(store, dir, exp.source.chain_source.underlying)
+    series = _load_pnl_series(store, dir, manifest)
+    metrics = _load_metrics(store, dir, exp.metrics)
+
+    return ExperimentResult(exp, positions, series, metrics)
+end
+
+function _select_rows(store::RunStore, path::AbstractString, sql::AbstractString)
+    isfile(path) || throw(ArgumentError("load_run: missing $(basename(path)) at $path"))
+    return collect(DBInterface.execute(store.con, sql))
+end
+
+function _load_manifest(store::RunStore, dir::AbstractString)
+    path = joinpath(dir, "manifest.parquet")
+    rows = _select_rows(store, path,
+        "SELECT settlement_spot, n_opens, n_closes FROM '$(_sql_pq_path(path))'")
+    length(rows) == 1 ||
+        throw(ArgumentError("load_run: manifest.parquet must have exactly 1 row, got $(length(rows))"))
+    r = first(rows)
+    return (settlement_spot=Float64(r.settlement_spot),
+            n_opens=Int(r.n_opens),
+            n_closes=Int(r.n_closes))
+end
+
+function _load_positions(store::RunStore, dir::AbstractString,
+                         underlying::Underlying)::Vector{Position}
+    path = joinpath(dir, "positions.parquet")
+    rows = _select_rows(store, path,
+        "SELECT leg_idx, underlying, strike, expiry, option_type, direction, " *
+        "quantity, entry_price, entry_spot, entry_bid, entry_ask, entry_timestamp " *
+        "FROM '$(_sql_pq_path(path))' ORDER BY leg_idx")
+    out = Position[]
+    for r in rows
+        # `underlying` from the parquet should match the source's; trust the
+        # row but build a per-row Underlying so this stays correct if a future
+        # multi-symbol persistence schema lands.
+        u = String(r.underlying) == ticker(underlying) ? underlying :
+            Underlying(String(r.underlying))
+        otype = String(r.option_type) == "C" ? Call : Put
+        trade = Trade(u, Float64(r.strike), DateTime(r.expiry), otype;
+                      direction=Int(r.direction), quantity=Float64(r.quantity))
+        bid = r.entry_bid === missing ? missing : Float64(r.entry_bid)
+        ask = r.entry_ask === missing ? missing : Float64(r.entry_ask)
+        push!(out, Position(trade,
+                            Float64(r.entry_price),
+                            Float64(r.entry_spot),
+                            bid, ask,
+                            DateTime(r.entry_timestamp)))
+    end
+    return out
+end
+
+function _load_pnl_series(store::RunStore, dir::AbstractString,
+                          manifest::NamedTuple)::PnLSeries
+    path = joinpath(dir, "pnl_series.parquet")
+    rows = _select_rows(store, path,
+        "SELECT timestamp, pnl FROM '$(_sql_pq_path(path))' ORDER BY idx")
+    timestamps = DateTime[DateTime(r.timestamp) for r in rows]
+    pnl        = Float64[Float64(r.pnl)         for r in rows]
+    return PnLSeries(timestamps, pnl,
+                     manifest.settlement_spot, manifest.n_opens, manifest.n_closes)
+end
+
+function _load_metrics(store::RunStore, dir::AbstractString,
+                       requested::Vector{Symbol})::NamedTuple
+    path = joinpath(dir, "metrics.parquet")
+    rows = _select_rows(store, path,
+        "SELECT metric_name, value FROM '$(_sql_pq_path(path))'")
+    raw = Dict{Symbol,Float64}()
+    for r in rows
+        raw[Symbol(r.metric_name)] = Float64(r.value)
+    end
+    # Build the NamedTuple in canonical order: always-on first, then
+    # optional in the requested order (matches `compute_metrics`).
+    keys = Symbol[]
+    vals = Any[]
+    for k in _ALWAYS_ON_METRIC_KEYS
+        haskey(raw, k) || continue
+        push!(keys, k)
+        push!(vals, k in _INT_METRIC_KEYS ? Int(raw[k]) : raw[k])
+    end
+    for k in requested
+        haskey(raw, k) || continue   # caller-requested metric absent (skip rather than error)
+        k in _ALWAYS_ON_METRIC_KEYS && continue   # don't double-add
+        push!(keys, k)
+        push!(vals, raw[k])
+    end
+    return NamedTuple{Tuple(keys)}(Tuple(vals))
+end

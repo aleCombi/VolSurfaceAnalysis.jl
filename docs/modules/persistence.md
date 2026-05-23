@@ -44,11 +44,18 @@ run_id(config_toml) :: String                          # pure, no I/O
 run_dir(store, run_id) :: String                       # path helper
 
 save_run(store, result, config_toml) :: String         # returns run_id
+load_run(store, run_id) :: ExperimentResult
 ```
 
-No `load_run` yet. Slice 1 is "runs don't evaporate" -- the bytes are
-on disk and SQL-queryable. Re-materializing an `ExperimentResult`
-back into Julia values comes in the next slice.
+`load_run` reads the four parquets plus the saved `config.toml`,
+rebuilds the live `Experiment` via `load_experiment_str`, and
+reconstructs `positions`, `pnl_series`, and the `metrics` `NamedTuple`
+(integer types preserved for `n_round_trips` / `n_opens` / `n_closes`,
+NaN / Inf preserved verbatim). The rebuilt `Experiment.source` does
+**not** need its data on disk -- `ParquetDataSource` validates roots
+lazily, so inspecting `positions` / `pnl_series` / `metrics` always
+works; only an actual `get_chain` / `get_spot` against a missing root
+throws.
 
 ### Cross-run queries
 
@@ -163,7 +170,7 @@ One row per round trip, post-sort by timestamp (matches `PnLSeries`).
 |---|---|
 | **Parquet + DuckDB-as-engine, no single-file DB** | Matches the `data` module's existing pattern. Files are inspectable from any parquet-aware tool; a single corrupt run doesn't take down the whole store; `rm -rf <run_dir>` is a valid delete. |
 | **Hive partition `run_id=<hash>`** | DuckDB and pandas / polars all understand the layout natively. Cross-run queries are one parquet glob, no separate manifest table to keep in sync. |
-| **No `load_run` in slice 1** | Persistence's main job is "runs don't evaporate." That's satisfied by `save_run` plus SQL. Rehydrating to Julia objects raises real questions (rebuild the live `Experiment`? require the source data still present? a fields-only `StoredRun`?) better answered after the first consumer exists. |
+| **`load_run` returns `ExperimentResult`, not a separate `StoredRun`** | Same type as `run_experiment` means same recipes / `show` / downstream consumers. The "what about missing source data?" objection is resolved by `ParquetDataSource`'s lazy root validation -- the rebuilt source just throws on first read if its data is gone, while positions / pnl / metrics remain inspectable. No separate stored-vs-live type needed. |
 | **Long-form `metrics.parquet`** | Optional metrics come and go per run; a wide schema would force columns to NULL across runs and break naive `UNION ALL` reads. Long form is stable and trivially pivotable. |
 | **NaN / Inf preserved, not nulled** | A NaN sharpe (e.g. one trade, zero variance) is meaningful information about that run; collapsing it to NULL would lose the distinction from "metric not requested." |
 | **Caller passes the TOML bytes** | The TOML is the source of truth for what was run; pushing the bytes through `save_run` keeps the persistence layer ignorant of how the `Experiment` was built and avoids stashing config strings on `Experiment` itself. |
@@ -172,9 +179,6 @@ One row per round trip, post-sort by timestamp (matches `PnLSeries`).
 
 ## Future work
 
-- `load_run(store, run_id)` -- read the four parquets back into a
-  Julia value (likely a `StoredRun` rather than a full
-  `ExperimentResult`, to avoid forcing a live `Experiment` rebuild).
 - Write-to-temp-then-rename for atomic saves.
 - Canonical `to_dict(::Experiment)` to make identity insensitive to
   whitespace / key order. Becomes worthwhile when spurious folder
