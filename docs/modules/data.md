@@ -103,7 +103,15 @@ otherwise from parsing the Polygon ticker (4 PM ET → UTC, DST-aware via
 | Timestamp absent on present day | `nothing` | `missing` | excluded from range |
 | Malformed Polygon ticker | throws | — | — |
 | Ticker underlying ≠ source underlying | throws | — | — |
+| Root directory missing | throws | throws | throws |
 | `from > to` | — | — | empty |
+
+Root directories are validated **lazily** on the first read, not at
+construction. Constructing against a missing root emits a `@warn` and
+returns a usable handle; the first `get_chain` / `get_spot` /
+`get_spots` against the missing root throws. This lets a persisted
+`Experiment` config be rehydrated in a workspace whose data store is
+elsewhere without forcing the data to be present at load time.
 
 `available_timestamps(ds)` (no-arg) throws with a message pointing to the
 bounded form.

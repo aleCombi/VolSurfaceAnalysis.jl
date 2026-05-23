@@ -33,8 +33,14 @@ function ParquetDataSource(
     max_days_cached::Int=3,
 )
     max_days_cached >= 1 || throw(ArgumentError("max_days_cached must be >= 1"))
-    isdir(options_root) || throw(ArgumentError("options_root not a directory: $options_root"))
-    isdir(spot_root) || throw(ArgumentError("spot_root not a directory: $spot_root"))
+    # Roots are not hard-validated here -- a source can be constructed
+    # against paths that do not yet exist (e.g. when rehydrating an
+    # `Experiment` from a saved config in a workspace whose data store
+    # is elsewhere). A missing root warns now and throws on the first
+    # actual read, so a typo or wrong workspace surfaces immediately
+    # without breaking the rehydration path.
+    isdir(options_root) || @warn "ParquetDataSource: options_root does not exist (reads will throw)" options_root
+    isdir(spot_root)    || @warn "ParquetDataSource: spot_root does not exist (reads will throw)" spot_root
     u = underlying isa Underlying ? underlying : Underlying(underlying)
     ds = ParquetDataSource(
         u, synthesizer, String(options_root), String(spot_root), max_days_cached,
@@ -56,7 +62,7 @@ function ParquetDataSource(
     spot_subdir::AbstractString=DEFAULT_SPOTS_SUBDIR,
     max_days_cached::Int=3,
 )
-    isdir(root) || throw(ArgumentError("root not a directory: $root"))
+    # Lazy validation: see the kwarg constructor's note.
     ParquetDataSource(
         underlying;
         options_root=joinpath(root, options_subdir),
@@ -158,6 +164,8 @@ function _contract_meta_from_parsed(parsed_expiry, parsed_strike::Float64,
 end
 
 function _load_chain_day(ds::ParquetDataSource, d::Date)::Dict{DateTime,Vector{OptionQuote}}
+    isdir(ds.options_root) ||
+        throw(ArgumentError("options_root not a directory: $(ds.options_root)"))
     path = option_path(ds, d)
     isfile(path) || return Dict{DateTime,Vector{OptionQuote}}()
 
@@ -224,6 +232,8 @@ function _load_chain_day(ds::ParquetDataSource, d::Date)::Dict{DateTime,Vector{O
 end
 
 function _load_spot_day(ds::ParquetDataSource, d::Date)::SpotDay
+    isdir(ds.spot_root) ||
+        throw(ArgumentError("spot_root not a directory: $(ds.spot_root)"))
     path = spot_path(ds, d)
     isfile(path) || return SpotDay(DateTime[], Float64[])
 

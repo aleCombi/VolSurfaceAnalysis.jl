@@ -346,9 +346,13 @@ mktempdir() do root
         GC.gc()
     end
 
-    @testset "Single-root constructor: missing root throws" begin
-        @test_throws ArgumentError ParquetDataSource("SPY", joinpath(root, "nonexistent");
-                                                    synthesizer=_SYNTH)
+    @testset "Missing root: warns at construction, throws on first read" begin
+        bad = joinpath(root, "nonexistent")
+        ds = @test_logs (:warn,) (:warn,) ParquetDataSource("SPY";
+            options_root=bad, spot_root=bad, synthesizer=_SYNTH)
+        @test_throws ArgumentError get_chain(ds, DateTime(2024, 1, 15, 15, 30))
+        @test_throws ArgumentError get_spot(ds, DateTime(2024, 1, 15, 15, 30))
+        close(ds); GC.gc()
     end
 end
 
