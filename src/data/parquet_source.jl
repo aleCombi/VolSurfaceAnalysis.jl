@@ -9,13 +9,31 @@ struct SpotDay
     prices::Vector{Float64}
 end
 
-mutable struct ParquetDataSource <: DataSource
+# Per-day metadata: the distinct chain timestamps in the day's parquet plus
+# the column-presence flags for the file. Filled lazily: `timestamps` is
+# always populated when a DayMeta lands in the cache, `cols_loaded` /
+# `has_*` are filled the first time a chain at any timestamp in this day is
+# actually requested (`_load_chain_at` reads them). One DuckDB
+# `parquet_schema` query per day instead of per-timestamp.
+mutable struct DayMeta
+    timestamps::Vector{DateTime}
+    cols_loaded::Bool
+    has_volume::Bool
+    has_open::Bool
+    has_high::Bool
+    has_low::Bool
+    has_parsed::Bool
+end
+
+mutable struct ParquetDataSource{S<:QuoteSynthesizer} <: DataSource
     underlying::Underlying
-    synthesizer::QuoteSynthesizer
+    synthesizer::S
     options_root::String
     spot_root::String
+    max_chains_cached::Int
     max_days_cached::Int
-    chain_cache::OrderedDict{Date,Dict{DateTime,Vector{OptionQuote}}}
+    chain_cache::OrderedDict{DateTime,Vector{OptionQuote}}
+    day_meta_cache::OrderedDict{Date,DayMeta}
     spot_cache::OrderedDict{Date,SpotDay}
     contract_cache::Dict{String,ContractMeta}
     con::DuckDB.DB
@@ -30,9 +48,11 @@ function ParquetDataSource(
     options_root::AbstractString,
     spot_root::AbstractString,
     synthesizer::QuoteSynthesizer,
-    max_days_cached::Int=3,
+    max_chains_cached::Int=10,
+    max_days_cached::Int=200,
 )
-    max_days_cached >= 1 || throw(ArgumentError("max_days_cached must be >= 1"))
+    max_chains_cached >= 1 || throw(ArgumentError("max_chains_cached must be >= 1"))
+    max_days_cached   >= 1 || throw(ArgumentError("max_days_cached must be >= 1"))
     # Roots are not hard-validated here -- a source can be constructed
     # against paths that do not yet exist (e.g. when rehydrating an
     # `Experiment` from a saved config in a workspace whose data store
@@ -43,8 +63,10 @@ function ParquetDataSource(
     isdir(spot_root)    || @warn "ParquetDataSource: spot_root does not exist (reads will throw)" spot_root
     u = underlying isa Underlying ? underlying : Underlying(underlying)
     ds = ParquetDataSource(
-        u, synthesizer, String(options_root), String(spot_root), max_days_cached,
-        OrderedDict{Date,Dict{DateTime,Vector{OptionQuote}}}(),
+        u, synthesizer, String(options_root), String(spot_root),
+        max_chains_cached, max_days_cached,
+        OrderedDict{DateTime,Vector{OptionQuote}}(),
+        OrderedDict{Date,DayMeta}(),
         OrderedDict{Date,SpotDay}(),
         Dict{String,ContractMeta}(),
         DuckDB.DB(":memory:"),
@@ -60,7 +82,8 @@ function ParquetDataSource(
     synthesizer::QuoteSynthesizer,
     options_subdir::AbstractString=DEFAULT_OPTIONS_SUBDIR,
     spot_subdir::AbstractString=DEFAULT_SPOTS_SUBDIR,
-    max_days_cached::Int=3,
+    max_chains_cached::Int=10,
+    max_days_cached::Int=200,
 )
     # Lazy validation: see the kwarg constructor's note.
     ParquetDataSource(
@@ -68,6 +91,7 @@ function ParquetDataSource(
         options_root=joinpath(root, options_subdir),
         spot_root=joinpath(root, spot_subdir),
         synthesizer=synthesizer,
+        max_chains_cached=max_chains_cached,
         max_days_cached=max_days_cached,
     )
 end
@@ -85,6 +109,7 @@ end
 function Base.close(ds::ParquetDataSource)
     _close_con(ds)
     empty!(ds.chain_cache)
+    empty!(ds.day_meta_cache)
     empty!(ds.spot_cache)
     return ds
 end
@@ -163,44 +188,89 @@ function _contract_meta_from_parsed(parsed_expiry, parsed_strike::Float64,
     return (expiry=expiry, strike=parsed_strike, option_type=otype)
 end
 
-function _load_chain_day(ds::ParquetDataSource, d::Date)::Dict{DateTime,Vector{OptionQuote}}
+# DISTINCT-timestamps query per day. Column-pruned, no row materialization
+# of the chain itself -- typically <100ms for a SPY 1-min day.
+function _query_distinct_timestamps(ds::ParquetDataSource, path::AbstractString)::Vector{DateTime}
+    sql = "SELECT DISTINCT timestamp FROM '$(_sql_path(path))' ORDER BY timestamp"
+    result = DBInterface.execute(ds.con, sql)
+    out = DateTime[]
+    for row in Tables.rows(result)
+        push!(out, _coerce_dt(row.timestamp))
+    end
+    out
+end
+
+# Populate the column-presence flags on a DayMeta (first chain-load for the
+# day; subsequent loads on the same day reuse these without re-querying
+# parquet_schema). No-op if already loaded.
+function _load_day_cols!(ds::ParquetDataSource, dm::DayMeta, path::AbstractString)
+    dm.cols_loaded && return dm
+    cols = _parquet_columns(ds, path)
+    dm.has_volume = :volume in cols
+    dm.has_open   = :open in cols
+    dm.has_high   = :high in cols
+    dm.has_low    = :low in cols
+    dm.has_parsed = :parsed_expiry in cols && :parsed_strike in cols &&
+                    :parsed_option_type in cols && :parsed_underlying in cols
+    dm.cols_loaded = true
+    dm
+end
+
+# Load the chain at a single timestamp. WHERE-filtered DuckDB query (parquet
+# row-group pruning kicks in if statistics are present), then columnar
+# materialization via `Tables.columntable` so the per-row work is type-stable
+# index access rather than `getproperty` dispatch.
+function _load_chain_at(ds::ParquetDataSource, ts::DateTime)::Vector{OptionQuote}
     isdir(ds.options_root) ||
         throw(ArgumentError("options_root not a directory: $(ds.options_root)"))
-    path = option_path(ds, d)
-    isfile(path) || return Dict{DateTime,Vector{OptionQuote}}()
+    path = option_path(ds, Date(ts))
+    isfile(path) || return OptionQuote[]
 
-    cols = _parquet_columns(ds, path)
-    has_volume = :volume in cols
-    has_open   = :open in cols
-    has_high   = :high in cols
-    has_low    = :low in cols
-    has_parsed = :parsed_expiry in cols && :parsed_strike in cols &&
-                 :parsed_option_type in cols && :parsed_underlying in cols
+    dm = _ensure_day_meta!(ds, Date(ts))
+    _load_day_cols!(ds, dm, path)
 
     base = "ticker, close, timestamp"
-    base = has_volume ? base * ", volume" : base
-    base = has_open   ? base * ", open"   : base
-    base = has_high   ? base * ", high"   : base
-    base = has_low    ? base * ", low"    : base
-    select_list = has_parsed ?
+    base = dm.has_volume ? base * ", volume" : base
+    base = dm.has_open   ? base * ", open"   : base
+    base = dm.has_high   ? base * ", high"   : base
+    base = dm.has_low    ? base * ", low"    : base
+    select_list = dm.has_parsed ?
         base * ", parsed_underlying, parsed_expiry, parsed_strike, parsed_option_type" :
         base
 
-    sql = "SELECT $select_list FROM '$(_sql_path(path))'"
-    result = DBInterface.execute(ds.con, sql)
+    ts_str = Dates.format(ts, "yyyy-mm-dd HH:MM:SS")
+    sql = "SELECT $select_list FROM '$(_sql_path(path))' WHERE timestamp = TIMESTAMP '$ts_str'"
+    ct = Tables.columntable(DBInterface.execute(ds.con, sql))
 
-    by_ts = Dict{DateTime,Vector{OptionQuote}}()
+    tickers = ct.ticker
+    closes  = ct.close
+    tstamps = ct.timestamp
+    volumes = dm.has_volume ? ct.volume : nothing
+    opens   = dm.has_open   ? ct.open   : nothing
+    highs   = dm.has_high   ? ct.high   : nothing
+    lows    = dm.has_low    ? ct.low    : nothing
+    p_und   = dm.has_parsed ? ct.parsed_underlying : nothing
+    p_exp   = dm.has_parsed ? ct.parsed_expiry     : nothing
+    p_strk  = dm.has_parsed ? ct.parsed_strike     : nothing
+    p_otype = dm.has_parsed ? ct.parsed_option_type : nothing
+
+    n = length(tickers)
+    # Vector{OptionQuote}(undef, n) + index assignment avoids the per-element
+    # `push!` resize check and one bounds check per row. With ds.synthesizer
+    # concretely typed (`ParquetDataSource{S}`), the `synthesize` call below
+    # is statically dispatched and Julia can inline it into this loop.
+    out = Vector{OptionQuote}(undef, n)
     expected = ticker(ds.underlying)
 
-    for row in Tables.rows(result)
-        tk = String(row.ticker)
+    @inbounds for i in 1:n
+        tk = String(tickers[i])
         meta = get(ds.contract_cache, tk, nothing)
         if meta === nothing
-            u_str, m = if has_parsed
-                String(row.parsed_underlying),
-                _contract_meta_from_parsed(row.parsed_expiry,
-                                           Float64(row.parsed_strike),
-                                           String(row.parsed_option_type))
+            u_str, m = if dm.has_parsed
+                String(p_und[i]),
+                _contract_meta_from_parsed(p_exp[i],
+                                           Float64(p_strk[i]),
+                                           String(p_otype[i]))
             else
                 u, expiry, otype, strike = parse_polygon_ticker(tk)
                 u, (expiry=expiry, strike=strike, option_type=otype)
@@ -210,25 +280,20 @@ function _load_chain_day(ds::ParquetDataSource, d::Date)::Dict{DateTime,Vector{O
             meta = m
             ds.contract_cache[tk] = meta
         end
-        close_val = row.close === missing ? missing : Float64(row.close)
-        open_val  = has_open ? (row.open === missing ? missing : Float64(row.open)) : missing
-        high_val  = has_high ? (row.high === missing ? missing : Float64(row.high)) : missing
-        low_val   = has_low  ? (row.low  === missing ? missing : Float64(row.low))  : missing
-        vol = if has_volume
-            v = row.volume
-            v === missing ? missing : Float64(v)
-        else
-            missing
-        end
-        ts = _coerce_dt(row.timestamp)
+        cv = closes[i]
+        close_val = cv === missing ? missing : Float64(cv)
+        open_val  = opens   === nothing ? missing : (opens[i]   === missing ? missing : Float64(opens[i]))
+        high_val  = highs   === nothing ? missing : (highs[i]   === missing ? missing : Float64(highs[i]))
+        low_val   = lows    === nothing ? missing : (lows[i]    === missing ? missing : Float64(lows[i]))
+        vol       = volumes === nothing ? missing : (volumes[i] === missing ? missing : Float64(volumes[i]))
+        row_ts = _coerce_dt(tstamps[i])
         bar = OptionBar(
             tk, ds.underlying, meta.expiry, meta.strike, meta.option_type,
-            open_val, high_val, low_val, close_val, vol, ts,
+            open_val, high_val, low_val, close_val, vol, row_ts,
         )
-        q = synthesize(ds.synthesizer, bar)
-        push!(get!(() -> OptionQuote[], by_ts, ts), q)
+        out[i] = synthesize(ds.synthesizer, bar)
     end
-    by_ts
+    out
 end
 
 function _load_spot_day(ds::ParquetDataSource, d::Date)::SpotDay
@@ -250,15 +315,31 @@ function _load_spot_day(ds::ParquetDataSource, d::Date)::SpotDay
     SpotDay(ts_buf, px_buf)
 end
 
-function _ensure_chain_day!(ds::ParquetDataSource, d::Date)
+function _ensure_day_meta!(ds::ParquetDataSource, d::Date)::DayMeta
     _assert_open(ds)
-    if haskey(ds.chain_cache, d)
-        _lru_touch!(ds.chain_cache, d)
-    else
-        ds.chain_cache[d] = _load_chain_day(ds, d)
-        _lru_evict!(ds.chain_cache, ds.max_days_cached)
+    if haskey(ds.day_meta_cache, d)
+        _lru_touch!(ds.day_meta_cache, d)
+        return ds.day_meta_cache[d]
     end
-    ds.chain_cache[d]
+    isdir(ds.options_root) ||
+        throw(ArgumentError("options_root not a directory: $(ds.options_root)"))
+    path = option_path(ds, d)
+    tstamps = isfile(path) ? _query_distinct_timestamps(ds, path) : DateTime[]
+    dm = DayMeta(tstamps, false, false, false, false, false, false)
+    ds.day_meta_cache[d] = dm
+    _lru_evict!(ds.day_meta_cache, ds.max_days_cached)
+    dm
+end
+
+function _ensure_chain!(ds::ParquetDataSource, ts::DateTime)::Vector{OptionQuote}
+    _assert_open(ds)
+    if haskey(ds.chain_cache, ts)
+        _lru_touch!(ds.chain_cache, ts)
+    else
+        ds.chain_cache[ts] = _load_chain_at(ds, ts)
+        _lru_evict!(ds.chain_cache, ds.max_chains_cached)
+    end
+    ds.chain_cache[ts]
 end
 
 function _ensure_spot_day!(ds::ParquetDataSource, d::Date)
@@ -273,9 +354,8 @@ function _ensure_spot_day!(ds::ParquetDataSource, d::Date)
 end
 
 function get_chain(ds::ParquetDataSource, ts::DateTime)::Union{Vector{OptionQuote},Nothing}
-    day = _ensure_chain_day!(ds, Date(ts))
-    isempty(day) && return nothing
-    return get(day, ts, nothing)
+    chain = _ensure_chain!(ds, ts)
+    isempty(chain) ? nothing : chain
 end
 
 function get_spot(ds::ParquetDataSource, ts::DateTime)::Union{Float64,Missing}
@@ -311,14 +391,13 @@ function available_timestamps(ds::ParquetDataSource, from::DateTime, to::DateTim
     d = Date(from)
     d_end = Date(to)
     while d <= d_end
-        day = _ensure_chain_day!(ds, d)
-        for ts in keys(day)
+        dm = _ensure_day_meta!(ds, d)
+        for ts in dm.timestamps          # per-day vector is already sorted
             from <= ts <= to && push!(out, ts)
         end
         d += Day(1)
     end
-    sort!(out)
-    out
+    out                                   # concatenation of sorted-per-day blocks in date order is sorted
 end
 
 available_timestamps(::ParquetDataSource) = throw(ArgumentError(
@@ -327,6 +406,7 @@ available_timestamps(::ParquetDataSource) = throw(ArgumentError(
 
 function clear_cache!(ds::ParquetDataSource)
     empty!(ds.chain_cache)
+    empty!(ds.day_meta_cache)
     empty!(ds.spot_cache)
     return ds
 end

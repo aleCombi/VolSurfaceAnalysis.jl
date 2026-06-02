@@ -51,3 +51,18 @@ struct StaticAgent{P<:Policy} <: Agent
 end
 
 current_policy(a::StaticAgent, ::DateTime, ::TimeCutModelDataSource, ::AbstractVector{Position}) = a.policy
+
+"""
+    tick_times(agent::Agent, source::ModelDataSource,
+               from::DateTime, to::DateTime) -> Union{Nothing, Vector{DateTime}}
+
+Optional agent-level override of the engine's tick cadence. Mirrors
+[`tick_times(::Policy, ...)`](@ref) but at the Agent layer, where
+multi-policy / learning agents that swap policies over time can compute
+the union of their underlying policies' tick times. Default returns
+`nothing`. `StaticAgent` delegates to its single inner policy.
+"""
+tick_times(::Agent, ::ModelDataSource, ::DateTime, ::DateTime) = nothing
+
+tick_times(a::StaticAgent, source::ModelDataSource, from::DateTime, to::DateTime) =
+    tick_times(a.policy, source, from, to)

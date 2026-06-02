@@ -57,7 +57,16 @@ function run_backtest(
     to::DateTime,
 )::Vector{Position}
     positions = Position[]
-    for t in available_timestamps(source, from, to)
+    # Sparse policies (e.g. once-a-day strangle entry on minute data) can
+    # override `tick_times` to tell the engine the only timestamps that
+    # matter, avoiding the cost of walking every available minute and
+    # gating it inside `decide`. Default falls back to enumerating
+    # available timestamps from the source.
+    ticks = tick_times(agent, source, from, to)
+    if ticks === nothing
+        ticks = available_timestamps(source, from, to)
+    end
+    for t in ticks
         cut    = TimeCutModelDataSource(source, t)
         policy = current_policy(agent, t, cut, positions)
         orders = decide(policy, t, cut, positions)

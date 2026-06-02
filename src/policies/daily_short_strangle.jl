@@ -111,6 +111,28 @@ function _snap_to_sorted(sorted_strikes::Vector{Float64},
            sorted_strikes[i] : sorted_strikes[i+1]
 end
 
+"""
+    tick_times(p::DailyShortStrangle, source, from, to) -> Vector{DateTime}
+
+Emit one candidate timestamp per calendar day in `[from, to]`, at the
+policy's `entry_time`. Candidates that fall outside the data's chain
+coverage produce `Trade[]` inside `decide` (`get_surface` returns
+`nothing`), so non-trading days (weekends / holidays) are tolerated
+without consulting `available_timestamps` first.
+"""
+function tick_times(p::DailyShortStrangle, ::ModelDataSource,
+                    from::DateTime, to::DateTime)::Vector{DateTime}
+    out = DateTime[]
+    d = Date(from)
+    d_end = Date(to)
+    while d <= d_end
+        ts = DateTime(d, p.entry_time)
+        from <= ts <= to && push!(out, ts)
+        d += Day(1)
+    end
+    out
+end
+
 function decide(p::DailyShortStrangle, t::DateTime,
                 data::TimeCutModelDataSource,
                 ::AbstractVector{Position})::Vector{Trade}

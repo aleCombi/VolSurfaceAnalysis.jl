@@ -166,6 +166,41 @@ end
     @test decide(p, f.ts, cut, Position[]) == Trade[]
 end
 
+@testset "DailyShortStrangle: tick_times emits one entry per calendar day" begin
+    f = _strangle_fixture()
+    p = DailyShortStrangle(; underlying=_PL_UND,
+                           entry_time=Time(15, 45),
+                           expiry_interval=Day(1),
+                           put_delta=0.20, call_delta=0.20)
+    from = DateTime(2024, 6, 3, 0, 0)
+    to   = DateTime(2024, 6, 5, 23, 59)
+    ts = tick_times(p, f.mds, from, to)
+    @test ts == [DateTime(2024, 6, 3, 15, 45),
+                 DateTime(2024, 6, 4, 15, 45),
+                 DateTime(2024, 6, 5, 15, 45)]
+end
+
+@testset "tick_times: default Policy returns nothing; engine falls back" begin
+    # NoOpPolicy doesn't override tick_times -> engine should iterate
+    # available_timestamps. Smoke test via run_backtest.
+    f = _strangle_fixture()
+    @test tick_times(NoOpPolicy(), f.mds, f.ts, f.ts) === nothing
+    @test tick_times(StaticAgent(NoOpPolicy()), f.mds, f.ts, f.ts) === nothing
+end
+
+@testset "tick_times: StaticAgent delegates to inner policy" begin
+    f = _strangle_fixture()
+    p = DailyShortStrangle(; underlying=_PL_UND,
+                           entry_time=Time(15, 45),
+                           expiry_interval=Day(1),
+                           put_delta=0.20, call_delta=0.20)
+    ag = StaticAgent(p)
+    from = DateTime(2024, 6, 3, 0, 0)
+    to   = DateTime(2024, 6, 4, 23, 59)
+    @test tick_times(ag, f.mds, from, to) ==
+          tick_times(p,  f.mds, from, to)
+end
+
 @testset "DailyShortStrangle: no surface available -> Trade[]" begin
     f = _strangle_fixture()
     later_ts = DateTime(2024, 6, 4, 15, 45)   # no chain at this ts in fixture

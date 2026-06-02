@@ -1,6 +1,6 @@
 using VolSurfaceAnalysis
-using VolSurfaceAnalysis: option_path, spot_path, _load_chain_day, _load_spot_day,
-    _ensure_chain_day!, _ensure_spot_day!, ContractMeta, SpotDay
+using VolSurfaceAnalysis: option_path, spot_path, _load_chain_at, _load_spot_day,
+    _ensure_chain!, _ensure_spot_day!, _ensure_day_meta!, ContractMeta, SpotDay, DayMeta
 using DuckDB
 using DuckDB: DBInterface
 
@@ -97,7 +97,8 @@ const _SYNTH = SpreadFromOHLCV(0.7)
 mktempdir() do root
     fx = _build_fixture(root)
     ds = ParquetDataSource("SPY"; options_root=fx.opts_root, spot_root=fx.spot_root,
-                           synthesizer=_SYNTH, max_days_cached=2)
+                           synthesizer=_SYNTH,
+                           max_chains_cached=2, max_days_cached=2)
 
     @testset "Path layout: options_1min and spots_1min, both keyed by symbol=" begin
         op = option_path(ds, fx.d1)
@@ -177,40 +178,62 @@ mktempdir() do root
         @test isempty(get_spots(ds, fx.t1b, fx.t1a))  # from > to
     end
 
-    @testset "available_timestamps(ds, from, to) reuses chain cache" begin
+    @testset "available_timestamps(ds, from, to) uses day_meta_cache (not chain_cache)" begin
         clear_cache!(ds)
         ts = available_timestamps(ds, fx.t1a, fx.t2a)
         @test ts == sort([fx.t1a, fx.t1b, fx.t2a])
-        @test haskey(ds.chain_cache, fx.d1)
-        @test haskey(ds.chain_cache, fx.d2)
+        # Distinct-timestamp queries land in day_meta_cache; chains are NOT
+        # eagerly loaded here -- the chain_cache must stay empty until a
+        # `get_chain` actually fires.
+        @test haskey(ds.day_meta_cache, fx.d1)
+        @test haskey(ds.day_meta_cache, fx.d2)
+        @test isempty(ds.chain_cache)
     end
 
     @testset "available_timestamps(ds) unbounded throws" begin
         @test_throws ArgumentError available_timestamps(ds)
     end
 
-    @testset "LRU eviction: max_days_cached=2" begin
+    @testset "LRU eviction: max_chains_cached=2 evicts by timestamp" begin
         clear_cache!(ds)
-        # load d1 then d2; both fit
+        # Load chain at three distinct timestamps. max_chains_cached=2 so the
+        # oldest-touched entry should evict on the third load.
+        get_chain(ds, fx.t1a)
+        get_chain(ds, fx.t1b)
+        @test collect(keys(ds.chain_cache)) == [fx.t1a, fx.t1b]
+
+        # touching t1a bumps it to MRU; loading t2a evicts t1b.
         get_chain(ds, fx.t1a)
         get_chain(ds, fx.t2a)
-        @test collect(keys(ds.chain_cache)) == [fx.d1, fx.d2]
-
-        # touching d1 should bump it; loading a third (missing) day evicts d2
-        get_chain(ds, fx.t1a)
-        get_chain(ds, DateTime(2024, 1, 17, 15, 30))  # missing day still gets cached
         ks = collect(keys(ds.chain_cache))
+        @test length(ks) == 2
+        @test fx.t1a in ks
+        @test fx.t2a in ks
+        @test !(fx.t1b in ks)
+    end
+
+    @testset "LRU eviction: max_days_cached=2 evicts day_meta entries" begin
+        clear_cache!(ds)
+        _ensure_day_meta!(ds, fx.d1)
+        _ensure_day_meta!(ds, fx.d2)
+        @test collect(keys(ds.day_meta_cache)) == [fx.d1, fx.d2]
+
+        # Touch d1, then fault in a third (missing) day -- d2 should evict.
+        _ensure_day_meta!(ds, fx.d1)
+        _ensure_day_meta!(ds, Date(2024, 1, 17))
+        ks = collect(keys(ds.day_meta_cache))
         @test length(ks) == 2
         @test fx.d1 in ks
         @test !(fx.d2 in ks)
     end
 
-    @testset "clear_cache! empties chain+spot, keeps contract_cache" begin
+    @testset "clear_cache! empties chain+day_meta+spot, keeps contract_cache" begin
         get_chain(ds, fx.t1a)
         get_spot(ds, fx.t1a)
         n_contracts = length(ds.contract_cache)
         clear_cache!(ds)
         @test isempty(ds.chain_cache)
+        @test isempty(ds.day_meta_cache)
         @test isempty(ds.spot_cache)
         @test length(ds.contract_cache) == n_contracts
     end

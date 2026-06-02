@@ -49,3 +49,34 @@ and as a base case in tests.
 struct NoOpPolicy <: Policy end
 
 decide(::NoOpPolicy, ::DateTime, ::TimeCutModelDataSource, ::AbstractVector{Position}) = Trade[]
+
+"""
+    tick_times(policy::Policy, source::ModelDataSource,
+               from::DateTime, to::DateTime) -> Union{Nothing, Vector{DateTime}}
+
+Optional override letting a sparse policy tell the engine "I only need to
+be called at these specific timestamps in `[from, to]`." Default returns
+`nothing`, in which case the engine falls back to walking every
+`available_timestamps(source, from, to)` and the policy gates inside
+`decide`. Concrete policies whose `decide` is a hard no-op on most ticks
+(e.g. once-a-day-at-19:30 strategies on minute data) can implement this
+to skip the engine churn entirely.
+
+Implementations are not required to filter against `available_timestamps`
+themselves -- the engine treats the returned vector as candidates and
+tolerates timestamps where no chain exists (`decide` will see
+`get_surface(...) === nothing` and return `Trade[]`).
+
+**Contract** (the engine trusts the return verbatim -- no sort, dedupe, or
+range filter is applied at `run_backtest`):
+
+- All returned timestamps must lie within `[from, to]`.
+- Sorted ascending.
+- Unique. Duplicates would cause double-firing on that tick, which the
+  ledger does not deduplicate.
+
+For agent-level overrides that union per-policy schedules, normalize
+(sort + unique) inside the agent's `tick_times` implementation rather
+than relying on the engine.
+"""
+tick_times(::Policy, ::ModelDataSource, ::DateTime, ::DateTime) = nothing
