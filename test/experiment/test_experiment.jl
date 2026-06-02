@@ -68,21 +68,54 @@ end
     @test isnan(res.metrics.hit_rate)
 end
 
-@testset "run_experiment: single-fill policy produces residual PnL at settlement" begin
+@testset "run_experiment: single-fill leg past window-end -> case 1 mark at window-end spot" begin
+    # The leg's expiry (Feb 16) is past the window end (ts3 = Jan 15).
+    # _build_settle case 1 returns window_end_spot = f.spot. Timestamp is
+    # stamped at the leg's expiry, not at the window end (the new contract:
+    # residual entries are honestly stamped at the leg's own expiry).
     f = _ex_fixture()
-    trd = Trade(_EX_UND, 480.0, f.expiry, Call)   # long call @ 5.10 ask
-    exp = Experiment(name="single",
+    trd = Trade(_EX_UND, 480.0, f.expiry, Call)
+    exp = Experiment(name="case1-mark",
                      agent=StaticAgent(_ExOpenOnceAt(f.ts2, trd)),
                      source=f.mds, from=f.ts1, to=f.ts3)
     res = run_experiment(exp)
     @test length(res.positions) == 1
     @test length(res.pnl_series.pnl) == 1
-    # spot at ts3 = 480 (ATM) -> payoff_unit = 0; cost_unit = 5.10 * +1 = 5.10
-    # pnl = (0 - 5.10) * 1 = -5.10
+    # ATM payoff at window-end spot 480 = 0; cost = ask 5.10. PnL = -5.10.
     @test res.pnl_series.pnl[1] ≈ -5.10
     @test res.metrics.total_pnl ≈ -5.10
-    @test res.pnl_series.timestamps[1] == f.ts3    # marked at window end
-    @test res.pnl_series.settlement_spot == f.spot
+    @test res.pnl_series.timestamps[1] == f.expiry   # stamped at leg's own expiry
+    @test res.pnl_series.window_end_spot == f.spot
+    @test res.pnl_series.n_unmarked == 0
+end
+
+@testset "run_experiment: held-to-expiry leg inside window settles at expiry spot (case 2)" begin
+    # Build a tiny fixture whose source has a real bar at the leg's expiry,
+    # so `get_spot(source, expiry)` returns a number and case 2 succeeds.
+    ts1 = DateTime(2024, 1, 15, 15, 30)
+    ts2 = DateTime(2024, 1, 15, 15, 31)
+    ts3 = DateTime(2024, 1, 15, 15, 32)
+    expiry = ts3                                       # leg expires at window end
+    spot   = 480.0
+    mk_q(ts, K) = OptionQuote("X", _EX_UND, expiry, K, Call,
+                              5.00, 5.10, 5.05, missing, missing, missing, ts)
+    chains = Dict(ts1 => [mk_q(ts1, 480.0)],
+                  ts2 => [mk_q(ts2, 480.0)],
+                  ts3 => [mk_q(ts3, 480.0)])
+    spots  = Dict(ts1 => spot, ts2 => spot, ts3 => spot)
+    inner  = InMemoryDataSource(_EX_UND; chains=chains, spots=spots)
+    mds    = ModelDataSource(inner; rate=FlatCurve(0.04), div=FlatCurve(0.015))
+
+    trd = Trade(_EX_UND, 480.0, expiry, Call)
+    exp = Experiment(name="case2-held",
+                     agent=StaticAgent(_ExOpenOnceAt(ts2, trd)),
+                     source=mds, from=ts1, to=ts3)
+    res = run_experiment(exp)
+    @test length(res.positions) == 1
+    @test length(res.pnl_series.pnl) == 1
+    @test res.pnl_series.timestamps[1] == expiry
+    @test res.pnl_series.pnl[1] ≈ -5.10                # ATM 480 payoff = 0; cost = 5.10
+    @test res.pnl_series.n_unmarked == 0
 end
 
 @testset "run_experiment: requested optional metric appears in result" begin
@@ -177,11 +210,16 @@ end
                      source=f.mds, from=f.pre_ts, to=f.end_ts)
     res = run_experiment(exp)
 
-    # The gate fires exactly once over [pre_ts, end_ts] -> 2 short legs.
+    # The gate fires exactly once over [pre_ts, end_ts] -> 2 short legs opened.
     @test length(res.positions) == 2
     @test all(p.trade.direction == -1 for p in res.positions)
     @test all(p.trade.expiry == f.e_target for p in res.positions)
 
-    # PnL at the window-end mark-to-spot is finite.
+    # e_target = 2024-06-04 is past end_ts = 2024-06-03 -> case 1 (mark at
+    # window-end spot). Both legs settle to a finite PnL, stamped at their
+    # own expiry, and n_unmarked stays 0.
+    @test res.pnl_series.n_unmarked == 0
+    @test length(res.pnl_series.pnl) == 2
+    @test all(ts == f.e_target for ts in res.pnl_series.timestamps)
     @test isfinite(res.metrics.total_pnl)
 end

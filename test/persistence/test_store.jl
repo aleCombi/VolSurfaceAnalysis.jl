@@ -87,7 +87,8 @@ end
             @test r.n_positions == length(res.positions)
             @test r.n_opens == res.pnl_series.n_opens
             @test r.n_closes == res.pnl_series.n_closes
-            @test r.settlement_spot == res.pnl_series.settlement_spot
+            @test r.window_end_spot == res.pnl_series.window_end_spot
+            @test r.n_unmarked == res.pnl_series.n_unmarked
         end
         GC.gc()
     end
@@ -300,9 +301,10 @@ end
 
             @test loaded.pnl_series.timestamps == res.pnl_series.timestamps
             @test loaded.pnl_series.pnl ≈ res.pnl_series.pnl
-            @test loaded.pnl_series.settlement_spot == res.pnl_series.settlement_spot
+            @test loaded.pnl_series.window_end_spot == res.pnl_series.window_end_spot
             @test loaded.pnl_series.n_opens == res.pnl_series.n_opens
             @test loaded.pnl_series.n_closes == res.pnl_series.n_closes
+            @test loaded.pnl_series.n_unmarked == res.pnl_series.n_unmarked
 
             # Metrics: keys match, types preserved (Int stays Int), NaN preserved
             @test keys(loaded.metrics) == keys(res.metrics)

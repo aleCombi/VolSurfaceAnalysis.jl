@@ -26,4 +26,5 @@ using Dates
     include("experiment/test_config.jl")
     include("persistence/test_store.jl")
     include("viz/test_spot.jl")
+    include("viz/test_pnl.jl")
 end

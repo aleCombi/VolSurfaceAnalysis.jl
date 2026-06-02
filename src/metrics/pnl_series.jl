@@ -25,24 +25,33 @@ A "round trip" is either:
   on the same contract -- one entry per matched chunk, timestamped at
   the close fill, PnL `= (-_unit_cost(open) - _unit_cost(close)) * qty`; or
 - an open lot still outstanding at the end of the ledger -- one entry
-  per residual chunk, PnL `= (_unit_payoff(open, settlement_spot) -
-  _unit_cost(open)) * qty`, timestamped at `settlement_timestamp` (or
-  the leg's expiry if no timestamp was supplied).
+  per residual chunk, settled by the caller-supplied `settle(expiry)`
+  closure (`DateTime -> Union{Float64, Missing}`). When `settle` returns
+  a `Float64`, the entry is stamped at the leg's `expiry` with PnL
+  `= (_unit_payoff(open, settle_spot) - _unit_cost(open)) * qty`. When
+  `settle` returns `missing` the residual is skipped and counted in
+  `n_unmarked` -- this signals the spot at that expiry cannot be honestly
+  retrieved with the current data + settlement policy.
 
 # Fields
 - `timestamps::Vector{DateTime}` -- one entry per round trip (close
-  timestamp, or settlement timestamp for still-open residuals).
+  timestamp, or the leg's `expiry` for held-to-expiry / open-residual entries).
 - `pnl::Vector{Float64}` -- realized PnL of that round trip, in USD.
-- `settlement_spot::Float64` -- spot used to mark any still-open residual.
+- `window_end_spot::Float64` -- spot at the experiment's window end;
+  recorded for downstream provenance (the case-1 mark passed into the
+  `settle` closure by the experiment orchestrator).
 - `n_opens::Int` -- raw count of opening fills in the ledger.
 - `n_closes::Int` -- raw count of closing fills in the ledger.
+- `n_unmarked::Int` -- count of residual lots whose `settle(expiry)` returned
+  `missing` and were therefore skipped from `pnl` / `timestamps`.
 """
 struct PnLSeries
     timestamps::Vector{DateTime}
     pnl::Vector{Float64}
-    settlement_spot::Float64
+    window_end_spot::Float64
     n_opens::Int
     n_closes::Int
+    n_unmarked::Int
 end
 
 _contract_key(p::Position) =
@@ -65,8 +74,8 @@ mutable struct _OpenLot
 end
 
 """
-    pnl_series(positions::AbstractVector{Position}, settlement_spot::Real;
-               settlement_timestamp::Union{DateTime,Nothing}=nothing) -> PnLSeries
+    pnl_series(positions::AbstractVector{Position};
+               settle::Function, window_end_spot::Real) -> PnLSeries
 
 Aggregate `positions` into a per-round-trip PnL series.
 
@@ -74,26 +83,31 @@ Fills are grouped by contract `(underlying, strike, expiry, option_type)`
 and walked in `entry_timestamp` order. Each fill either extends the
 open same-side lots on that contract or closes (FIFO) against the
 oldest opposite-side lots. Each match emits one entry. Any lot still
-outstanding at the end is marked to `settlement_spot` and emitted as
-a residual entry.
+outstanding at the end is marked per-leg via
+`settle(lot.pos.trade.expiry) -> Union{Float64, Missing}` and emitted
+at that leg's `expiry`. When `settle` returns `missing` the lot is
+skipped and counted in `n_unmarked` -- the closure owns the policy for
+"can this leg honestly be priced?" and the metrics layer never falls
+back to a wrong number.
 
-`settlement_timestamp` is the timestamp recorded on residual entries;
-defaults to the leg's `trade.expiry`. The experiment orchestrator
-passes its window end so residual marks are honestly stamped at
-"mark-to-spot at `exp.to`" rather than at the contract expiry.
+`window_end_spot` is recorded on the returned series for provenance;
+it is the case-1 mark the orchestrator chose to use when `settle`
+encountered a leg whose expiry is past the experiment's window. The
+metrics layer itself does not use it for any computation -- all
+payoff math goes through `settle`.
 
 Permissive on direction sequence: any fill that doesn't match
 opposing lots simply becomes a new lot on its own side. The metrics
 layer cannot tell a "first short open" from an "orphan close" -- the
 ledger has no such marking -- so neither is special-cased.
 """
-function pnl_series(positions::AbstractVector{Position}, settlement_spot::Real;
-                    settlement_timestamp::Union{DateTime,Nothing}=nothing)::PnLSeries
-    settle = Float64(settlement_spot)
-
+function pnl_series(positions::AbstractVector{Position};
+                    settle::Function,
+                    window_end_spot::Real)::PnLSeries
     by_contract = Dict{Tuple{Underlying,Float64,DateTime,OptionType},Vector{Position}}()
     n_opens = 0
     n_closes = 0
+    n_unmarked = 0
     for p in positions
         push!(get!(() -> Position[], by_contract, _contract_key(p)), p)
     end
@@ -137,20 +151,26 @@ function pnl_series(positions::AbstractVector{Position}, settlement_spot::Real;
                 end
             end
         end
-        # residual still-open lots: mark to settlement_spot
+        # residual still-open lots: ask the settle closure for a per-leg spot
         for lot in lots
-            ts = settlement_timestamp === nothing ? lot.pos.trade.expiry :
-                                                    settlement_timestamp
-            push!(timestamps, ts)
+            expiry = lot.pos.trade.expiry
+            spot   = settle(expiry)
+            if ismissing(spot)
+                n_unmarked += 1
+                continue
+            end
+            push!(timestamps, expiry)
             push!(pnl,
-                  (_unit_payoff(lot.pos, settle) - _unit_cost(lot.pos)) * lot.remaining)
+                  (_unit_payoff(lot.pos, spot) - _unit_cost(lot.pos)) * lot.remaining)
         end
     end
 
     # Sort the combined series by timestamp so equity_curve is monotonic
     # in time across contracts.
     order = sortperm(timestamps)
-    return PnLSeries(timestamps[order], pnl[order], settle, n_opens, n_closes)
+    return PnLSeries(timestamps[order], pnl[order],
+                     Float64(window_end_spot),
+                     n_opens, n_closes, n_unmarked)
 end
 
 """

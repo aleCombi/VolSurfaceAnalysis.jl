@@ -9,6 +9,7 @@ _op_series(pnl::Vector{Float64}) = PnLSeries(
     100.0,
     length(pnl),
     length(pnl),
+    0,
 )
 
 @testset "sharpe: <2 trades or zero variance -> NaN" begin

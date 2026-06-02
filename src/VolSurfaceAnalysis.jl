@@ -28,6 +28,7 @@ include("experiment/show.jl")
 include("experiment/config.jl")
 include("persistence/store.jl")
 include("viz/spot.jl")
+include("viz/pnl.jl")
 
 export OptionType, Call, Put,
        Underlying, ticker,

@@ -253,5 +253,5 @@ end
     @test occursin("Metrics:", s)
     @test occursin("total_pnl", s)
     @test occursin("sharpe", s)
-    @test occursin("Settlement spot", s)
+    @test occursin("Window-end spot", s)
 end

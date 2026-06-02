@@ -59,16 +59,43 @@ struct ExperimentResult
     metrics    :: NamedTuple
 end
 
+# Build the per-leg settle closure for `run_experiment`.
+#
+# Policy:
+# - Case 1: `expiry > window_end`. The leg is genuinely still open past
+#   the test window. Conventional open-residual mark using `window_end_spot`.
+# - Case 2: `expiry <= window_end`. Looks up `get_spot(source, expiry)`.
+#   If present, that's the leg's expiration spot -- held-to-expiry settles
+#   honestly. If missing, returns `missing` so `pnl_series` counts the lot
+#   in `n_unmarked` rather than silently substituting the wrong number.
+#
+# TODO: case 2 should fall back to a surface-based theoretical mark
+# (`price(get_surface(source, expiry_proxy_ts), K, otype)`) when the spot
+# at exact expiry is unavailable but a surface near it is. Today's
+# `missing` behaviour exposes the data-gap visibly until that lands.
+function _build_settle(source::ModelDataSource, window_end::DateTime,
+                       window_end_spot::Float64)
+    function settle(expiry::DateTime)::Union{Float64,Missing}
+        expiry > window_end && return window_end_spot
+        s = get_spot(source, expiry)
+        return ismissing(s) ? missing : Float64(s)
+    end
+    return settle
+end
+
 """
     run_experiment(exp::Experiment) -> ExperimentResult
 
 Run the backtest defined by `exp`, build the canonical [`PnLSeries`](@ref)
-marked to spot at the last available timestamp in `[exp.from, exp.to]`,
+with per-leg settlement (each residual lot marked at its own `trade.expiry`
+via `get_spot`; legs whose expiry is past the window are marked at the
+window-end spot; legs whose expiry-time spot is unavailable inside the
+window are counted as `n_unmarked` and skipped from the realized PnL),
 compute always-on metrics plus any metrics requested by symbol, and
 return the result.
 
-Errors loudly if the time window is empty, the settlement spot is
-missing at the window end, or any requested metric symbol is unknown.
+Errors loudly if the time window is empty, the window-end spot is
+missing, or any requested metric symbol is unknown.
 """
 function run_experiment(exp::Experiment)::ExperimentResult
     positions = run_backtest(exp.agent, exp.source, exp.from, exp.to)
@@ -76,11 +103,12 @@ function run_experiment(exp::Experiment)::ExperimentResult
     isempty(ts_list) && error(
         "run_experiment: no available timestamps in [$(exp.from), $(exp.to)] " *
         "for experiment $(exp.name)")
-    settle_ts = last(ts_list)
-    spot = get_spot(exp.source, settle_ts)
-    ismissing(spot) && error(
-        "run_experiment: settlement spot missing at $(settle_ts) for experiment $(exp.name)")
-    series  = pnl_series(positions, Float64(spot); settlement_timestamp=settle_ts)
+    window_end = last(ts_list)
+    window_end_spot = get_spot(exp.source, window_end)
+    ismissing(window_end_spot) && error(
+        "run_experiment: window-end spot missing at $(window_end) for experiment $(exp.name)")
+    settle = _build_settle(exp.source, window_end, Float64(window_end_spot))
+    series = pnl_series(positions; settle=settle, window_end_spot=window_end_spot)
     metrics = compute_metrics(series, exp.metrics)
     return ExperimentResult(exp, positions, series, metrics)
 end

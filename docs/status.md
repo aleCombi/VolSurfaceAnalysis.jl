@@ -64,3 +64,28 @@ chain quotes of the required option type, single entry time per day,
 fixed quantity, expiry by interval). TOML builder + smoke config under
 `configs/`; `scripts/delta_map_demo.jl` visualizes the strike↔|Δ| map
 for sanity checks against real SPY surfaces.
+
+Step 5 / 6 then gained per-leg expiry settlement: `pnl_series` takes a
+caller-supplied `settle(expiry) -> Union{Float64, Missing}` closure
+instead of a single scalar; held-to-expiry legs are stamped at their
+own `trade.expiry` using `get_spot(source, expiry)`; legs whose expiry
+is past the experiment window mark at the window-end spot (case 1);
+legs whose expiry-time spot is unavailable inside the window count in
+`PnLSeries.n_unmarked` and are excluded from realized PnL (case 2 --
+no silent fallback). `scripts/strangle_pnl_demo.jl` + `viz/pnl.jl`
+plot the equity curve from any run.
+
+## In flight
+
+- **Surface-based theoretical settle for case 2.** When `get_spot` at
+  the leg's exact expiry is `missing` (Polygon minute bars are sparse
+  at the 16:00 ET close minute), today's policy returns `missing` and
+  the lot is unmarked. The fix is to compute the leg's theoretical
+  mark from the surface at (or just before) the expiry. Lands in
+  `experiment._build_settle`; transparent to the metrics contract.
+- **Second concrete policy** -- on deck once case-2 settlement is
+  honest. Candidate: a daily iron condor (same scheduled-gate /
+  `invert_delta` shape, four legs instead of two). Once the duplication
+  is visible, decide whether to extract a `Structure` abstraction
+  (`policies.md` Future work) or keep policies as 4-leg inline
+  `decide` bodies.

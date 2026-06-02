@@ -9,7 +9,7 @@ function _cr_pos(strike, otype, direction, qty, entry_price, ts)
 end
 
 @testset "core metrics: empty series" begin
-    s = pnl_series(Position[], 500.0)
+    s = pnl_series(Position[]; settle=_->500.0, window_end_spot=500.0)
     @test total_pnl(s) == 0.0
     @test n_round_trips(s) == 0
     @test isnan(hit_rate(s))
@@ -20,7 +20,7 @@ end
     ts2 = DateTime(2024, 1, 15, 16, 30)
     open  = _cr_pos(480.0, Call, +1, 1.0, 5.0, ts1)
     close = _cr_pos(480.0, Call, -1, 1.0, 6.0, ts2)
-    s = pnl_series([open, close], 500.0)
+    s = pnl_series([open, close]; settle=_->500.0, window_end_spot=500.0)
     @test total_pnl(s) ≈ 1.0
     @test n_round_trips(s) == 1
     @test hit_rate(s) == 1.0
@@ -31,7 +31,7 @@ end
     ts2 = DateTime(2024, 1, 15, 16, 30)
     open  = _cr_pos(480.0, Call, +1, 1.0, 6.0, ts1)
     close = _cr_pos(480.0, Call, -1, 1.0, 5.0, ts2)
-    s = pnl_series([open, close], 500.0)
+    s = pnl_series([open, close]; settle=_->500.0, window_end_spot=500.0)
     @test total_pnl(s) ≈ -1.0
     @test n_round_trips(s) == 1
     @test hit_rate(s) == 0.0
@@ -47,7 +47,7 @@ end
     close1 = _cr_pos(480.0, Call, -1, 1.0, 6.0, ts3)
     open2  = _cr_pos(470.0, Put, +1, 1.0, 4.0, ts2)
     close2 = _cr_pos(470.0, Put, -1, 1.0, 3.5, ts4)
-    s = pnl_series([open1, open2, close1, close2], 500.0)
+    s = pnl_series([open1, open2, close1, close2]; settle=_->500.0, window_end_spot=500.0)
     @test total_pnl(s) ≈ 0.5
     @test n_round_trips(s) == 2
     @test hit_rate(s) == 0.5
@@ -58,7 +58,7 @@ end
     ts2 = DateTime(2024, 1, 15, 16, 30)
     open  = _cr_pos(480.0, Call, +1, 1.0, 5.0, ts1)
     close = _cr_pos(480.0, Call, -1, 1.0, 5.0, ts2)   # exact breakeven
-    s = pnl_series([open, close], 500.0)
+    s = pnl_series([open, close]; settle=_->500.0, window_end_spot=500.0)
     @test total_pnl(s) == 0.0
     @test n_round_trips(s) == 1
     @test hit_rate(s) == 0.0

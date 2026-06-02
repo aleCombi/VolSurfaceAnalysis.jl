@@ -6,6 +6,7 @@ _di_series(pnl::Vector{Float64}) = PnLSeries(
     100.0,
     length(pnl),
     length(pnl),
+    0,
 )
 
 const _ALWAYS_ON_KEYS = (:total_pnl, :n_round_trips, :n_opens, :n_closes, :hit_rate)

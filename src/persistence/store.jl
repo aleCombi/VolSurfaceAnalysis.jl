@@ -200,7 +200,8 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         n_positions BIGINT,
         n_opens BIGINT,
         n_closes BIGINT,
-        settlement_spot DOUBLE,
+        n_unmarked BIGINT,
+        window_end_spot DOUBLE,
         written_at TIMESTAMP
     )"""
     insert = "INSERT INTO _writebuf VALUES (" * join([
@@ -211,7 +212,8 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         string(length(result.positions)),
         string(s.n_opens),
         string(s.n_closes),
-        _f_sql(s.settlement_spot),
+        string(s.n_unmarked),
+        _f_sql(s.window_end_spot),
         _dt_sql(Dates.now(UTC)),
     ], ", ") * ")"
     _write_parquet(store, joinpath(dir, "manifest.parquet"), schema, [insert])
@@ -343,13 +345,14 @@ end
 function _load_manifest(store::RunStore, dir::AbstractString)
     path = joinpath(dir, "manifest.parquet")
     rows = _select_rows(store, path,
-        "SELECT settlement_spot, n_opens, n_closes FROM '$(_sql_pq_path(path))'")
+        "SELECT window_end_spot, n_opens, n_closes, n_unmarked FROM '$(_sql_pq_path(path))'")
     length(rows) == 1 ||
         throw(ArgumentError("load_run: manifest.parquet must have exactly 1 row, got $(length(rows))"))
     r = first(rows)
-    return (settlement_spot=Float64(r.settlement_spot),
+    return (window_end_spot=Float64(r.window_end_spot),
             n_opens=Int(r.n_opens),
-            n_closes=Int(r.n_closes))
+            n_closes=Int(r.n_closes),
+            n_unmarked=Int(r.n_unmarked))
 end
 
 function _load_positions(store::RunStore, dir::AbstractString,
@@ -388,7 +391,8 @@ function _load_pnl_series(store::RunStore, dir::AbstractString,
     timestamps = DateTime[DateTime(r.timestamp) for r in rows]
     pnl        = Float64[Float64(r.pnl)         for r in rows]
     return PnLSeries(timestamps, pnl,
-                     manifest.settlement_spot, manifest.n_opens, manifest.n_closes)
+                     manifest.window_end_spot,
+                     manifest.n_opens, manifest.n_closes, manifest.n_unmarked)
 end
 
 function _load_metrics(store::RunStore, dir::AbstractString,
