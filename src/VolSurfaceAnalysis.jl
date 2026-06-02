@@ -16,6 +16,7 @@ include("positions/trade.jl")
 include("positions/position.jl")
 include("backtest/time_cut.jl")
 include("policies/policy.jl")
+include("policies/daily_short_strangle.jl")
 include("agents/agent.jl")
 include("backtest/engine.jl")
 include("metrics/pnl_series.jl")
@@ -39,12 +40,13 @@ export OptionType, Call, Put,
        Curve, FlatCurve, PCCurve,
        VolatilitySurface, RawSurface, ExpirySlice,
        expiries, get_slice, iv, price, delta, gamma, vega, forward,
+       invert_delta,
        build_surface,
        bs_price, bs_delta, bs_gamma, bs_vega, implied_vol, time_to_expiry,
        ModelDataSource, get_surface, get_rate, get_div,
        Trade, Position, payoff, open_position, entry_cost, realized_pnl,
        TimeCutModelDataSource,
-       Policy, NoOpPolicy, decide,
+       Policy, NoOpPolicy, DailyShortStrangle, decide,
        Agent, StaticAgent, current_policy,
        resolve_quote, run_backtest,
        PnLSeries, pnl_series, equity_curve,

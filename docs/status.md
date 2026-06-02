@@ -57,3 +57,10 @@ Rebuild order:
 
 Visualization is added incrementally alongside each stage, not as a phase
 of its own.
+
+First concrete trading policy landed alongside step 4:
+`DailyShortStrangle` (target |Δ| per leg via `invert_delta`, snap to
+chain quotes of the required option type, single entry time per day,
+fixed quantity, expiry by interval). TOML builder + smoke config under
+`configs/`; `scripts/delta_map_demo.jl` visualizes the strike↔|Δ| map
+for sanity checks against real SPY surfaces.

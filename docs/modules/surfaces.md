@@ -30,6 +30,7 @@ Query API:
 - `gamma(s, expiry, strike) :: Float64`
 - `vega(s, expiry, strike) :: Float64`
 - `forward(s, expiry) :: Float64`
+- `invert_delta(s, expiry, option_type, target_abs_delta) :: Union{Float64, Nothing}`
 
 Concrete subtypes implement `expiries`, `get_slice`, and expose
 `spot`, `rate`, `div` fields. The rest are derived.
@@ -84,10 +85,16 @@ to 1e-4. No SpecialFunctions / Distributions dependency.
   (`log(strike / spot)`) within the matching slice; out-of-range
   strikes flat-extrapolate at the endpoint IV.
 - Cross-expiry interpolation is not supported. `get_slice`,
-  `iv`, `price`, `delta`, `gamma`, `vega`, and `forward` all error
-  loudly when the expiry is not in the surface.
+  `iv`, `price`, `delta`, `gamma`, `vega`, `forward`, and
+  `invert_delta` all error loudly when the expiry is not in the
+  surface.
 - Greeks and prices are computed from BS using the slice's `tau`
   and the surface's `spot`, `rate`, `div`.
+- `invert_delta(s, expiry, type, target_abs_delta)` bisects on
+  strike over the slice's observed strike range
+  `[strikes[1], strikes[end]]`. Returns `nothing` when the target
+  `|Δ|` is not attained at any observed strike. The bracket is
+  deliberately observation-bounded -- see the key decision below.
 
 ## Responsibility boundaries
 
@@ -116,6 +123,7 @@ surface builder.
 | **Strikes/expiries out of range flat-extrapolate / error respectively** | Strike interpolation has well-defined endpoints (IV at the wings); flat-extrap is the sensible default. Expiry queries are not interpolated in v1, so an out-of-range expiry is a bug, not a smoothing question -- throw. |
 | **`time_to_expiry` uses 365.25-day year** | Matches the convention on master; standard in equity-options pricing. |
 | **`build_surface` is a free function, not a `RawSurface` constructor** | Non-trivial work, returns an abstract type, will dispatch on a future `QuoteConvention` trait on the chain source. Concrete surface types still keep plain outer constructors. |
+| **`invert_delta` brackets on observed strikes, not on `spot * [lo, hi]`** | The slice already flat-extrapolates IV outside its observed strike range, so a wider bracket would land delta inversions in the extrapolation regime where the surface stops being informative. Capping the bracket at `[strikes[1], strikes[end]]` makes "no observed strike carries this delta" a `nothing` return rather than a fabricated answer. Future parametric surfaces (SVI/SABR) with explicit extrapolation policies can widen the bracket without changing the contract -- the consumer-visible signature is the same. |
 
 ## Future work
 

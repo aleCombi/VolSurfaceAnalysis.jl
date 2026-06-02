@@ -1,0 +1,46 @@
+# Daily short strangle on SPY: short 20-delta put + short 20-delta call,
+# 1-DTE, one contract per leg, opened once a day at 15:45 UTC.
+#
+# Smoke-config for the first real trading policy on the rebuilt branch:
+# a 3-session window so the policy fires at most three times.
+#
+# Run with:
+#   julia --project=. scripts/run_experiment.jl configs/daily_short_strangle.toml
+#
+# As with noop_smoke.toml, [source.root] points at the local Polygon tree;
+# override with VSA_POLYGON_ROOT if the path differs.
+
+name = "daily_short_strangle_smoke"
+from = 2024-06-03T13:30:00
+to   = 2024-06-05T20:00:00
+metrics = ["sharpe", "max_drawdown"]
+
+[source]
+type            = "parquet"
+underlying      = "SPY"
+root            = "C:/repos/options-collector/data/massive"
+max_days_cached = 3
+
+[source.synthesizer]
+type   = "ohlcv_spread"
+lambda = 0.7
+
+[source.rate]
+type  = "flat"
+value = 0.045
+
+[source.div]
+type  = "flat"
+value = 0.013
+
+[agent]
+type = "static"
+
+[agent.policy]
+type        = "daily_short_strangle"
+underlying  = "SPY"
+entry_time  = 15:45:00
+expiry_days = 1
+put_delta   = 0.20
+call_delta  = 0.20
+quantity    = 1.0

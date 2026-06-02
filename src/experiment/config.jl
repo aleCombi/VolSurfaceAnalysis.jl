@@ -129,8 +129,35 @@ end
 
 _build_noop_policy(::AbstractDict)::Policy = NoOpPolicy()
 
+# Parse `entry_time` from either a TOML local-time literal (stdlib TOML
+# returns it as a `Dates.Time` directly) or an `"HH:MM:SS"` string.
+function _parse_entry_time(v)::Time
+    v isa Time             && return v
+    v isa AbstractString   && return Time(String(v))
+    error("policy(daily_short_strangle): entry_time must be a local-time " *
+          "literal or \"HH:MM:SS\" string, got $(typeof(v))")
+end
+
+function _build_daily_short_strangle(d::AbstractDict)::Policy
+    underlying  = _require(d, "underlying",  "policy(daily_short_strangle)")
+    entry_raw   = _require(d, "entry_time",  "policy(daily_short_strangle)")
+    expiry_days = _require(d, "expiry_days", "policy(daily_short_strangle)")
+    put_delta   = _require(d, "put_delta",   "policy(daily_short_strangle)")
+    call_delta  = _require(d, "call_delta",  "policy(daily_short_strangle)")
+    quantity    = get(d, "quantity", 1.0)
+    return DailyShortStrangle(
+        Underlying(String(underlying)),
+        _parse_entry_time(entry_raw),
+        Day(Int(expiry_days)),
+        Float64(put_delta),
+        Float64(call_delta),
+        Float64(quantity),
+    )
+end
+
 const _POLICY_BUILDERS = Dict{String, Function}(
-    "noop" => _build_noop_policy,
+    "noop"                 => _build_noop_policy,
+    "daily_short_strangle" => _build_daily_short_strangle,
 )
 
 function build_policy(d::AbstractDict)::Policy
@@ -197,6 +224,19 @@ type = "static"
 
 [agent.policy]
 type = "noop"
+```
+
+A real trading policy looks like:
+
+```toml
+[agent.policy]
+type        = "daily_short_strangle"
+underlying  = "SPY"
+entry_time  = 15:45:00
+expiry_days = 1
+put_delta   = 0.20
+call_delta  = 0.20
+quantity    = 1.0    # optional, defaults to 1.0
 ```
 
 Errors loudly on missing required keys or unknown `type` discriminators.

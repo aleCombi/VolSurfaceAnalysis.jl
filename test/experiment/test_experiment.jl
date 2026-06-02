@@ -128,3 +128,60 @@ end
     @test res1.metrics.total_pnl == res2.metrics.total_pnl
     @test length(res1.positions) == length(res2.positions)
 end
+
+# ---- DailyShortStrangle e2e ------------------------------------------------
+
+# Multi-strike, two-expiry fixture priced from flat 20% BS so the surface
+# inverts cleanly and `invert_delta` has a wide observed bracket.
+function _strangle_ex_fixture()
+    entry_ts = DateTime(2024, 6, 3, 15, 45)             # the entry tick
+    pre_ts   = DateTime(2024, 6, 3, 15, 44)             # one minute before
+    end_ts   = DateTime(2024, 6, 3, 15, 46)             # window end
+    spot, r, q, sigma = 480.0, 0.045, 0.013, 0.20
+    e_target = DateTime(2024, 6, 4, 20, 0)              # first expiry on/after entry+1d
+    e_far    = DateTime(2024, 6, 7, 20, 0)
+    strikes = 440.0:5.0:520.0
+
+    function mk_q(ts, K, expiry, otype)
+        T = time_to_expiry(expiry, ts)
+        mark = bs_price(spot, K, T, sigma, otype; r=r, q=q)
+        spread = max(0.02, 0.01 * mark)
+        OptionQuote("X", _EX_UND, expiry, K, otype,
+                    mark - spread / 2, mark + spread / 2, mark,
+                    missing, missing, missing, ts)
+    end
+
+    mk_chain(ts) = OptionQuote[
+        mk_q(ts, K, e, K >= spot ? Call : Put)
+        for K in strikes, e in (e_target, e_far)
+    ] |> vec
+    chains = Dict(pre_ts => mk_chain(pre_ts),
+                  entry_ts => mk_chain(entry_ts),
+                  end_ts  => mk_chain(end_ts))
+    spots  = Dict(pre_ts => spot, entry_ts => spot, end_ts => spot)
+    inner  = InMemoryDataSource(_EX_UND; chains=chains, spots=spots)
+    mds    = ModelDataSource(inner; rate=FlatCurve(r), div=FlatCurve(q))
+    (mds=mds, pre_ts=pre_ts, entry_ts=entry_ts, end_ts=end_ts,
+     spot=spot, e_target=e_target)
+end
+
+@testset "run_experiment: DailyShortStrangle opens two legs at entry tick" begin
+    f = _strangle_ex_fixture()
+    policy = DailyShortStrangle(; underlying=_EX_UND,
+                                entry_time=Time(15, 45),
+                                expiry_interval=Day(1),
+                                put_delta=0.20, call_delta=0.20,
+                                quantity=1.0)
+    exp = Experiment(name="strangle-e2e",
+                     agent=StaticAgent(policy),
+                     source=f.mds, from=f.pre_ts, to=f.end_ts)
+    res = run_experiment(exp)
+
+    # The gate fires exactly once over [pre_ts, end_ts] -> 2 short legs.
+    @test length(res.positions) == 2
+    @test all(p.trade.direction == -1 for p in res.positions)
+    @test all(p.trade.expiry == f.e_target for p in res.positions)
+
+    # PnL at the window-end mark-to-spot is finite.
+    @test isfinite(res.metrics.total_pnl)
+end

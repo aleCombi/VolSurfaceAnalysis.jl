@@ -169,3 +169,57 @@ function vega(s::RawSurface, expiry::DateTime, strike::Float64)::Float64
     sigma = _interp_iv(sl, s.spot, strike)
     return bs_vega(s.spot, strike, sl.tau, sigma; r=s.rate, q=s.div)
 end
+
+"""
+    invert_delta(s::VolatilitySurface, expiry, option_type, target_abs_delta;
+                 tol=1e-6, maxiter=100) -> Union{Float64, Nothing}
+
+Strike `K` such that `abs(delta(s, expiry, K, option_type)) == target_abs_delta`.
+
+Bisects on `K` over the matching slice's observed strike range
+`[slice.strikes[1], slice.strikes[end]]`. Returns `nothing` when the target
+is outside the bracket -- no observed strike in the slice carries that
+delta. Errors if the expiry is not in the surface (matching the rest of
+the query API).
+
+The slice-range bracket means the inversion never lands in the surface's
+flat-extrapolation regime; richer surfaces with explicit extrapolation
+policies can widen the bracket without changing the contract.
+"""
+function invert_delta(s::VolatilitySurface, expiry::DateTime,
+                      option_type::OptionType, target_abs_delta::Float64;
+                      tol::Float64=1e-6, maxiter::Int=100)::Union{Float64,Nothing}
+    target_abs_delta > 0.0 ||
+        throw(ArgumentError("target_abs_delta must be positive, got $target_abs_delta"))
+    sl = get_slice(s, expiry)
+    sl === nothing && throw(ArgumentError("expiry $expiry not in surface"))
+
+    K_lo = sl.strikes[1]
+    K_hi = sl.strikes[end]
+    d_lo = abs(delta(s, expiry, K_lo, option_type))
+    d_hi = abs(delta(s, expiry, K_hi, option_type))
+
+    lo_d, hi_d = minmax(d_lo, d_hi)
+    (target_abs_delta < lo_d || target_abs_delta > hi_d) && return nothing
+
+    # |delta| is monotone in K under BS at a fixed sigma: increasing for puts,
+    # decreasing for calls. Within the slice, IV is piecewise linear in
+    # log-moneyness so |delta(K)| stays monotone in practice for SPY-style
+    # smiles; pathological smiles could break it, in which case bisection
+    # returns the last midpoint after maxiter.
+    increasing_in_K = d_hi > d_lo
+    a, b = K_lo, K_hi
+    for _ in 1:maxiter
+        m = 0.5 * (a + b)
+        d_m = abs(delta(s, expiry, m, option_type))
+        if abs(d_m - target_abs_delta) < tol || (b - a) < tol
+            return m
+        end
+        if increasing_in_K
+            d_m < target_abs_delta ? (a = m) : (b = m)
+        else
+            d_m > target_abs_delta ? (a = m) : (b = m)
+        end
+    end
+    return 0.5 * (a + b)
+end

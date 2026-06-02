@@ -159,3 +159,53 @@ end
     sl = get_slice(s, e1)
     @test forward(s, e1) ≈ spot * exp((r - q) * sl.tau) atol = 1e-12
 end
+
+@testset "invert_delta: round-trip and edge cases" begin
+    ts = DateTime(2024, 1, 15, 15, 30)
+    spot, r, q = 480.0, 0.04, 0.015
+    e1 = DateTime(2024, 2, 16, 21, 0)
+    e2 = DateTime(2024, 3, 15, 21, 0)
+    slices = [
+        (e1, [(440.0, 0.24), (460.0, 0.22), (480.0, 0.20),
+              (500.0, 0.21), (520.0, 0.23)]),
+        (e2, [(440.0, 0.25), (480.0, 0.22), (520.0, 0.24)]),
+    ]
+    s = build_surface(_synth_chain(ts, spot, r, q, slices), spot, r, q)
+
+    # Round-trip: pick an interior strike, get its delta, invert.
+    for (otype, K) in [(Call, 500.0), (Call, 510.0), (Put, 460.0), (Put, 450.0)]
+        d_target = abs(delta(s, e1, K, otype))
+        K_back = invert_delta(s, e1, otype, d_target)
+        @test K_back !== nothing
+        @test K_back ≈ K atol = 1e-3
+    end
+
+    # Standard strangle picks: 0.20-delta call OTM, 0.20-delta put OTM.
+    K_call_20 = invert_delta(s, e1, Call, 0.20)
+    K_put_20  = invert_delta(s, e1, Put,  0.20)
+    @test K_call_20 !== nothing && K_call_20 > spot
+    @test K_put_20  !== nothing && K_put_20  < spot
+    @test abs(delta(s, e1, K_call_20, Call)) ≈ 0.20 atol = 1e-5
+    @test abs(delta(s, e1, K_put_20,  Put))  ≈ 0.20 atol = 1e-5
+
+    # Out-of-bracket targets return nothing. The ATM-ish bound is well below 1.0
+    # for a call and well above 0 for the put at K_lo, so 0.99 / 1e-6 are safely
+    # outside the observed-strike range.
+    @test invert_delta(s, e1, Call, 0.99) === nothing
+    @test invert_delta(s, e1, Call, 1e-6) === nothing
+    @test invert_delta(s, e1, Put,  0.99) === nothing
+    @test invert_delta(s, e1, Put,  1e-6) === nothing
+
+    # Invalid target and missing expiry.
+    @test_throws ArgumentError invert_delta(s, e1, Call, 0.0)
+    @test_throws ArgumentError invert_delta(s, e1, Call, -0.1)
+    bad_expiry = DateTime(2025, 1, 1, 21, 0)
+    @test_throws ArgumentError invert_delta(s, bad_expiry, Call, 0.20)
+
+    # Works across slices independently. e2's wing strike at K=520 carries
+    # delta ~0.23, so 0.20 sits just outside the bracket and is `nothing` --
+    # use 0.30, which is well within [d(K_hi)=0.23, d(K_lo)=0.83].
+    K_call_30_e2 = invert_delta(s, e2, Call, 0.30)
+    @test K_call_30_e2 !== nothing && K_call_30_e2 > spot
+    @test abs(delta(s, e2, K_call_30_e2, Call)) ≈ 0.30 atol = 1e-5
+end

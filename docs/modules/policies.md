@@ -90,41 +90,67 @@ a base case in property tests.
 - Reporting / PnL aggregation. Policies return orders, not P&L.
   Computing performance is downstream.
 
-## Adding a concrete policy
+## Concrete policies
 
-A scheduled iron condor in this design looks like:
+### `DailyShortStrangle`
+
+The first real trading policy: once a day at `entry_time`, open a short
+OTM put + short OTM call. Strikes are picked by target absolute delta
+(via [`invert_delta`](surfaces.md)) and snapped to the slice's observed
+strike grid so the engine's `resolve_quote` exact match succeeds.
 
 ```julia
-struct DailyEntryIronCondor{F} <: Policy
-    entry_time::Time
-    expiry_interval::Period
-    strike_selector::F
-    quantity::Float64
+struct DailyShortStrangle <: Policy
+    underlying      :: Underlying
+    entry_time      :: Time
+    expiry_interval :: Period
+    put_delta       :: Float64       # target |Δ| in (0, 1)
+    call_delta      :: Float64       # target |Δ| in (0, 1)
+    quantity        :: Float64
 end
 
-function decide(p::DailyEntryIronCondor, t::DateTime,
-                data::TimeCutModelDataSource, ::AbstractVector{Position})::Vector{Trade}
-    Time(t) == p.entry_time || return Trade[]   # cheap gate first
-    surface = get_surface(data, t)
-    surface === nothing && return Trade[]
-    expiry = select_expiry(p.expiry_interval, surface)
+function decide(p::DailyShortStrangle, t::DateTime,
+                data::TimeCutModelDataSource, ::AbstractVector{Position})
+    Time(t) == p.entry_time || return Trade[]                  # cheap gate
+    surface = get_surface(data, t); surface === nothing && return Trade[]
+    expiry  = _first_expiry_on_or_after(surface, t + p.expiry_interval)
     expiry === nothing && return Trade[]
-    strikes = p.strike_selector(surface, expiry, data)
-    strikes === nothing && return Trade[]
-    sp_K, sc_K, lp_K, lc_K = strikes
-    und = surface.underlying
-    q   = p.quantity
+    chain   = get_chain(data, t); chain === nothing && return Trade[]
+
+    K_put_raw  = invert_delta(surface, expiry, Put,  p.put_delta)
+    K_call_raw = invert_delta(surface, expiry, Call, p.call_delta)
+    (K_put_raw === nothing || K_call_raw === nothing) && return Trade[]
+
+    put_strikes  = _quoted_strikes(chain, expiry, p.underlying, Put)
+    call_strikes = _quoted_strikes(chain, expiry, p.underlying, Call)
+    K_put  = _snap_to_sorted(put_strikes,  K_put_raw)
+    K_call = _snap_to_sorted(call_strikes, K_call_raw)
+    (K_put === nothing || K_call === nothing) && return Trade[]
     return Trade[
-        Trade(und, sp_K, expiry, Put;  direction=-1, quantity=q),
-        Trade(und, sc_K, expiry, Call; direction=-1, quantity=q),
-        Trade(und, lp_K, expiry, Put;  direction=+1, quantity=q),
-        Trade(und, lc_K, expiry, Call; direction=+1, quantity=q),
+        Trade(p.underlying, K_put,  expiry, Put;  direction=-1, quantity=p.quantity),
+        Trade(p.underlying, K_call, expiry, Call; direction=-1, quantity=p.quantity),
     ]
 end
 ```
 
-Gate on the cheap predicate (`Time(t)`) before any data lookup; the
-fast path on a no-op tick should not touch surfaces or chains.
+Three properties worth noting:
+
+- **Cheap gate first.** `Time(t) == entry_time` runs before any surface
+  lookup; on a per-minute SPY backtest the policy fires `decide` tens of
+  thousands of times and the fast path must not touch chains.
+- **Snap against the chain, not the slice.** `invert_delta` returns a
+  *continuous* target K. The engine's `resolve_quote` requires an exact
+  match on both strike *and* `option_type` against `get_chain(cut, t)`.
+  `slice.strikes` is the union of strikes that survived IV inversion --
+  but per strike, only one side is retained by `build_surface._pick_otm`,
+  so a slice strike near the spot may be Put-quoted only or Call-quoted
+  only. Snapping per-leg to the chain's strikes-of-the-required-type is
+  the authoritative fix.
+- **One-wing failure = skip the entry.** If `invert_delta` returns
+  `nothing` for either leg (target |Δ| outside the slice's observed
+  bracket on that wing), the policy returns `Trade[]` rather than
+  trading the surviving leg alone. A one-legged "strangle" is a
+  different structure and silently degrading would corrupt backtests.
 
 ## Future work
 
@@ -140,10 +166,15 @@ fast path on a no-op tick should not touch surfaces or chains.
   explicit timestamps to call `decide` at. Default is "every
   available timestamp."
 - **Structures (iron condor, strangle, vertical) as first-class.**
-  Today legs are constructed inline. A future `structures` module
-  with `IronCondor{Trade}` -> `IronCondor{Position}` would attach
-  helpers (credit, max-loss, wing-width, breakevens) and let
-  policies return structures whose `legs` decompose into trades.
+  Today legs are constructed inline -- `DailyShortStrangle` builds two
+  `Trade`s directly in `decide`. A scheduled iron condor would follow
+  the same shape, swapping `invert_delta` for a 4-strike selector and
+  returning four `Trade`s. Once two or three such policies exist, a
+  `structures` module with `IronCondor{Trade}` -> `IronCondor{Position}`
+  becomes worth introducing -- it would attach helpers (credit,
+  max-loss, wing-width, breakevens) and let policies return structures
+  whose `legs` decompose into trades. Deferred until the duplication
+  tells us what the helper surface should expose.
 - **Live-trading bridge.** The same `decide` signature can drive a
   live loop: replace the backtest engine with one that resolves
   quotes from a broker feed instead of `get_chain`, with the same
@@ -153,10 +184,11 @@ fast path on a no-op tick should not touch surfaces or chains.
 
 ```
 src/policies/
-    policy.jl     # abstract Policy + decide + NoOpPolicy
+    policy.jl                  # abstract Policy + decide + NoOpPolicy
+    daily_short_strangle.jl    # DailyShortStrangle + helpers
 
 test/policies/
-    test_policy.jl
+    test_policy.jl             # both abstractions + DailyShortStrangle
 ```
 
 All files are `include`d into the top-level `VolSurfaceAnalysis`

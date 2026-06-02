@@ -60,6 +60,64 @@ end
     @test build_policy(Dict{String,Any}("type" => "noop")) isa NoOpPolicy
 end
 
+@testset "build_policy: daily_short_strangle constructs from Dict" begin
+    p = build_policy(Dict{String,Any}(
+        "type"        => "daily_short_strangle",
+        "underlying"  => "SPY",
+        "entry_time"  => Time(15, 45),
+        "expiry_days" => 1,
+        "put_delta"   => 0.20,
+        "call_delta"  => 0.20,
+        "quantity"    => 2.0,
+    ))
+    @test p isa DailyShortStrangle
+    @test p.underlying == Underlying("SPY")
+    @test p.entry_time == Time(15, 45)
+    @test p.expiry_interval == Day(1)
+    @test p.put_delta == 0.20
+    @test p.call_delta == 0.20
+    @test p.quantity == 2.0
+end
+
+@testset "build_policy: daily_short_strangle accepts string entry_time" begin
+    p = build_policy(Dict{String,Any}(
+        "type"        => "daily_short_strangle",
+        "underlying"  => "SPY",
+        "entry_time"  => "15:45:00",
+        "expiry_days" => 1,
+        "put_delta"   => 0.20,
+        "call_delta"  => 0.20,
+    ))
+    @test p.entry_time == Time(15, 45)
+    @test p.quantity == 1.0
+end
+
+@testset "build_policy: daily_short_strangle parses TOML literal" begin
+    cfg = TOML.parse("""
+        type        = "daily_short_strangle"
+        underlying  = "SPY"
+        entry_time  = 15:45:00
+        expiry_days = 1
+        put_delta   = 0.20
+        call_delta  = 0.20
+        """)
+    p = build_policy(cfg)
+    @test p isa DailyShortStrangle
+    @test p.entry_time == Time(15, 45)
+    @test p.expiry_interval == Day(1)
+end
+
+@testset "build_policy: daily_short_strangle missing required field errors" begin
+    @test_throws ErrorException build_policy(Dict{String,Any}(
+        "type"        => "daily_short_strangle",
+        "underlying"  => "SPY",
+        # entry_time missing
+        "expiry_days" => 1,
+        "put_delta"   => 0.20,
+        "call_delta"  => 0.20,
+    ))
+end
+
 @testset "build_agent: static wraps the inner policy" begin
     a = build_agent(Dict{String,Any}(
         "type"   => "static",
