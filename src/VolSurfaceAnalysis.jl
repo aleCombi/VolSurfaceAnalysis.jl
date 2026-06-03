@@ -24,8 +24,10 @@ include("metrics/core.jl")
 include("metrics/optional.jl")
 include("metrics/dispatch.jl")
 include("experiment/experiment.jl")
+include("experiment/identity.jl")
 include("experiment/show.jl")
 include("experiment/config.jl")
+include("persistence/provenance.jl")
 include("persistence/store.jl")
 include("viz/spot.jl")
 include("viz/pnl.jl")
@@ -54,10 +56,12 @@ export OptionType, Call, Put,
        total_pnl, n_round_trips, hit_rate,
        sharpe, sortino, max_drawdown, volatility, profit_factor,
        compute_metrics,
-       Experiment, ExperimentResult, run_experiment,
+       Experiment, ExperimentResult, OutputSpec, run_experiment,
+       core_hash, full_hash,
        load_experiment, load_experiment_str,
        build_agent, build_policy, build_curve, build_data_source,
-       build_synthesizer,
-       RunStore, with_run_store, save_run, load_run, run_id, run_dir
+       build_synthesizer, build_output_spec,
+       RunStore, with_run_store, save_run, load_run, run_dir,
+       code_provenance
 
 end

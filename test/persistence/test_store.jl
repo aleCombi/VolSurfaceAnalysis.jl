@@ -1,42 +1,86 @@
 # Tests for the RunStore persistence layer.
 #
-# These tests reuse the experiment-module fixture (`_ex_fixture` /
-# `_ExOpenOnceAt`) defined in test/experiment/test_experiment.jl, which
-# runs earlier in the suite. They construct a real ExperimentResult,
-# save it, then read the parquet artifacts back via DuckDB SQL to verify
-# what landed on disk.
+# A run's id is `full_hash(result.experiment)`, and `save_run` validates
+# that the persisted config.toml rebuilds that same experiment. So these
+# tests save *config-buildable* experiments (parquet source, validated
+# lazily so no data tree is needed) paired with a hand-built ledger. The
+# hand-built positions exercise the serialization layer directly -- they
+# need not come from a real backtest, and an in-memory source could not be
+# hashed/saved anyway.
 
 using DuckDB
 using DuckDB: DBInterface
 
-const _PERSIST_TOML = """
-name = "persist-smoke"
-from = 2024-01-15T15:30:00
-to   = 2024-01-15T15:32:00
+# A buildable parquet + noop config. Roots are nonexistent on purpose:
+# ParquetDataSource validates lazily, so the experiment builds and hashes
+# without any data on disk; only an actual get_chain/get_spot would throw.
+function _smoke_config(; name="persist-smoke", metrics="[\"sharpe\", \"max_drawdown\"]")
+    """
+    name = "$name"
+    from = 2024-01-15T15:30:00
+    to   = 2024-01-15T15:32:00
 
-[source]
-type = "noop"
-"""
+    [outputs]
+    metrics = $metrics
 
-# Build a fresh ExperimentResult with one filled trade (residual at settlement).
-function _build_smoke_result()
-    f = _ex_fixture()
-    trd = Trade(_EX_UND, 480.0, f.expiry, Call)
-    exp = Experiment(name="persist-smoke",
-                     agent=StaticAgent(_ExOpenOnceAt(f.ts2, trd)),
-                     source=f.mds, from=f.ts1, to=f.ts3,
-                     metrics=[:sharpe, :max_drawdown])
-    return run_experiment(exp)
+    [source]
+    type = "parquet"
+    underlying = "SPY"
+    options_root = "/nonexistent/opts"
+    spot_root = "/nonexistent/spot"
+
+    [source.synthesizer]
+    type = "ohlcv_spread"
+    lambda = 0.7
+
+    [source.rate]
+    type = "flat"
+    value = 0.04
+
+    [source.div]
+    type = "flat"
+    value = 0.015
+
+    [agent]
+    type = "static"
+
+    [agent.policy]
+    type = "noop"
+    """
 end
 
-@testset "run_id: deterministic SHA-256 of TOML bytes, 16 hex chars" begin
-    id1 = run_id(_PERSIST_TOML)
-    id2 = run_id(_PERSIST_TOML)
-    @test id1 == id2
-    @test length(id1) == 16
-    @test all(c -> c in "0123456789abcdef", id1)
-    # Different bytes -> different id.
-    @test run_id(_PERSIST_TOML * " ") != id1
+const _SMOKE_CONFIG = _smoke_config()
+
+# Config-buildable experiment + a hand-built ledger (one long 480 call
+# settling to -5.10). Positions are constructed directly: we are testing
+# serialization, not the backtest.
+function _build_smoke_result(config=_SMOKE_CONFIG)
+    exp = load_experiment_str(config)
+    trd = Trade(Underlying("SPY"), 480.0, DateTime(2024, 2, 16, 21, 0), Call;
+                direction=1, quantity=1.0)
+    pos = Position(trd, 5.10, 480.0, 5.00, 5.10, DateTime(2024, 1, 15, 15, 31))
+    series = PnLSeries([DateTime(2024, 2, 16, 21, 0)], [-5.10], 480.0, 1, 0, 0)
+    ExperimentResult(exp, [pos], series, compute_metrics(series, exp.outputs.metrics))
+end
+
+# Config-buildable experiment with an empty ledger (folder / identity tests).
+function _empty_result(config)
+    exp = load_experiment_str(config)
+    series = PnLSeries(DateTime[], Float64[], 480.0, 0, 0, 0)
+    ExperimentResult(exp, Position[], series, compute_metrics(series, exp.outputs.metrics))
+end
+
+@testset "save id is the experiment full_hash (16 hex chars)" begin
+    res = _build_smoke_result()
+    id = full_hash(res.experiment)
+    @test length(id) == 16
+    @test all(c -> c in "0123456789abcdef", id)
+end
+
+@testset "code_provenance: returns (sha::String, dirty::Bool)" begin
+    sha, dirty = code_provenance()
+    @test sha isa String
+    @test dirty isa Bool
 end
 
 @testset "RunStore: construct creates root, close is idempotent" begin
@@ -55,8 +99,8 @@ end
     mktempdir() do tmp
         res = _build_smoke_result()
         with_run_store(joinpath(tmp, "kb")) do store
-            id = save_run(store, res, _PERSIST_TOML)
-            @test id == run_id(_PERSIST_TOML)
+            id = save_run(store, res, _SMOKE_CONFIG)
+            @test id == full_hash(res.experiment)
 
             dir = run_dir(store, id)
             @test isdir(dir)
@@ -66,7 +110,29 @@ end
             @test isfile(joinpath(dir, "positions.parquet"))
             @test isfile(joinpath(dir, "pnl_series.parquet"))
 
-            @test read(joinpath(dir, "config.toml"), String) == _PERSIST_TOML
+            @test read(joinpath(dir, "config.toml"), String) == _SMOKE_CONFIG
+        end
+        GC.gc()
+    end
+end
+
+@testset "save_run: rejects a config that does not describe the result" begin
+    mktempdir() do tmp
+        res = _build_smoke_result()                        # built from _SMOKE_CONFIG
+        mismatched = _smoke_config(metrics="[\"sortino\"]")  # different outputs -> different full_hash
+        with_run_store(joinpath(tmp, "kb")) do store
+            @test_throws ArgumentError save_run(store, res, mismatched)
+        end
+        GC.gc()
+    end
+end
+
+@testset "save_run: rejects a config with a different name label" begin
+    mktempdir() do tmp
+        res = _build_smoke_result()
+        mismatched = _smoke_config(name="other-label")       # same full_hash, different label
+        with_run_store(joinpath(tmp, "kb")) do store
+            @test_throws ArgumentError save_run(store, res, mismatched)
         end
         GC.gc()
     end
@@ -76,7 +142,7 @@ end
     mktempdir() do tmp
         res = _build_smoke_result()
         with_run_store(joinpath(tmp, "kb")) do store
-            id = save_run(store, res, _PERSIST_TOML)
+            id = save_run(store, res, _SMOKE_CONFIG)
             path = joinpath(run_dir(store, id), "manifest.parquet")
             rows = collect(DBInterface.execute(store.con,
                 "SELECT * FROM '$(replace(path, "\\" => "/"))'"))
@@ -94,11 +160,27 @@ end
     end
 end
 
+@testset "save_run: manifest records core_hash + commit_sha + dirty" begin
+    mktempdir() do tmp
+        res = _build_smoke_result()
+        with_run_store(joinpath(tmp, "kb")) do store
+            id = save_run(store, res, _SMOKE_CONFIG; commit_sha="abc123def456", dirty=true)
+            path = joinpath(run_dir(store, id), "manifest.parquet")
+            r = first(collect(DBInterface.execute(store.con,
+                "SELECT core_hash, commit_sha, dirty FROM '$(replace(path, "\\" => "/"))'")))
+            @test r.core_hash == core_hash(res.experiment)
+            @test r.commit_sha == "abc123def456"
+            @test r.dirty == true
+        end
+        GC.gc()
+    end
+end
+
 @testset "save_run: metrics.parquet has one row per (name, value)" begin
     mktempdir() do tmp
         res = _build_smoke_result()
         with_run_store(joinpath(tmp, "kb")) do store
-            id = save_run(store, res, _PERSIST_TOML)
+            id = save_run(store, res, _SMOKE_CONFIG)
             path = joinpath(run_dir(store, id), "metrics.parquet")
             rows = collect(DBInterface.execute(store.con,
                 "SELECT metric_name, value FROM '$(replace(path, "\\" => "/"))'"))
@@ -120,7 +202,7 @@ end
     mktempdir() do tmp
         res = _build_smoke_result()
         with_run_store(joinpath(tmp, "kb")) do store
-            id = save_run(store, res, _PERSIST_TOML)
+            id = save_run(store, res, _SMOKE_CONFIG)
             path = joinpath(run_dir(store, id), "positions.parquet")
             rows = collect(DBInterface.execute(store.con,
                 "SELECT * FROM '$(replace(path, "\\" => "/"))'"))
@@ -147,7 +229,7 @@ end
     mktempdir() do tmp
         res = _build_smoke_result()
         with_run_store(joinpath(tmp, "kb")) do store
-            id = save_run(store, res, _PERSIST_TOML)
+            id = save_run(store, res, _SMOKE_CONFIG)
             path = joinpath(run_dir(store, id), "pnl_series.parquet")
             rows = collect(DBInterface.execute(store.con,
                 "SELECT idx, pnl FROM '$(replace(path, "\\" => "/"))' ORDER BY idx"))
@@ -158,14 +240,13 @@ end
     end
 end
 
-@testset "save_run: idempotent re-save of same config overwrites in place" begin
+@testset "save_run: idempotent re-save of same experiment overwrites in place" begin
     mktempdir() do tmp
         res = _build_smoke_result()
         with_run_store(joinpath(tmp, "kb")) do store
-            id1 = save_run(store, res, _PERSIST_TOML)
-            id2 = save_run(store, res, _PERSIST_TOML)
+            id1 = save_run(store, res, _SMOKE_CONFIG)
+            id2 = save_run(store, res, _SMOKE_CONFIG)
             @test id1 == id2
-            # Still exactly one run folder.
             runs_root = joinpath(store.root, "runs")
             @test length(readdir(runs_root)) == 1
         end
@@ -173,13 +254,17 @@ end
     end
 end
 
-@testset "save_run: different TOML bytes -> different run folders" begin
+@testset "save_run: experiments differing only in outputs -> 2 folders, shared core_hash" begin
     mktempdir() do tmp
-        res = _build_smoke_result()
+        c1 = _smoke_config(metrics="[\"sharpe\"]")
+        c2 = _smoke_config(metrics="[\"sharpe\", \"sortino\"]")
+        r1 = _empty_result(c1)
+        r2 = _empty_result(c2)
         with_run_store(joinpath(tmp, "kb")) do store
-            id1 = save_run(store, res, _PERSIST_TOML)
-            id2 = save_run(store, res, _PERSIST_TOML * "\n# comment\n")
-            @test id1 != id2
+            id1 = save_run(store, r1, c1)
+            id2 = save_run(store, r2, c2)
+            @test id1 != id2                                       # outputs change full_hash
+            @test core_hash(r1.experiment) == core_hash(r2.experiment)  # ... but not the backtest
             @test isdir(run_dir(store, id1))
             @test isdir(run_dir(store, id2))
         end
@@ -189,12 +274,9 @@ end
 
 @testset "save_run: empty positions -> empty positions.parquet still readable" begin
     mktempdir() do tmp
-        f = _ex_fixture()
-        exp = Experiment(name="empty", agent=StaticAgent(NoOpPolicy()),
-                         source=f.mds, from=f.ts1, to=f.ts3)
-        res = run_experiment(exp)
+        res = _empty_result(_SMOKE_CONFIG)
         with_run_store(joinpath(tmp, "kb")) do store
-            id = save_run(store, res, _PERSIST_TOML)
+            id = save_run(store, res, _SMOKE_CONFIG)
             path = joinpath(run_dir(store, id), "positions.parquet")
             @test isfile(path)
             rows = collect(DBInterface.execute(store.con,
@@ -207,16 +289,18 @@ end
 
 @testset "cross-run query: SELECT across runs/*/manifest.parquet" begin
     mktempdir() do tmp
-        res = _build_smoke_result()
+        c1 = _smoke_config(metrics="[\"sharpe\"]")
+        c2 = _smoke_config(metrics="[\"sortino\"]")
         with_run_store(joinpath(tmp, "kb")) do store
-            save_run(store, res, _PERSIST_TOML)
-            save_run(store, res, _PERSIST_TOML * "\n# v2\n")
+            save_run(store, _empty_result(c1), c1)
+            save_run(store, _empty_result(c2), c2)
             glob = replace(joinpath(store.root, "runs", "*", "manifest.parquet"),
                            "\\" => "/")
             rows = collect(DBInterface.execute(store.con,
-                "SELECT run_id, name FROM '$glob' ORDER BY run_id"))
+                "SELECT run_id, name, core_hash FROM '$glob' ORDER BY run_id"))
             @test length(rows) == 2
             @test all(r -> r.name == "persist-smoke", rows)
+            @test rows[1].core_hash == rows[2].core_hash   # same backtest, different outputs
         end
         GC.gc()
     end
@@ -227,59 +311,18 @@ end
         res = _build_smoke_result()
         store = RunStore(joinpath(tmp, "kb"))
         close(store)
-        @test_throws ArgumentError save_run(store, res, _PERSIST_TOML)
+        @test_throws ArgumentError save_run(store, res, _SMOKE_CONFIG)
         GC.gc()
     end
 end
 
 # ---- load_run: round-trip + edge cases ---------------------------------
 
-# A loadable TOML pointing at a smoke parquet tree (built per-test via
-# `_write_smoke_parquet_tree`, defined in test/experiment/test_config.jl
-# which runs earlier). The TOML uses the real schema so
-# `load_experiment_str` can rebuild a live `Experiment`; the positions
-# we save are unrelated (we're exercising the serialization layer, not
-# config <-> source coherence).
-function _loadable_toml(tree)
-    return """
-    name = "persist-loadable"
-    from = 2024-01-15T15:30:00
-    to   = 2024-01-15T15:30:00
-    metrics = ["sharpe", "max_drawdown"]
-
-    [source]
-    type         = "parquet"
-    underlying   = "SPY"
-    options_root = "$(replace(tree.options_root, "\\" => "/"))"
-    spot_root    = "$(replace(tree.spot_root,    "\\" => "/"))"
-
-    [source.synthesizer]
-    type   = "ohlcv_spread"
-    lambda = 0.7
-
-    [source.rate]
-    type  = "flat"
-    value = 0.04
-
-    [source.div]
-    type  = "flat"
-    value = 0.015
-
-    [agent]
-    type = "static"
-
-    [agent.policy]
-    type = "noop"
-    """
-end
-
 @testset "load_run: round-trip ExperimentResult (positions, pnl, metrics)" begin
     mktempdir() do tmp
-        tree = _write_smoke_parquet_tree(tmp)
-        toml = _loadable_toml(tree)
         res = _build_smoke_result()
         with_run_store(joinpath(tmp, "kb")) do store
-            id = save_run(store, res, toml)
+            id = save_run(store, res, _SMOKE_CONFIG)
             loaded = load_run(store, id)
 
             @test loaded isa ExperimentResult
@@ -314,22 +357,19 @@ end
             @test isnan(loaded.metrics.sharpe) == isnan(res.metrics.sharpe)
             @test loaded.metrics.max_drawdown == res.metrics.max_drawdown
         end
-        # Drop DuckDB handles before mktempdir cleanup (Windows file locks).
         GC.gc()
     end
 end
 
 @testset "load_run: rebuilds live Experiment via load_experiment_str" begin
     mktempdir() do tmp
-        tree = _write_smoke_parquet_tree(tmp)
-        toml = _loadable_toml(tree)
         res = _build_smoke_result()
         with_run_store(joinpath(tmp, "kb")) do store
-            id = save_run(store, res, toml)
+            id = save_run(store, res, _SMOKE_CONFIG)
             loaded = load_run(store, id)
             @test loaded.experiment isa Experiment
-            @test loaded.experiment.name == "persist-loadable"
-            @test loaded.experiment.metrics == [:sharpe, :max_drawdown]
+            @test loaded.experiment.name == "persist-smoke"
+            @test loaded.experiment.outputs.metrics == [:sharpe, :max_drawdown]
             @test loaded.experiment.agent isa StaticAgent
             @test loaded.experiment.source isa ModelDataSource
         end
@@ -337,27 +377,21 @@ end
     end
 end
 
-@testset "load_run: works when source data is gone (lazy root validation)" begin
+@testset "load_run: works when source data is absent (lazy root validation)" begin
     mktempdir() do tmp
-        tree = _write_smoke_parquet_tree(tmp)
-        toml = _loadable_toml(tree)
+        # _SMOKE_CONFIG points at nonexistent roots: the source rebuilds and
+        # the persisted fields load, but an actual chain read throws.
         res = _build_smoke_result()
         store_root = joinpath(tmp, "kb")
         id = with_run_store(store_root) do store
-            save_run(store, res, toml)
+            save_run(store, res, _SMOKE_CONFIG)
         end
-        # Wipe the source parquet tree (simulate "store copied to another machine").
-        rm(tree.options_root, recursive=true)
-        rm(tree.spot_root, recursive=true)
         with_run_store(store_root) do store
-            # Construction warns (we don't pin the exact number -- DuckDB and
-            # other layers may interleave their own log messages). What we
-            # really care about is: fields load, source touch throws.
             loaded = load_run(store, id)
             @test length(loaded.positions) == length(res.positions)
             @test loaded.metrics.total_pnl ≈ res.metrics.total_pnl
-            @test_throws ArgumentError get_chain(loaded.experiment.source.chain_source,
-                                                DateTime(2024, 1, 15, 15, 30))
+            @test_throws Exception get_chain(loaded.experiment.source.chain_source,
+                                             DateTime(2024, 1, 15, 15, 30))
         end
         GC.gc()
     end
@@ -373,11 +407,9 @@ end
 
 @testset "load_run: missing config.toml inside an existing run dir throws" begin
     mktempdir() do tmp
-        tree = _write_smoke_parquet_tree(tmp)
-        toml = _loadable_toml(tree)
         res = _build_smoke_result()
         with_run_store(joinpath(tmp, "kb")) do store
-            id = save_run(store, res, toml)
+            id = save_run(store, res, _SMOKE_CONFIG)
             rm(joinpath(run_dir(store, id), "config.toml"))
             @test_throws ArgumentError load_run(store, id)
         end
@@ -387,14 +419,9 @@ end
 
 @testset "load_run: empty positions round-trip as empty Vector{Position}" begin
     mktempdir() do tmp
-        tree = _write_smoke_parquet_tree(tmp)
-        toml = _loadable_toml(tree)
-        f = _ex_fixture()
-        exp = Experiment(name="empty", agent=StaticAgent(NoOpPolicy()),
-                         source=f.mds, from=f.ts1, to=f.ts3)
-        res = run_experiment(exp)
+        res = _empty_result(_SMOKE_CONFIG)
         with_run_store(joinpath(tmp, "kb")) do store
-            id = save_run(store, res, toml)
+            id = save_run(store, res, _SMOKE_CONFIG)
             loaded = load_run(store, id)
             @test isempty(loaded.positions)
             @test isempty(loaded.pnl_series.pnl)

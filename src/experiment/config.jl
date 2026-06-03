@@ -181,6 +181,38 @@ function build_agent(d::AbstractDict)::Agent
     return _dispatch(_AGENT_BUILDERS, t, "agent")(d)
 end
 
+# ---- OutputSpec builder -------------------------------------------------
+
+# A flat TOML table -> NamedTuple (keys -> symbols). Values pass through as
+# parsed (Int / Float / String); metric functions accept `Real` kwargs.
+function _table_to_namedtuple(d::AbstractDict)::NamedTuple
+    isempty(d) && return NamedTuple()
+    ks = collect(keys(d))
+    return NamedTuple{Tuple(Symbol(k) for k in ks)}(Tuple(d[k] for k in ks))
+end
+
+"""
+    build_output_spec(d::AbstractDict) -> OutputSpec
+
+Build an [`OutputSpec`](@ref) from an `[outputs]` config table. Each field
+is optional; an omitted field takes the `OutputSpec` default (all metrics
+/ default artifacts). `[outputs.metric_params.<metric>]` sub-tables become
+per-metric kwarg overrides.
+"""
+function build_output_spec(d::AbstractDict)::OutputSpec
+    metrics = haskey(d, "metrics") ?
+        Symbol[Symbol(m) for m in d["metrics"]] : _default_metrics()
+    artifacts = haskey(d, "artifacts") ?
+        Symbol[Symbol(a) for a in d["artifacts"]] : _default_artifacts()
+    metric_params = Dict{Symbol,NamedTuple}()
+    if haskey(d, "metric_params")
+        for (mname, params) in d["metric_params"]
+            metric_params[Symbol(mname)] = _table_to_namedtuple(Dict{String,Any}(params))
+        end
+    end
+    return OutputSpec(; metrics=metrics, metric_params=metric_params, artifacts=artifacts)
+end
+
 # ---- Top-level loader ---------------------------------------------------
 
 """
@@ -188,11 +220,13 @@ end
 
 Parse a TOML file and construct the [`Experiment`](@ref) it describes.
 
-The schema is a flat header (`name`, `from`, `to`, optional `metrics`)
-plus two nested tables (`[source]`, `[agent]`). Every dispatched
-sum-type (data source, curve, policy, agent) is keyed by a `type`
+The schema is a flat header (`name`, `from`, `to`) plus nested tables
+(`[outputs]`, `[source]`, `[agent]`). Every dispatched sum-type (data
+source, synthesizer, curve, policy, agent) is keyed by a `type`
 discriminator; the rest of that table is forwarded to the matching
-builder.
+builder. Optional metrics live under `[outputs]`; top-level `metrics`
+is rejected so old configs do not silently default to a different output
+set.
 
 # Example
 
@@ -200,6 +234,8 @@ builder.
 name = "noop_smoke"
 from = 2024-01-15T15:30:00
 to   = 2024-01-15T15:32:00
+
+[outputs]
 metrics = ["sharpe", "max_drawdown"]
 
 [source]
@@ -260,11 +296,15 @@ function _experiment_from_cfg(cfg::AbstractDict)::Experiment
     name = String(_require(cfg, "name", "config"))
     from = DateTime(_require(cfg, "from", "config"))
     to   = DateTime(_require(cfg, "to",   "config"))
-    metrics = Symbol[Symbol(m) for m in get(cfg, "metrics", String[])]
+    haskey(cfg, "metrics") && error(
+        "load_experiment: top-level \"metrics\" is no longer supported; " *
+        "move it under [outputs] as metrics = [...]")
     source_tbl = _require(cfg, "source", "config")
     agent_tbl  = _require(cfg, "agent",  "config")
     source = _build_model_data_source(Dict{String,Any}(source_tbl))
     agent  = build_agent(Dict{String,Any}(agent_tbl))
+    outputs = haskey(cfg, "outputs") ?
+        build_output_spec(Dict{String,Any}(cfg["outputs"])) : OutputSpec()
     return Experiment(; name=name, agent=agent, source=source,
-                       from=from, to=to, metrics=metrics)
+                       from=from, to=to, outputs=outputs)
 end

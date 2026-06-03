@@ -131,6 +131,15 @@ end
     @test_throws ErrorException build_agent(Dict{String,Any}("type" => "static"))
 end
 
+@testset "load_experiment: top-level metrics errors clearly" begin
+    @test_throws ErrorException load_experiment_str("""
+        name = "old_metrics_shape"
+        from = 2024-01-15T15:30:00
+        to   = 2024-01-15T15:31:00
+        metrics = ["sharpe"]
+        """)
+end
+
 # ---- end-to-end: write a tiny parquet tree, load + run ----
 
 # Minimal parquet fixture: one date, one timestamp, one option row + one
@@ -185,6 +194,8 @@ end
             name = "noop_loader_smoke"
             from = 2024-01-15T15:30:00
             to   = 2024-01-15T15:30:00
+
+            [outputs]
             metrics = ["sharpe"]
 
             [source]
@@ -217,7 +228,7 @@ end
         @test exp.name == "noop_loader_smoke"
         @test exp.from == DateTime(2024, 1, 15, 15, 30)
         @test exp.to   == DateTime(2024, 1, 15, 15, 30)
-        @test exp.metrics == [:sharpe]
+        @test exp.outputs.metrics == [:sharpe]
         @test exp.agent isa StaticAgent
         @test exp.agent.policy isa NoOpPolicy
         @test exp.source isa ModelDataSource
@@ -244,7 +255,7 @@ end
     exp = Experiment(name="show-test",
                      agent=StaticAgent(_ExOpenOnceAt(f.ts2, trd)),
                      source=f.mds, from=f.ts1, to=f.ts3,
-                     metrics=[:sharpe])
+                     outputs=OutputSpec(metrics=[:sharpe]))
     res = run_experiment(exp)
     io = IOBuffer()
     show(io, MIME"text/plain"(), res)

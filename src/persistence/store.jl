@@ -11,10 +11,12 @@
 # a query API. Same DuckDB-as-engine / parquet-as-storage pattern the
 # `data` module uses for input data.
 #
-# Run identity is SHA-256 of the raw TOML bytes (truncated to 16 hex
-# chars). Whitespace / comment / key-order changes therefore produce
-# distinct ids today; canonicalization is deliberately deferred until
-# spurious "new runs" actually become a nuisance.
+# Run identity is `full_hash(result.experiment)` -- the canonical hash of
+# the resolved experiment (see experiment/identity.jl), not the raw TOML
+# bytes. The verbatim config.toml is still stored for human reading and to
+# rebuild the experiment on load. The manifest also records `core_hash`
+# (the backtest-only identity, shared by output variations of one backtest)
+# and code provenance (`commit_sha` / `dirty`).
 
 using SHA
 using DuckDB
@@ -85,18 +87,9 @@ function with_run_store(f::Function, root::AbstractString)
     end
 end
 
-# --- run identity --------------------------------------------------------
-
-const _RUN_ID_HEX_LEN = 16
-
-"""
-    run_id(config_toml::AbstractString) -> String
-
-Content hash of the raw TOML bytes (SHA-256, truncated to 16 hex
-characters). Pure function -- no I/O.
-"""
-run_id(config_toml::AbstractString)::String =
-    bytes2hex(sha2_256(codeunits(String(config_toml))))[1:_RUN_ID_HEX_LEN]
+# --- run paths -----------------------------------------------------------
+# A run's id is its `full_hash` (computed in save_run); `run_dir` just maps
+# an id string to its Hive-partitioned folder.
 
 run_dir(store::RunStore, run_id::AbstractString)::String =
     joinpath(store.root, "runs", "run_id=" * String(run_id))
@@ -148,31 +141,57 @@ end
 
 """
     save_run(store::RunStore, result::ExperimentResult,
-             config_toml::AbstractString) -> String
+             config_toml::AbstractString;
+             commit_sha::AbstractString="", dirty::Bool=true) -> String
 
 Persist `result` plus its originating TOML config under
-`<store.root>/runs/run_id=<hash>/`. Returns the 16-hex `run_id`.
+`<store.root>/runs/run_id=<full_hash>/`. Returns the 16-hex run id, which
+is `full_hash(result.experiment)` -- the identity of the resolved
+experiment, independent of how its config was spelled. `config_toml`
+must rebuild `result.experiment` (same `full_hash` and same human
+`name`) or this throws `ArgumentError`, keeping the persisted config
+faithful to the saved result.
+
+`commit_sha` / `dirty` are the code provenance of the run (see
+[`code_provenance`](@ref)); they default to `("", true)` so a caller that
+does not supply provenance records an unknown, uncacheable run.
 
 Writes:
 - `config.toml` -- the bytes passed in, verbatim.
-- `manifest.parquet` -- one row of run-level metadata.
+- `manifest.parquet` -- one row of run-level metadata (incl. `core_hash`,
+  `commit_sha`, `dirty`).
 - `metrics.parquet` -- long form, one row per `(metric_name, value)`.
 - `positions.parquet` -- one row per leg in `result.positions`.
 - `pnl_series.parquet` -- one row per round trip in `result.pnl_series`.
 
-If a folder for this `run_id` already exists, its contents are
-overwritten. Same content hash means same config means same expected
-result -- rewriting is idempotent in intent (the bytes may differ if
-the run is non-deterministic, in which case the latest wins).
+If a folder for this id already exists, its contents are overwritten:
+same resolved experiment means same id, so re-saving is idempotent in
+intent (the latest run of that exact experiment wins).
 
 Atomicity is best-effort today: a crash mid-write can leave a
-half-written folder. Re-running the same config recovers it. A
+half-written folder. Re-running the same experiment recovers it. A
 write-to-temp-then-rename pass is queued for the next iteration.
 """
 function save_run(store::RunStore, result::ExperimentResult,
-                  config_toml::AbstractString)::String
+                  config_toml::AbstractString;
+                  commit_sha::AbstractString="", dirty::Bool=true)::String
     _assert_open(store)
-    id = run_id(config_toml)
+    id = full_hash(result.experiment)
+    # Integrity: the config we persist must rebuild the experiment being
+    # saved, so load_run reproduces it faithfully. `name` is not part of
+    # full_hash (label only), so compare it explicitly.
+    config_exp = load_experiment_str(config_toml)
+    try
+        config_id = full_hash(config_exp)
+        config_id == id || throw(ArgumentError(
+            "save_run: config_toml does not describe result.experiment " *
+            "(config full_hash=$config_id, result full_hash=$id)"))
+        config_exp.name == result.experiment.name || throw(ArgumentError(
+            "save_run: config_toml name \"$(config_exp.name)\" does not match " *
+            "result.experiment name \"$(result.experiment.name)\""))
+    finally
+        _close_experiment_sources(config_exp)
+    end
     dir = run_dir(store, id)
     mkpath(dir)
 
@@ -180,7 +199,7 @@ function save_run(store::RunStore, result::ExperimentResult,
         write(io, String(config_toml))
     end
 
-    _write_manifest(store, dir, id, result)
+    _write_manifest(store, dir, id, result; commit_sha=commit_sha, dirty=dirty)
     _write_metrics(store, dir, id, result)
     _write_positions(store, dir, id, result)
     _write_pnl_series(store, dir, id, result)
@@ -188,12 +207,27 @@ function save_run(store::RunStore, result::ExperimentResult,
     return id
 end
 
+function _close_if_possible(x)
+    hasmethod(close, Tuple{typeof(x)}) && close(x)
+    return nothing
+end
+
+function _close_experiment_sources(exp::Experiment)
+    chain = exp.source.chain_source
+    spot = exp.source.spot_source
+    _close_if_possible(chain)
+    spot === chain || _close_if_possible(spot)
+    return nothing
+end
+
 function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractString,
-                         result::ExperimentResult)
+                         result::ExperimentResult;
+                         commit_sha::AbstractString, dirty::Bool)
     exp = result.experiment
     s   = result.pnl_series
     schema = """(
         run_id VARCHAR,
+        core_hash VARCHAR,
         name VARCHAR,
         from_ts TIMESTAMP,
         to_ts TIMESTAMP,
@@ -202,10 +236,13 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         n_closes BIGINT,
         n_unmarked BIGINT,
         window_end_spot DOUBLE,
+        commit_sha VARCHAR,
+        dirty BOOLEAN,
         written_at TIMESTAMP
     )"""
     insert = "INSERT INTO _writebuf VALUES (" * join([
         _str_sql(id),
+        _str_sql(core_hash(exp)),
         _str_sql(exp.name),
         _dt_sql(exp.from),
         _dt_sql(exp.to),
@@ -214,6 +251,8 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         string(s.n_closes),
         string(s.n_unmarked),
         _f_sql(s.window_end_spot),
+        _str_sql(commit_sha),
+        dirty ? "TRUE" : "FALSE",
         _dt_sql(Dates.now(UTC)),
     ], ", ") * ")"
     _write_parquet(store, joinpath(dir, "manifest.parquet"), schema, [insert])
@@ -332,7 +371,7 @@ function load_run(store::RunStore, run_id::AbstractString)::ExperimentResult
     manifest = _load_manifest(store, dir)
     positions = _load_positions(store, dir, exp.source.chain_source.underlying)
     series = _load_pnl_series(store, dir, manifest)
-    metrics = _load_metrics(store, dir, exp.metrics)
+    metrics = _load_metrics(store, dir, exp.outputs.metrics)
 
     return ExperimentResult(exp, positions, series, metrics)
 end

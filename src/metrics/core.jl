@@ -1,7 +1,7 @@
 # Always-on core metrics: cheap, unparameterized, universally
 # interesting. `compute_metrics` (added with the optional set)
 # computes these unconditionally on every call; they are not listed
-# in `Experiment.metrics` because they cost nothing to ask for.
+# in an experiment's output spec because they cost nothing to ask for.
 
 """
     total_pnl(series::PnLSeries) -> Float64

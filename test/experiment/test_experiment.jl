@@ -39,20 +39,22 @@ end
     f = _ex_fixture()
     exp = Experiment(name="smoke", agent=StaticAgent(NoOpPolicy()),
                      source=f.mds, from=f.ts1, to=f.ts3,
-                     metrics=[:sharpe])
+                     outputs=OutputSpec(metrics=[:sharpe]))
     @test exp.name == "smoke"
     @test exp.agent isa StaticAgent
     @test exp.source === f.mds
     @test exp.from == f.ts1
     @test exp.to == f.ts3
-    @test exp.metrics == [:sharpe]
+    @test exp.outputs.metrics == [:sharpe]
 end
 
-@testset "Experiment: default metrics is empty" begin
+@testset "Experiment: default outputs = all registered metrics" begin
     f = _ex_fixture()
     exp = Experiment(name="default", agent=StaticAgent(NoOpPolicy()),
                      source=f.mds, from=f.ts1, to=f.ts3)
-    @test exp.metrics == Symbol[]
+    @test Set(exp.outputs.metrics) ==
+          Set([:sharpe, :sortino, :max_drawdown, :volatility, :profit_factor])
+    @test exp.outputs.artifacts == [:equity_curve]
 end
 
 @testset "run_experiment: NoOpPolicy -> empty result, provenance carried" begin
@@ -123,7 +125,7 @@ end
     exp = Experiment(name="with-sharpe",
                      agent=StaticAgent(NoOpPolicy()),
                      source=f.mds, from=f.ts1, to=f.ts3,
-                     metrics=[:sharpe, :max_drawdown])
+                     outputs=OutputSpec(metrics=[:sharpe, :max_drawdown]))
     res = run_experiment(exp)
     @test haskey(res.metrics, :sharpe)
     @test haskey(res.metrics, :max_drawdown)
@@ -135,7 +137,7 @@ end
     f = _ex_fixture()
     exp = Experiment(name="bogus", agent=StaticAgent(NoOpPolicy()),
                      source=f.mds, from=f.ts1, to=f.ts3,
-                     metrics=[:nonsense_metric])
+                     outputs=OutputSpec(metrics=[:nonsense_metric]))
     @test_throws ErrorException run_experiment(exp)
 end
 

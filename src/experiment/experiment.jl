@@ -8,10 +8,54 @@
 # Train/val/test splits, refit cadence, and learning live inside the
 # `Agent`; the `Experiment` only sees the evaluation window.
 
+# --- Output spec ---------------------------------------------------------
+
+# Default optional-metric set: every metric in the dispatch table, in
+# canonical (sorted) order. Metrics are cheap reductions over a
+# `PnLSeries`, so "all of them" is the sensible default when a config
+# does not name them -- and it keeps which-metrics out of every header.
+_default_metrics() = sort!(collect(keys(_METRIC_TABLE)))
+
+# Default artifacts rendered when a run is materialized. The renderer
+# registry lives in the viz layer; identity only needs the symbol here.
+_default_artifacts() = [:equity_curve]
+
+"""
+    OutputSpec(; metrics, metric_params, artifacts)
+
+Declarative spec of an experiment's *outputs*: the optional metrics to
+compute, per-metric kwarg overrides, and the artifacts (plots, ...) to
+render when the run is materialized.
+
+Outputs are part of an experiment's *full* identity but not its backtest
+(*core*) identity -- two specs differing only here describe the same
+backtest viewed differently (see [`full_hash`](@ref) / [`core_hash`](@ref)).
+
+Any field omitted defaults to: all registered metrics at their default
+parameters, no overrides, and the default artifact set.
+
+# Fields
+- `metrics::Vector{Symbol}`                -- optional metrics to compute.
+- `metric_params::Dict{Symbol,NamedTuple}` -- per-metric kwarg overrides.
+- `artifacts::Vector{Symbol}`              -- renderer ids to materialize.
+"""
+struct OutputSpec
+    metrics       :: Vector{Symbol}
+    metric_params :: Dict{Symbol,NamedTuple}
+    artifacts     :: Vector{Symbol}
+end
+
+OutputSpec(; metrics=_default_metrics(),
+           metric_params=Dict{Symbol,NamedTuple}(),
+           artifacts=_default_artifacts()) =
+    OutputSpec(Symbol[Symbol(m) for m in metrics],
+               Dict{Symbol,NamedTuple}(Symbol(k) => v for (k, v) in metric_params),
+               Symbol[Symbol(a) for a in artifacts])
+
 """
     Experiment
 
-One-shot configuration record for a backtest + metrics computation.
+One-shot configuration record for a backtest + its outputs.
 
 # Fields
 - `name::String`            -- short human label; carried into `ExperimentResult`.
@@ -19,10 +63,11 @@ One-shot configuration record for a backtest + metrics computation.
 - `source::ModelDataSource` -- the data the engine ticks through.
 - `from::DateTime`          -- evaluation window start (inclusive).
 - `to::DateTime`            -- evaluation window end (inclusive).
-- `metrics::Vector{Symbol}` -- opt-in optional metrics (see [`compute_metrics`](@ref));
-                               always-on core metrics are not listed.
+- `outputs::OutputSpec`     -- the metrics + artifacts the run produces
+                               (see [`OutputSpec`](@ref)).
 
-A kwarg constructor is provided with a default empty `metrics`.
+A kwarg constructor is provided; `outputs` defaults to all registered
+metrics and the default artifact set.
 """
 struct Experiment
     name    :: String
@@ -30,13 +75,13 @@ struct Experiment
     source  :: ModelDataSource
     from    :: DateTime
     to      :: DateTime
-    metrics :: Vector{Symbol}
+    outputs :: OutputSpec
 end
 
 Experiment(; name::AbstractString, agent::Agent, source::ModelDataSource,
            from::DateTime, to::DateTime,
-           metrics::Vector{Symbol}=Symbol[]) =
-    Experiment(String(name), agent, source, from, to, metrics)
+           outputs::OutputSpec=OutputSpec()) =
+    Experiment(String(name), agent, source, from, to, outputs)
 
 """
     ExperimentResult
@@ -109,6 +154,6 @@ function run_experiment(exp::Experiment)::ExperimentResult
         "run_experiment: window-end spot missing at $(window_end) for experiment $(exp.name)")
     settle = _build_settle(exp.source, window_end, Float64(window_end_spot))
     series = pnl_series(positions; settle=settle, window_end_spot=window_end_spot)
-    metrics = compute_metrics(series, exp.metrics)
+    metrics = compute_metrics(series, exp.outputs.metrics; kwargs=exp.outputs.metric_params)
     return ExperimentResult(exp, positions, series, metrics)
 end

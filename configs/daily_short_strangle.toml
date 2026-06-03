@@ -8,11 +8,13 @@
 #   julia --project=. scripts/run_experiment.jl configs/daily_short_strangle.toml
 #
 # As with noop_smoke.toml, [source.root] points at the local Polygon tree;
-# override with VSA_POLYGON_ROOT if the path differs.
+# edit it to match your data tree.
 
 name = "daily_short_strangle_smoke"
 from = 2024-06-03T13:30:00
 to   = 2024-06-05T20:00:00
+
+[outputs]
 metrics = ["sharpe", "max_drawdown"]
 
 [source]
