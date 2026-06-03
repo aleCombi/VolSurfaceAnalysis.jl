@@ -5,8 +5,9 @@ experiment is declared in a TOML file, run end-to-end through one
 engine, and prints its result. The long-term goal is a knowledge base
 of rerunnable experiments; see [docs/vision.md](docs/vision.md).
 
-This branch (`rebuilt`) is a deliberate clean slate -- see
-[docs/status.md](docs/status.md) for what has landed.
+`master` is a deliberate clean-slate rebuild; the prior full codebase is
+preserved on the `legacy` branch -- see [docs/status.md](docs/status.md) for
+what has landed.
 
 ## Run
 

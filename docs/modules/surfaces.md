@@ -121,7 +121,7 @@ surface builder.
 | **`RawSurface` only; no SVI/SABR yet** | Smallest honest representation. New parametric surfaces slot in as new `<: VolatilitySurface` subtypes whose `iv` reads from parameters; no consumer change. |
 | **Linear interp in log-moneyness within a slice** | Cheap, monotone in strike order, naturally handles uneven strike spacing. Cross-expiry interp deferred until a consumer needs it. |
 | **Strikes/expiries out of range flat-extrapolate / error respectively** | Strike interpolation has well-defined endpoints (IV at the wings); flat-extrap is the sensible default. Expiry queries are not interpolated in v1, so an out-of-range expiry is a bug, not a smoothing question -- throw. |
-| **`time_to_expiry` uses 365.25-day year** | Matches the convention on master; standard in equity-options pricing. |
+| **`time_to_expiry` uses 365.25-day year** | Matches the convention in the legacy codebase; standard in equity-options pricing. |
 | **`build_surface` is a free function, not a `RawSurface` constructor** | Non-trivial work, returns an abstract type, will dispatch on a future `QuoteConvention` trait on the chain source. Concrete surface types still keep plain outer constructors. |
 | **`invert_delta` brackets on observed strikes, not on `spot * [lo, hi]`** | The slice already flat-extrapolates IV outside its observed strike range, so a wider bracket would land delta inversions in the extrapolation regime where the surface stops being informative. Capping the bracket at `[strikes[1], strikes[end]]` makes "no observed strike carries this delta" a `nothing` return rather than a fabricated answer. Future parametric surfaces (SVI/SABR) with explicit extrapolation policies can widen the bracket without changing the contract -- the consumer-visible signature is the same. |
 
@@ -133,7 +133,7 @@ surface builder.
   and dispatches. Today's single method is the `MarkPriceQuotes`
   case.
 - **Implied-forward calibration.** Per-snapshot forward calibration
-  from put-call parity (see master's `recalibrate_iv`). Drops the
+  from put-call parity (see the legacy `recalibrate_iv`). Drops the
   residual put-call IV gap at short tenors. Adds a slice-level
   forward and uses it in pricing instead of `S * exp((r-q)*T)`.
 - **Parametric surfaces.** SVI / SABR as additional

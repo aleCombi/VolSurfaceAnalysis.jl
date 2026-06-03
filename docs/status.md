@@ -1,8 +1,8 @@
 # Status
 
-This is the `rebuilt` branch -- a deliberate clean slate. The full codebase
-lives on `master` and is the reference we mine from. Everything here is being
-built up one small, deliberate piece at a time.
+This is `master` -- a deliberate clean slate. The prior full codebase lives
+on the `legacy` branch and is the reference we mine from. Everything here is
+being built up one small, deliberate piece at a time.
 
 Rebuild order:
 
