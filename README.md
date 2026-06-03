@@ -12,7 +12,8 @@ This branch (`rebuilt`) is a deliberate clean slate -- see
 
 ```bash
 julia --project=. -e "using Pkg; Pkg.test()"
-julia --project=. scripts/run_experiment.jl configs/noop_smoke.toml
+julia --project=. scripts/run_experiment.jl configs/noop_smoke.toml          # print result
+julia --project=. scripts/run_experiment.jl configs/noop_smoke.toml --save   # persist to the KB
 ```
 
 ## Docs

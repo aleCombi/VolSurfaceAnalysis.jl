@@ -1,0 +1,53 @@
+# Daily short strangle on SPY: short 16-delta put + short 16-delta call,
+# 1-DTE, one contract per leg, opened once a day at 19:30 UTC. Month-long
+# window -- the realistic run the old strangle_pnl_demo.jl produced via env
+# knobs, now a provenance-bearing config.
+#
+# Show the result:
+#   julia --project=. scripts/run_experiment.jl configs/strangle_spy_16d_1dte.toml
+# Save it to the KB (also writes the equity-curve artifact):
+#   julia --project=. scripts/run_experiment.jl configs/strangle_spy_16d_1dte.toml --save
+# Render the equity curve to a scratch dir without saving:
+#   julia --project=. scripts/run_experiment.jl configs/strangle_spy_16d_1dte.toml --out-dir C:/tmp
+#
+# [source.root] points at the local Polygon tree; edit it to your data path.
+# The path is part of the run_id hash, so the same experiment on a machine
+# with the data elsewhere gets a distinct id (same family as the whitespace /
+# key-order caveat in docs/modules/persistence.md).
+
+name = "strangle_spy_16d_1dte"
+from = 2026-02-27T00:00:00
+to   = 2026-03-27T23:59:59
+
+[outputs]
+metrics = ["sharpe", "sortino", "max_drawdown", "volatility", "profit_factor"]
+
+[source]
+type            = "parquet"
+underlying      = "SPY"
+root            = "C:/repos/options-collector/data/massive"
+max_days_cached = 3
+
+[source.synthesizer]
+type   = "ohlcv_spread"
+lambda = 0.7
+
+[source.rate]
+type  = "flat"
+value = 0.045
+
+[source.div]
+type  = "flat"
+value = 0.013
+
+[agent]
+type = "static"
+
+[agent.policy]
+type        = "daily_short_strangle"
+underlying  = "SPY"
+entry_time  = 19:30:00
+expiry_days = 1
+put_delta   = 0.16
+call_delta  = 0.16
+quantity    = 1.0
