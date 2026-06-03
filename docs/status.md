@@ -94,3 +94,14 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
   is visible, decide whether to extract a `Structure` abstraction
   (`policies.md` Future work) or keep policies as 4-leg inline
   `decide` bodies.
+
+## Backlog
+
+- **Reproducibility harness for stored runs.** Opt-in, data-gated tests
+  that rerun each saved run (`load_run` -> `run_experiment`) and assert its
+  `metrics` / `pnl_series` still match, auto-skipping where the source data
+  is absent (so CI / data-less machines skip cleanly); plus a
+  `scripts/revalidate_runs.jl` utility that refreshes a run's `commit_sha` /
+  `dirty` when a rerun reproduces it, and *flags* divergences rather than
+  overwriting. Run identity is config-derived (one result per `run_id`), so
+  this is what guards that invariant against code drift. Not started.
