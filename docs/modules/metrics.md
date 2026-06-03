@@ -80,7 +80,7 @@ equity_curve(series::PnLSeries) -> Vector{Float64}
 
 Cheap, unparameterized, universally interesting. The orchestrator
 computes these unconditionally on every call -- they are not listed
-in `Experiment.metrics`, because that field is for opt-in optional
+in an experiment's `OutputSpec`, because that is for opt-in optional
 metrics with kwargs.
 
 | Function | Returns | Empty-series behavior |
@@ -104,8 +104,8 @@ forwarder that earns nothing. They appear under `:n_opens` and
 ## Optional metrics
 
 Symbol-addressable, kwarg-carrying, opt-in. The `Experiment`
-orchestrator passes its `metrics::Vector{Symbol}` straight through
-to [`compute_metrics`](@ref), so the public symbol *is* the contract.
+orchestrator passes its `outputs.metrics` (a `Vector{Symbol}`) straight
+through to [`compute_metrics`](@ref), so the public symbol *is* the contract.
 
 | Symbol | Function | Default kwargs | Returns | Empty-series behavior |
 |---|---|---|---|---|
@@ -151,7 +151,7 @@ the list of known names.
 | **Per-leg settle closure, no scalar settlement spot** | A single `settlement_spot` would mark every still-open lot at the same number regardless of when its leg expired -- silently wrong for any strategy that holds to expiry (1-DTE strangles, daily condors). The caller-supplied `settle(expiry) -> Union{Float64, Missing}` closure pushes the policy decision -- "what spot honestly prices this expiry?" -- up to the orchestrator that owns the data source and the window. |
 | **Residuals stamped at the leg's own `trade.expiry`** | Held-to-expiry legs are stamped at the moment they actually settle, not at the test window end. The equity curve walks chronologically through real expiration events. The contract for a residual is "the leg's own settlement," not "what was true at `exp.to`." |
 | **`settle(expiry) === missing` increments `n_unmarked` rather than substituting a fallback** | Silent fallback was the bug the per-leg settle was introduced to fix. The metrics layer never invents a spot; data gaps surface as a visible count on `PnLSeries.n_unmarked` and the lot is excluded from realized PnL until a more sophisticated settlement (e.g. surface-based theoretical mark) lands upstream. |
-| **Always-on vs optional split** | Always-on metrics are cheap, unparameterized, and read on every reporting line; lying about their cost by making them opt-in would force every `Experiment` to list `[:total_pnl, :hit_rate, ...]`. Optional metrics carry kwargs and dispatch by symbol so `Experiment.metrics` stays a flat config-friendly `Vector{Symbol}`. |
+| **Always-on vs optional split** | Always-on metrics are cheap, unparameterized, and read on every reporting line; lying about their cost by making them opt-in would force every `Experiment` to list `[:total_pnl, :hit_rate, ...]`. Optional metrics carry kwargs and dispatch by symbol so `OutputSpec.metrics` stays a flat config-friendly `Vector{Symbol}`. |
 | **Symbol → function dispatch table** | Mirrors the backend-selection pattern used by Optim.jl / MLJ.jl. Each table entry is `(fn=..., defaults=(...))`, so requesting a symbol is one call with a complete contract; the per-experiment kwargs override merges on top. Unknown symbols error loudly rather than silently dropping. |
 | **One sample = one round trip** | The annualizing metrics (Sharpe / Sortino / volatility) treat each round-trip PnL as one observation and scale by `sqrt(periods_per_year)`. Callers with a different trade cadence override `periods_per_year` rather than this layer trying to infer it from `timestamps`. Resampling to a regular time grid is future work. |
 | **Default kwargs baked into the dispatch entry** | The symbol carries the contract; default-arg drift between two call sites is impossible because there is only one source of truth. Per-experiment overrides come in through `compute_metrics(..., kwargs=...)`; they are not promoted to `Experiment` itself in this slice. |

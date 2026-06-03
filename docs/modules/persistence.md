@@ -12,19 +12,24 @@ Hive-partitioned parquet under `<store_root>/runs/run_id=<hash>/`:
 ```
 <root>/runs/
   run_id=deea7f6b1cf56779/
-    config.toml         # raw input TOML bytes, verbatim
-    manifest.parquet    # 1 row of run-level metadata
-    metrics.parquet     # long: (run_id, metric_name, value)
-    positions.parquet   # 1 row per leg
-    pnl_series.parquet  # 1 row per round trip (+ residuals)
+    config.toml          # raw input TOML bytes, verbatim
+    manifest.parquet     # 1 row of run-level metadata
+    metrics.parquet      # long: (run_id, metric_name, value)
+    positions.parquet    # 1 row per leg
+    pnl_series.parquet   # 1 row per round trip (+ residuals)
+    artifacts/           # rendered outputs (plots, ...), regenerable
+      equity_curve.png
   run_id=8a1c.../
     ...
 ```
 
-The whole tree is just parquet. Any tool that reads parquet (DuckDB
-CLI, pandas, polars, even a notebook in another language) can browse
-it. There is no separate index file -- the manifest *is* the cross-run
-index, queried via the Hive glob.
+The query substrate is parquet: every run-level table is parquet, so
+any tool that reads it (DuckDB CLI, pandas, polars, a notebook in
+another language) can browse the store. There is no separate index file
+-- the manifest *is* the cross-run index, queried via the Hive glob.
+Rendered binaries are quarantined under each run's `artifacts/` subdir
+so they never sit as peers of the parquet; they are convenience
+snapshots, regenerable from `load_run`, not the source of truth.
 
 ## `DataSource`-shaped, but for output
 
@@ -40,12 +45,17 @@ with_run_store(f, root)
 Base.close(store) :: RunStore
 Base.isopen(store) :: Bool
 
-run_id(config_toml) :: String                          # pure, no I/O
 run_dir(store, run_id) :: String                       # path helper
 
-save_run(store, result, config_toml) :: String         # returns run_id
+save_run(store, result, config_toml;                   # returns run id = full_hash
+         commit_sha="", dirty=true) :: String
 load_run(store, run_id) :: ExperimentResult
 ```
+
+`save_run` validates that `config_toml` rebuilds the saved
+`result.experiment`: same `full_hash` and same human `name` label. That
+keeps the manifest, saved config, and `load_run(...).experiment`
+coherent even though `name` is deliberately excluded from identity.
 
 `load_run` reads the four parquets plus the saved `config.toml`,
 rebuilds the live `Experiment` via `load_experiment_str`, and
@@ -77,32 +87,51 @@ identically from Python.
 
 ## Run identity
 
-`run_id = sha2_256(config_toml)[1:16]` (hex). Pure function of the
-bytes the caller hands `save_run`. Re-saving the same TOML overwrites
-the same folder in place.
+The run id is `full_hash(result.experiment)` -- the canonical hash of
+the *resolved* experiment (see [`experiment`](experiment.md)), not the
+raw config bytes. Whitespace, comments, key order, the human `name`,
+omitted-vs-explicit defaults, and machine cache knobs therefore do
+**not** change the id. Re-saving the same experiment overwrites the
+same folder in place.
 
-**Known limitation, accepted on purpose:** whitespace, comments, and
-key order all change the hash. Two semantically identical configs
-spelled differently produce two folders. Canonicalization (a per-type
-`to_dict` symmetric to the existing `build_*`, hashed as canonical
-JSON) is deferred until spurious "new runs" become a real nuisance.
-Documented here so the workaround is obvious: run the same file, or
-run the same string.
+The manifest also records `core_hash` -- the hash of the
+backtest-determining inputs only (source, agent, window). Two runs that
+differ only in outputs (metrics / artifacts) share a `core_hash` but get
+distinct `run_id`s, so output variations of one backtest are detectable
+in a cross-run query:
+
+```julia
+DBInterface.execute(store.con, """
+    SELECT run_id, name FROM '<root>/runs/*/manifest.parquet'
+    WHERE core_hash = '<some core_hash>'
+""")
+```
+
+Both hashes come from `to_dict`, an identity projection (in the
+experiment module) that omits non-result-affecting fields (cache sizes,
+the `root` shorthand-vs-explicit distinction). The verbatim
+`config.toml` is still stored -- for reading and for rebuilding the
+experiment on load -- but it is no longer what identity is computed
+from.
 
 ## Responsibility boundaries
 
-**Owns:** storage layout, parquet schemas for the four output tables,
-content-hash identity, the DuckDB connection used for writing.
+**Owns:** storage layout, parquet schemas for the output tables, the
+`artifacts/` subdir, the DuckDB connection used for writing.
 
 **Does NOT own:**
 
-- Loading runs back into Julia values (`load_run` is the next slice).
+- Computing identity. `save_run` calls `full_hash` / `core_hash`; the
+  canonical `to_dict` projection lives in the [`experiment`](experiment.md)
+  module.
 - Querying. SQL on the parquet tree is the API.
-- Canonical config serialization. Today the caller is the one
-  responsible for handing in the TOML bytes they want hashed.
+- Code provenance capture. `commit_sha` / `dirty` are produced by
+  `code_provenance` and passed into `save_run` by the caller.
+- Artifact rendering. The store records what was written; rendering is
+  script-level (`scripts/lib/artifacts.jl`), so the core stays Plots-free.
 - Atomicity guarantees beyond best-effort. A crash mid-`save_run` can
-  leave a half-written folder; re-running the same config recovers it.
-  Write-to-temp-then-rename is queued.
+  leave a half-written folder; re-running the same experiment recovers
+  it. Write-to-temp-then-rename is queued.
 
 ## Schemas
 
@@ -110,14 +139,18 @@ content-hash identity, the DuckDB connection used for writing.
 
 | column | type | notes |
 |---|---|---|
-| `run_id` | VARCHAR | content hash, also in the partition key |
-| `name` | VARCHAR | from `Experiment.name` |
+| `run_id` | VARCHAR | `full_hash`, also the partition key |
+| `core_hash` | VARCHAR | backtest-only identity (shared by output variations) |
+| `name` | VARCHAR | from `Experiment.name` (label; not part of identity) |
 | `from_ts` | TIMESTAMP | evaluation window start |
 | `to_ts` | TIMESTAMP | evaluation window end |
 | `n_positions` | BIGINT | `length(result.positions)` |
 | `n_opens` | BIGINT | from `PnLSeries` |
 | `n_closes` | BIGINT | from `PnLSeries` |
-| `settlement_spot` | DOUBLE | spot used to mark residuals |
+| `n_unmarked` | BIGINT | from `PnLSeries` |
+| `window_end_spot` | DOUBLE | spot used to mark residuals |
+| `commit_sha` | VARCHAR | git commit of the code that produced the run |
+| `dirty` | BOOLEAN | working tree had uncommitted changes |
 | `written_at` | TIMESTAMP | UTC time of the save |
 
 ### `metrics.parquet`
@@ -180,9 +213,11 @@ One row per round trip, post-sort by timestamp (matches `PnLSeries`).
 ## Future work
 
 - Write-to-temp-then-rename for atomic saves.
-- Canonical `to_dict(::Experiment)` to make identity insensitive to
-  whitespace / key order. Becomes worthwhile when spurious folder
-  duplication actually starts hurting.
+- Compute reuse: on a `core_hash` + `commit_sha` hit with a clean tree,
+  load the cached `pnl_series` and recompute only the outputs instead of
+  re-running the backtest.
+- A curation gate (`status` draft / accepted / retracted with
+  `accept_run` / `retract_run`), cross-run queries defaulting to accepted.
 - Cross-run viz recipes built on the SQL queries demonstrated above.
 - Delete / archive helpers (`drop_run(store, id)`). For now a manual
   `rm -rf <run_dir>` is the API.

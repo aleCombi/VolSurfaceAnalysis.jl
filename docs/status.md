@@ -32,28 +32,32 @@ Rebuild order:
    `compute_metrics`. Per-metric default kwargs live on the dispatch
    table; experiment-level overrides are deferred until a workflow
    needs them.
-6. **Experiment orchestration** -- minimal end-to-end runnable.
-   `Experiment` wires `(Agent, ModelDataSource, [from, to], requested
-   metrics)` into a single rerunnable record; `run_experiment(exp)`
-   returns an `ExperimentResult` with positions, the PnL intermediate
-   (marked to spot at the window end), and the computed metrics.
-   TOML configs resolve to `Experiment` values via `load_experiment`
-   (stdlib `TOML` + per-sum-type builder registries), and
-   `scripts/run_experiment.jl <config.toml>` prints the result via
-   `Base.show(::IO, ::MIME"text/plain", ::ExperimentResult)`.
-   Settlement uses the last available timestamp in the window.
-   Per-leg-expiry settlement and parallel sweeps are future work.
-7. **Persistence** -- `RunStore` writes runs to a Hive-partitioned
-   parquet tree at `<root>/runs/run_id=<hash>/` (config.toml verbatim
-   plus manifest / metrics / positions / pnl_series parquet files).
-   Identity is SHA-256 of the TOML bytes truncated to 16 hex chars.
-   `save_run(store, result, config_toml)` writes, `load_run(store,
-   run_id)` reads back into an `ExperimentResult` -- the rebuilt
-   `Experiment.source` validates lazily so loading works even when the
-   data is on a different machine. Cross-run queries are DuckDB SQL
-   against the parquet glob -- no Julia query API. Atomic
-   write-to-temp-rename and canonical config hashing are the next
-   slices.
+6. **Experiment orchestration** -- end-to-end runnable.
+   `Experiment` wires `(Agent, ModelDataSource, [from, to], OutputSpec)`
+   into a single rerunnable record; `run_experiment(exp)` returns an
+   `ExperimentResult` with positions, the PnL intermediate (per-leg
+   settled), and the computed metrics. Outputs are declared in config:
+   an `[outputs]` table (`metrics`, per-metric params, `artifacts`)
+   resolves to an `OutputSpec`, defaulting to all registered metrics and
+   the default artifact set when omitted. TOML configs resolve via
+   `load_experiment` (stdlib `TOML` + per-sum-type builder registries);
+   `scripts/run_experiment.jl <config.toml> [--save] [--out-dir <dir>]`
+   prints the result, and optionally persists it / renders artifacts.
+   Parallel sweeps are future work.
+7. **Persistence + identity** -- `RunStore` writes runs to a
+   Hive-partitioned parquet tree at `<root>/runs/run_id=<full_hash>/`
+   (config.toml verbatim, manifest / metrics / positions / pnl_series
+   parquet, and an `artifacts/` subdir). Identity is canonical and
+   layered: `full_hash(experiment)` is the run id; `core_hash` (source +
+   agent + window) is shared by output variations of one backtest. Both
+   come from a `to_dict` projection (`experiment/identity.jl`) over the
+   *resolved* experiment, so whitespace / key order / `name` / cache
+   knobs don't fork ids. Every run records code provenance
+   (`commit_sha` / `dirty` from `code_provenance`). `save_run` writes,
+   `load_run` reads back into an `ExperimentResult` (source validates
+   lazily, so loading works off-machine). Cross-run queries are DuckDB
+   SQL against the parquet glob. Compute reuse (skip the backtest on a
+   `core_hash` hit) and a curation gate are the next slices.
 
 Visualization is added incrementally alongside each stage, not as a phase
 of its own.
@@ -72,8 +76,9 @@ own `trade.expiry` using `get_spot(source, expiry)`; legs whose expiry
 is past the experiment window mark at the window-end spot (case 1);
 legs whose expiry-time spot is unavailable inside the window count in
 `PnLSeries.n_unmarked` and are excluded from realized PnL (case 2 --
-no silent fallback). `scripts/strangle_pnl_demo.jl` + `viz/pnl.jl`
-plot the equity curve from any run.
+no silent fallback). `scripts/run_experiment.jl --out-dir <dir>` renders
+the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
++ `viz/pnl.jl`).
 
 ## In flight
 
