@@ -1,7 +1,7 @@
 # Daily short strangle on SPY: short 16-delta put + short 16-delta call,
-# 1-DTE, one contract per leg, opened once a day at 19:30 UTC. Month-long
-# window -- the realistic run the old strangle_pnl_demo.jl produced via env
-# knobs, now a provenance-bearing config.
+# 1-DTE, one contract per leg, opened once a day at 19:30 UTC. Full-history
+# window -- spans the entire SPY spot-data range (spots start 2016-03-28;
+# options go back further, but per-leg expiry settlement is spot-bound).
 #
 # Show the result:
 #   julia --project=. scripts/run_experiment.jl configs/strangle_spy_16d_1dte.toml
@@ -16,7 +16,7 @@
 # key-order caveat in docs/modules/persistence.md).
 
 name = "strangle_spy_16d_1dte"
-from = 2026-02-27T00:00:00
+from = 2016-03-28T00:00:00
 to   = 2026-03-27T23:59:59
 
 [outputs]
