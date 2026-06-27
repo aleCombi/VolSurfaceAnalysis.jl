@@ -1,15 +1,16 @@
 # Status
 
-This is `master` -- a deliberate clean slate. The prior full codebase lives
-on the `legacy` branch and is the reference we mine from. Everything here is
-being built up one small, deliberate piece at a time.
+This is `master` -- the active clean-line codebase. The prior full codebase
+lives on the `legacy` branch and remains the reference we mine from. Work here
+advances toward the long-term shape in [vision.md](vision.md), one small,
+deliberate piece at a time.
 
-Rebuild order:
+Progress toward vision:
 
 1. **Data** -- done. Includes the `OptionBar` + `QuoteSynthesizer`
    adapter that closes the Polygon OHLCV → bid/ask gap; data sources
    declare their synthesizer (e.g. `SpreadFromOHLCV(0.7)`) at construction.
-2. **Modelling** (vol surface) -- done. `Curve`s, `surfaces` module,
+2. **Modelling** (vol surface) -- done. `Curve` types, `surfaces` module,
    and `ModelDataSource` composition are in place.
 3. **Positions** -- done. `Trade` / `Position` records and the pure
    `payoff` / `open_position` / `entry_cost` / `realized_pnl` primitives.
@@ -24,18 +25,22 @@ Rebuild order:
    training / evaluation. Returns a bare `Vector{Position}` ledger.
    Reporting, result wrappers, and concrete policy / agent types
    (iron condor, strangle, walk-forward refit, ...) are next.
-5. **Metric computation** -- done. `PnLSeries` round-trip
-   intermediate (`src/metrics/pnl_series.jl`) plus always-on core
-   metrics (`total_pnl`, `n_round_trips`, `hit_rate`) and a
-   symbol-addressable optional set (`sharpe`, `sortino`,
-   `max_drawdown`, `volatility`, `profit_factor`) dispatched by
-   `compute_metrics`. Per-metric default kwargs live on the dispatch
-   table; experiment-level overrides are deferred until a workflow
-   needs them.
+5. **Metric computation** -- done. `PnLSeries`
+   (`src/metrics/pnl_series.jl`) is the canonical per-round-trip PnL
+   series: it FIFO-matches position fills, emits one PnL sample per
+   closed round trip or honestly settled residual lot, and counts
+   unmarked residuals. Always-on core metrics (`total_pnl`,
+   `n_round_trips`, `n_opens`, `n_closes`, `hit_rate`) are computed
+   for every result. Optional metrics (`sharpe`, `sortino`,
+   `max_drawdown`, `volatility`, `profit_factor`) are selected by
+   symbol through `compute_metrics`; the `_METRIC_TABLE` in
+   `src/metrics/dispatch.jl` maps each symbol to its function and
+   default kwargs. Per-experiment overrides flow through
+   `OutputSpec.metric_params`.
 6. **Experiment orchestration** -- end-to-end runnable.
    `Experiment` wires `(Agent, ModelDataSource, [from, to], OutputSpec)`
    into a single rerunnable record; `run_experiment(exp)` returns an
-   `ExperimentResult` with positions, the PnL intermediate (per-leg
+   `ExperimentResult` with positions, the `PnLSeries` (per-leg
    settled), and the computed metrics. Outputs are declared in config:
    an `[outputs]` table (`metrics`, per-metric params, `artifacts`)
    resolves to an `OutputSpec`, defaulting to all registered metrics and
@@ -96,6 +101,9 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
   `decide` bodies.
 
 ## Backlog
+
+Backlog items are concrete parked work: visible enough to preserve the
+intended direction, but not currently in flight.
 
 - **Reproducibility harness for stored runs.** Opt-in, data-gated tests
   that rerun each saved run (`load_run` -> `run_experiment`) and assert its

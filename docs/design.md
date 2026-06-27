@@ -14,8 +14,9 @@
    module doc), propose the edit explicitly before applying it.
 
 4. **Keep [status.md](status.md) current.** When work materially
-   advances the rebuild or changes its order, update status.md in
-   the same commit.
+   advances progress toward [vision.md](vision.md), changes the
+   current sequence of work, or moves an item between active and
+   future scope, update status.md in the same commit.
 
 5. **Check current community conventions before locking design
    decisions.** When introducing a new module, type hierarchy, or
