@@ -24,3 +24,12 @@
    conventions for naming, layout, interface declaration, and
    testing structure. Cite the findings in the design discussion so
    the choice is traceable.
+
+6. **Keep module docs lean and architectural.** Module docs should
+   explain boundaries, invariants, data flow, and consequential design
+   decisions. Include usage notes only when they are crucial to using
+   the module correctly; expect routine examples and API walkthroughs
+   to move later into dedicated API docs or examples. Favor invariants
+   and boundaries over implementation specifics (magic numbers, internal
+   data structures, incidental library names) that drift as code
+   changes.

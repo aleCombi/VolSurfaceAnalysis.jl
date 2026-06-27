@@ -87,6 +87,14 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
 
 ## In flight
 
+- **Leaning out the architectural docs.** Pass over `docs/modules/*`
+  (and the top-level docs) to bring them in line with design rule 6 --
+  invariants and boundaries kept, drift-prone implementation detail
+  (magic numbers, internal data structures, incidental library names,
+  API walkthroughs) dropped. Motivation: resuming the library after a
+  few-week pause, the docs should be the trustworthy entry point to read
+  back in from. `data.md` is the first pass / template; the other module
+  docs follow.
 - **Surface-based theoretical settle for case 2.** When `get_spot` at
   the leg's exact expiry is `missing` (Polygon minute bars are sparse
   at the 16:00 ET close minute), today's policy returns `missing` and
