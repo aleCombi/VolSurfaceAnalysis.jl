@@ -16,20 +16,58 @@ and consults it at row-load time. A future live-bid/ask source needs no
 synthesizer at all -- the seam is the data source's choice, not a
 hardcoded assumption downstream.
 
+## Data flow
+
+```mermaid
+flowchart LR
+    Raw[(vendor storage<br/>parquet, memory, live feed)]
+
+    subgraph DS["DataSource boundary"]
+        direction TB
+        Read["read source-native rows"]
+        Adapt["canonicalize rows<br/>parse, synthesize, or pass through"]
+        Shape["canonical market data shape"]
+        Read --> Adapt --> Shape
+    end
+
+    subgraph Out["Canonical outputs"]
+        direction TB
+        Quotes["option quotes"]
+        Spots["spot observations"]
+        Times["available timestamps"]
+    end
+
+    Raw --> Read
+    Shape --> Quotes
+    Shape --> Spots
+    Shape --> Times
+    Out --> Downstream["ModelDataSource<br/>backtest<br/>experiment"]
+```
+
+The point of the boundary is that vendor storage details stay behind
+`DataSource`. Downstream modules ask for raw market observations in the
+canonical repo shape; each source owns whatever parsing, synthesis, or
+pass-through adaptation is needed to get there.
+
 ## `DataSource` protocol
 
-- `available_timestamps(ds)` — sorted timestamps with chains; only
-  cheap-to-answer sources implement this. `ParquetDataSource` throws
-  with a message pointing to the bounded form.
-- `available_timestamps(ds, from, to)` — bounded form, canonical for
-  lazy sources.
-- `get_chain(ds, ts) :: Union{Vector{OptionQuote}, Nothing}`
-- `get_spot(ds, ts) :: Union{Float64, Missing}`
-- `get_spots(ds, from, to) :: Vector{SpotPrice}`
-- `clear_cache!(ds)` — no-op default; lazy sources override.
+The protocol is the raw-market-data boundary of the repo. It exposes
+time-indexed option quotes and spot observations in canonical record
+types (`OptionQuote`, `SpotPrice`) without leaking whether those records
+came from parquet rows, in-memory fixtures, or a future live feed.
+Sources that already store canonical records can pass them through;
+sources with vendor-specific rows adapt them first. For Polygon OHLCV
+option rows, that adaptation is `OptionBar` plus the source's declared
+`QuoteSynthesizer`; other sources can use no synthesizer or a different
+row adapter.
 
-Convention: `missing` means absent data, `nothing` means computation
-failed / skip.
+Accessors are intentionally small: discover timestamps, read option
+chains, read spot observations, and clear any source-local cache.
+
+Convention: `missing` is for absent scalar values or optional fields
+inside a record (`spot`, `bid`, `ask`, `iv`, ...). `nothing` is for a
+missing aggregate object (`chain`, later `surface`) where there is no
+record to inspect.
 
 ## `ParquetDataSource`
 
@@ -118,8 +156,11 @@ bounded form.
 
 ## Future work
 
-- Sidecar timestamp manifest written by the collector → cheap discovery,
-  unblocks no-arg `available_timestamps`.
+- Collector-written timestamp index beside the parquet data, so
+  `ParquetDataSource` can implement no-arg `available_timestamps(ds)`
+  without scanning every option-chain file. The current producer would be
+  the private [`options-collector`](https://github.com/aleCombi/options-collector)
+  library.
 - Concurrent-safe caching (lock or per-day stripes) — needed before any
   multi-threaded backtest engine.
 - IV inversion on the synthesized quote (still `missing` today).
