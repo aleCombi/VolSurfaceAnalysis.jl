@@ -758,3 +758,161 @@ Adopt the valuable changes incrementally:
 
 That path captures the real benefits without committing the repository to an overly uniform abstraction before its semantics are established.
 
+## Appendix B. End-to-end sketch
+
+The whole path in one place, config to policy. Reference for the
+execution plan; sections 2 and 3 quote pieces of it.
+
+```julia
+# ================= Kinds: immutable records with a timestamp and a selector field.
+struct OptionBar   instrument_id::String; underlying::Underlying; ...; timestamp::DateTime end
+struct OptionQuote instrument_id::String; underlying::Underlying; ...; timestamp::DateTime end
+struct SpotPrice   underlying::Underlying; price::Float64; timestamp::DateTime end
+struct Split       underlying::Underlying; ratio::Float64; timestamp::DateTime end
+struct Dividend    underlying::Underlying; amount::Float64; timestamp::DateTime end
+struct RateCurve   currency::Currency; curve::Curve; timestamp::DateTime end   # snapshot as of t, evaluated at T
+struct DivCurve    underlying::Underlying; curve::Curve; timestamp::DateTime end
+struct VolSurface  underlying::Underlying; ...; timestamp::DateTime end        # derived
+
+# ================= Protocol: two shapes plus timestamps. `sel` is the kind's selector.
+#   at(src, ::Type{R}, sel, ts)               -> Vector{R}        timestamp == ts. Sorted. Empty = absent.
+#   between(src, ::Type{R}, sel, from, to)    -> iterable of R    from <= timestamp <= to. Sorted. Lazy allowed.
+#   timestamps(src, ::Type{R}, sel, from, to) -> Vector{DateTime}
+at(src, ::Type{R}, sel, ts::DateTime) where R = collect(between(src, R, sel, ts, ts))   # default
+
+# ================= Library over the protocol. Plain Julia, not protocol.
+asof(src, ::Type{R}, sel, ts) where R = last_or_missing(between(src, R, sel, typemin(DateTime), ts))
+only_or_missing(v)  = isempty(v) ? missing : only(v)
+last_or_missing(it) = (x = missing; for r in it; x = r; end; x)
+by_timestamp(it)    = ...            # lazy run-length grouping of a sorted iterable into (ts, Vector{R})
+
+# ================= Provider specs: immutable, per storage, no resources. Config builds; identity hashes.
+struct ParquetOptionBars;  root::String end                    # OptionBar for every symbol= partition
+struct ParquetSpots;       root::String end                    # SpotPrice, same
+struct CsvEvents{R};       path::String end                    # R for every selector in the file
+struct InMemory{R};        rows::Vector{R} end
+struct Constant{R};        record::R end                       # one record at typemin(DateTime)
+struct ByUnderlying{P};    parts::Dict{Underlying,P} end       # composition: route sel -> sub-provider
+struct QuotesFromBars{Q};  synthesizer::Q end                  # derived: reads OptionBar through the map
+struct SurfaceFrom;        spot_for::Dict{Underlying,Underlying} end   # derived; optional spot remap
+
+kind(::ParquetOptionBars) = OptionBar;   kind(::ParquetSpots) = SpotPrice
+kind(::CsvEvents{R}) where R = R;        kind(::InMemory{R}) where R = R;   kind(::Constant{R}) where R = R
+kind(p::ByUnderlying) = kind(first(values(p.parts)))
+kind(::QuotesFromBars) = OptionQuote;    kind(::SurfaceFrom) = VolSurface
+
+# ================= The map: one provider per kind, looked up by type. Immutable. What Experiment stores.
+struct MarketData{P<:Tuple}; entries::P end
+entry(m::MarketData, ::Type{R}) where R = _entry(R, m.entries...)
+_entry(::Type{R}, p, rest...) where R = kind(p) === R ? p : _entry(R, rest...)    # folds at compile time
+_entry(::Type{R}) where R = error("MarketData has no provider for $R")
+# Loader checks once: no two entries share a kind; derived entries' input kinds are present.
+
+# ================= open / close: each entry once. No ordering: derived entries hold parameters, not inputs.
+open(m::MarketData)  = MarketData(map(open, m.entries))
+close(m::MarketData) = foreach(close, m.entries)
+
+struct ParquetBarsReader;  spec::ParquetOptionBars; con::DuckDB.DB; days::LRU; chains::LRU end
+struct ParquetSpotsReader; spec::ParquetSpots;      con::DuckDB.DB; days::LRU end
+struct SurfaceReader;      spec::SurfaceFrom;       cache::LRU{Tuple{Underlying,DateTime},Vector{VolSurface}} end
+
+open(s::ParquetOptionBars) = ParquetBarsReader(s, DuckDB.DB(":memory:"), LRU(200), LRU(10))
+open(s::ParquetSpots)      = ParquetSpotsReader(s, DuckDB.DB(":memory:"), LRU(200))
+open(s::ByUnderlying)      = ByUnderlying(Dict(u => open(p) for (u, p) in s.parts))
+open(s::SurfaceFrom)       = SurfaceReader(s, LRU(64))
+open(s)                    = s                                 # Constant, InMemory, CsvEvents, QuotesFromBars
+close(r::ParquetBarsReader)  = DBInterface.close!(r.con)
+close(r::ParquetSpotsReader) = DBInterface.close!(r.con)
+close(r::ByUnderlying)       = foreach(close, values(r.parts))
+close(x)                     = nothing
+kind(r::ParquetBarsReader)   = OptionBar;  kind(r::ParquetSpotsReader) = SpotPrice;  kind(r::SurfaceReader) = VolSurface
+
+# ================= Verb on the map: entry by type, pass the map down as context.
+at(m::MarketData, ::Type{R}, sel, ts) where R              = at(entry(m, R), m, R, sel, ts)
+between(m::MarketData, ::Type{R}, sel, from, to) where R   = between(entry(m, R), m, R, sel, from, to)
+timestamps(m::MarketData, ::Type{R}, sel, from, to) where R = timestamps(entry(m, R), m, R, sel, from, to)
+
+# Raw providers ignore the context.
+at(r::ParquetBarsReader, ::Any, ::Type{OptionBar}, u::Underlying, ts) = _load_chain_at(r, u, ts)
+between(r::ParquetBarsReader, ::Any, ::Type{OptionBar}, u::Underlying, from, to) =
+    Iterators.flatten(_day_bars(r, u, d, from, to) for d in Date(from):Day(1):Date(to))
+at(r::ParquetSpotsReader, ::Any, ::Type{SpotPrice}, u::Underlying, ts) = _spot_at(r, u, ts)
+between(c::Constant{R}, ::Any, ::Type{R}, sel, from, to) where R =
+    from <= c.record.timestamp <= to ? [c.record] : R[]
+between(p::InMemory{R}, ::Any, ::Type{R}, sel, from, to) where R =
+    filter(r -> selector(r) == sel && from <= r.timestamp <= to, p.rows)
+
+# Composition forwards the context untouched.
+at(p::ByUnderlying, m, ::Type{R}, u::Underlying, ts) where R          = at(p.parts[u], m, R, u, ts)
+between(p::ByUnderlying, m, ::Type{R}, u::Underlying, from, to) where R = between(p.parts[u], m, R, u, from, to)
+
+# Derived providers read through the context. Whatever `m` is, cut or not, is all they can see.
+at(p::QuotesFromBars, m, ::Type{OptionQuote}, u, ts) =
+    map(b -> synthesize(p.synthesizer, b), at(m, OptionBar, u, ts))
+between(p::QuotesFromBars, m, ::Type{OptionQuote}, u, from, to) =
+    Iterators.map(b -> synthesize(p.synthesizer, b), between(m, OptionBar, u, from, to))
+
+function at(r::SurfaceReader, m, ::Type{VolSurface}, u::Underlying, ts)
+    get!(r.cache, (u, ts)) do
+        su    = get(r.spec.spot_for, u, u)                    # e.g. SPY options against SPX spot, if configured
+        chain = at(m, OptionQuote, u, ts)
+        spot  = only_or_missing(at(m, SpotPrice, su, ts))
+        rate  = asof(m, RateCurve, USD, ts)                   # currency source: decide at step 3
+        div   = asof(m, DivCurve,  u, ts)
+        (isempty(chain) || ismissing(spot) || ismissing(rate) || ismissing(div)) && return VolSurface[]
+        [build_surface(chain, spot.price, rate.curve, div.curve)]
+    end
+end
+
+# ================= Time cut: wraps the map, passes ITSELF down. Derived reads cannot escape it.
+struct TimeCut{M}; inner::M; cutoff::DateTime end
+at(c::TimeCut, ::Type{R}, sel, ts) where R =
+    ts <= c.cutoff ? at(entry(c.inner, R), c, R, sel, ts) : R[]
+between(c::TimeCut, ::Type{R}, sel, from, to) where R =
+    from <= c.cutoff ? between(entry(c.inner, R), c, R, sel, from, min(to, c.cutoff)) : R[]
+timestamps(c::TimeCut, ::Type{R}, sel, from, to) where R =
+    from <= c.cutoff ? timestamps(entry(c.inner, R), c, R, sel, from, min(to, c.cutoff)) : DateTime[]
+
+# ================= Lifecycle: the run opens and closes. Experiment holds the spec map.
+function run_experiment(exp)
+    data = open(exp.data)
+    try
+        positions = run_backtest(exp.agent, data, exp.from, exp.to)   # engine builds TimeCut(data, t) per tick
+        ...
+    finally
+        close(data)
+    end
+end
+
+# ================= Policy view. Only kinds and selectors; never entry names.
+function decide(p::DailyShortStrangle, t, cut, positions)
+    surf  = only_or_missing(at(cut, VolSurface,  p.underlying, t))
+    chain = at(cut, OptionQuote, p.underlying, t)
+    spot  = only_or_missing(at(cut, SpotPrice,   p.underlying, t))
+    ...
+end
+```
+
+Config, one table per kind:
+
+```toml
+[data.option_bar]    type = "parquet_option_bars"  root = "C:/.../massive"
+[data.option_quote]  type = "from_bars"            synthesizer = { type = "ohlcv_spread", lambda = 0.7 }
+[data.rate_curve]    type = "constant"             currency = "USD"    value = 0.045
+[data.div_curve]     type = "constant"             underlying = "SPY"  value = 0.013
+[data.vol_surface]   type = "surface_from"         spot_for = { SPY = "SPX" }
+
+[data.spot_price]
+type = "by_underlying"
+SPY  = { type = "parquet_spots", root = "C:/.../massive" }
+SPX  = { type = "csv_spots",     path = "C:/.../spx.csv" }
+```
+
+Follow `at(cut, VolSurface, SPY, t)` through: the cut checks `t`, finds
+the `VolSurface` entry, and calls the surface reader with `m = cut`. The
+reader asks `at(cut, OptionQuote, SPY, t)`, which reaches
+`QuotesFromBars`, which asks `at(cut, OptionBar, SPY, t)`, which reaches
+the one parquet bars reader. The engine's `resolve_quote` asks
+`at(cut, OptionQuote, SPY, t)` at the same tick and lands on the same
+bars reader and the same chain cache. Every read a derived provider
+makes goes through `cut`, because `cut` is the only map it was handed.
