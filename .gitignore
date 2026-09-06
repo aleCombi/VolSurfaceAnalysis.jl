@@ -3,3 +3,4 @@ scratch/
 /data/
 scripts/runs/
 .claude/
+*.local.toml
