@@ -87,6 +87,17 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
 
 ## In flight
 
+- **Data layer redesign (proposal).**
+  [proposals/data_kinds.md](proposals/data_kinds.md) replaces the
+  hardcoded `DataSource` / `ModelDataSource` slots with kinds (record
+  types), one `records` verb, per-storage provider specs, run-scoped
+  readers, and derived providers (quote synthesis, surfaces) over an
+  immutable kind-to-provider map. Motivation: every new data need
+  (splits, dividends, rate-curve histories) currently costs a field, a
+  verb, a forwarder, a builder, and an identity branch; the parquet
+  source fuses its description with its running machinery. Proposal
+  written; execution plan and rule changes are listed in the doc and
+  await a decision.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail
