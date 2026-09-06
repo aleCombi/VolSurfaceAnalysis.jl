@@ -87,20 +87,18 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
 
 ## In flight
 
-- **Data layer redesign (proposal v2).**
+- **Data layer redesign (proposal v3).**
   [proposals/data_kinds.md](proposals/data_kinds.md) replaces the
   hardcoded `DataSource` / `ModelDataSource` slots with kinds (record
-  types keyed by type), a two-shape protocol (`at`, `between`) with
-  `asof` as a library helper, per-storage provider specs, run-scoped
-  readers, and derived providers (quote synthesis, surfaces) that read
-  through the map they are called from, so the time cut is structural.
-  v1 drew two reviews (appendix A of the doc); v2 answers each finding
-  (section 9). v2 drew a second round (appendix C): both reviewers now
-  say adopt with changes, with eight contracts to settle first (engine
-  clock, bounded `asof`, visibility vs effective time, lifecycle
-  failure, `ByUnderlying` typing, step ordering). Decided: type-keyed map, selector as a verb argument,
-  lazy `between`, one-time run-id break. Next: step 0 (convention
-  check) then execution on the machine with the data.
+  types keyed by type, `timestamp` = visibility time), a three-shape
+  protocol (`at`, `between`, `asof`), per-storage provider specs,
+  run-scoped readers behind a project-owned `open_data` /
+  `close_data!`, `BySelector` composition, derived providers that read
+  through the map they are called from (structural time cut), and a
+  declared engine `Clock`. Two review rounds (appendices A, C) are
+  answered in section 9. Plan: baseline run + rule-5 check, port the
+  new layer beside the old, switch consumers, delete the old layer.
+  Execution on the DevBox, where the data is.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail
