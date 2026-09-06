@@ -1342,3 +1342,348 @@ V2 should not be rejected: it has turned the central idea into a plausible archi
 
 The right decision is **adopt with changes**: approve spec/reader separation, lazy bounded ranges, selector-aware access, quote synthesis as a derived transformation, and cut-aware derived reads; require the twelve changes above before approving the complete replacement of `DataSource` and `ModelDataSource`.
 
+
+## Appendix D. Reviews of v3
+
+The same two reviewers, on v3 at `0cb38d5`. Both find the architecture
+settled. Both independently found that `asof` as written is undefined
+for many-per-timestamp kinds, and that the window-end rule changed
+without being decided. Review A3 asks for four text fixes and step 0;
+Review B3 keeps its structural asks and rates the rest partial.
+
+### Review A3 (Claude, 2026-09-06)
+
+Reviewed v3 at `0cb38d5` (sections 1 to 10 and Appendix B) against
+`master` at `d08b76e`. Verdict: **adopt, with four text-level fixes
+before step 1 and step 0 as the gate.** The architecture is settled;
+what remains is protocol wording that would otherwise be implemented
+inconsistently.
+
+#### Resolved from Review A2
+
+| A2 item | v3 |
+|---|---|
+| 1 engine has no clock | `Clock{R}(sel)` on `Experiment`, in core identity; `tick_times` overrides. Resolved. |
+| 2 `asof` scans from year zero | `asof` is a protocol shape with no default; parquet walks its partition list backward. Resolved as a rule; see fix 1 for its return type. |
+| 3 visibility vs effective time | `timestamp` is visibility time on every kind; effective dates are fields; `visible_days_before` on the spec and so in identity. Resolved. See fix 3 for bars. |
+| 4 catch-all `open`/`close` | Project-owned `open_data` / `close_data!`, explicit opt-in per resource-free spec, load-time check. Resolved. |
+| 5 partial-open leak | Unwind on failure, best-effort reverse close, `with_data`. Resolved. |
+| 6 `ByUnderlying` typing | `BySelector{R,P<:Tuple}`, constructor checks, union-split routing named and checked at step 1. Resolved. |
+| 7 step ordering | Not taken, with a fair rationale: `master` is a rebuild with one config and no saved run, so porting beside the old layer and deleting it last is defensible. Accepted. Step 1 should still land as several green commits, not one. |
+| 8 section 10 empty | Gated by step 0. Accepted. |
+| baseline run on the DevBox | Step 0. Resolved. |
+
+#### Fixes needed before step 1
+
+1. **`asof` is ill-defined for grid kinds.** Section 2.2 says `asof`
+   returns `Union{R, Missing}` and "a provider that finds two records at
+   the winning timestamp throws". `OptionBar` and `OptionQuote` always
+   have many records at a timestamp, yet Appendix B defines
+   `asof(::ParquetBarsReader, OptionBar, ...)` and forwards it through
+   `QuotesFromBars`. As written that call must always throw. The one
+   real use of "latest chain at or before `t`" is the surface-based
+   settle fallback in `docs/status.md`, which needs the whole block.
+   Fix: `asof` returns `Vector{R}`, every record at the largest visible
+   timestamp `<= ts`, empty when none. That also removes the `missing`
+   exception for `asof` in rule 6.1, so "empty means absent" holds for
+   all four shapes, and singleton kinds use `only_or_missing` exactly as
+   they do with `at`.
+2. **`Constant.asof` ignores the selector.** Appendix B returns
+   `c.record` for any `sel`, so `asof(m, DivCurve, SPX, t)` on a
+   constant configured for SPY returns SPY's curve. It must compare
+   `selector(c.record)` with `sel` and return absent otherwise. Same
+   check on `Constant.between`.
+3. **Declare the bar-time visibility convention.** Section 2.1 says a
+   bar's visibility time is its bar time. Polygon minute bars are
+   stamped at the bar open; the close is knowable only at bar end, so a
+   policy deciding at `t` sees one minute of the future. This is what
+   `master` does today and the baseline gate preserves it, but under
+   the new rule "`timestamp` is visibility time" it is now a stated
+   lookahead. Either shift bar timestamps to bar end at load, or write
+   the one-minute allowance into 2.1 as a known simplification.
+
+4. **The window-end rule changed silently.** Today `run_experiment`
+   takes the last chain timestamp in the window and requires a spot at
+   exactly that instant. v3 takes `asof(data, SpotPrice, clock.sel, to)`,
+   which can be a spot after the last clock tick (a day with spots but no
+   chains) or a stale one well before `to`. That moves the residual mark
+   and will show up as a baseline diff at step 2 for the wrong reason.
+   Define the window end as the last clock tick, and take the spot at
+   that tick. Codex raised this; I agree.
+
+#### Minor, fix while implementing
+
+- `timestamps` is not shown for `QuotesFromBars`, `SurfaceFrom` or
+  `BySelector`, yet the clock runs on it. Each must forward to its input
+  kind under the same context and selector. Codex raised this; it is on
+  the critical engine path so the sketch should include it.
+- The unwind loop in `open_data(::MarketData)` is a plain `foreach`; if
+  one cleanup close throws, later readers leak and the original error is
+  replaced. Use the best-effort loop from `close_data!` there too.
+
+- `Clock{R}; sel` has an untyped field; make it `Clock{R,S}` so
+  `clock.sel` infers.
+- Identity: `BySelector` parts and `SurfaceFrom.spot_for` must be
+  emitted sorted by selector in `to_dict`, or the same map in a
+  different order forks the hash.
+- `run_experiment`'s window-end spot uses `clock.sel`; with `spot_for`
+  remapping the settle spot should be the one the positions were priced
+  against. Same simplification as today, worth a comment.
+- Write down the invariant that makes derived caches cut-independent:
+  a derived provider reads its inputs at or before the requested `ts`,
+  so a cache keyed on `(sel, ts)` is valid under any cutoff `>= ts`.
+  `SurfaceReader` relies on it silently.
+- Section 2.6 says two synthesizers are "two experiments sharing a
+  `core_hash` family"; `core_hash` includes the source, so they share
+  nothing. Say "two runs" and drop the family claim.
+
+#### Not required
+
+Codex's remaining structural asks (multiple providers per kind, a
+structural raw/model boundary, dataset fingerprint in identity) are
+declined in section 9 with reasons I find adequate for this repo's size.
+None becomes harder after the port.
+
+### Review B3 (Codex, 2026-09-06)
+
+#### Scope
+
+I evaluated `docs/proposals/data_kinds.md` at `origin/claude/data-ingestion-scalability-av3tzj`, which resolves to commit `0cb38d5`, and compared it with v2 at `f2d4cdb` as requested. I also compared the proposed contracts with the current implementation in `src/data/source.jl`, `src/data/parquet_source.jl`, `src/model_data/source.jl`, `src/backtest/time_cut.jl`, `src/backtest/engine.jl`, `src/experiment/experiment.jl`, and the rules in `docs/design.md`. No branch was checked out and no repository file was modified.
+
+#### Verdict
+
+**Adopt with changes.**
+
+V3 is another meaningful improvement. Of Review B2's twelve required changes, four are resolved in the design, five are partially addressed, and three are explicitly unaddressed. The proposal now has a coherent visibility-time rule, an efficient `asof` operation, a declared engine clock, a project-owned lifecycle API, exception-aware composite lifecycle intent, and a credible heterogeneous `BySelector` representation.
+
+It is not ready to adopt as-is because some remaining issues are foundational rather than implementation details. Most importantly, the new `asof` protocol contradicts itself for many-valued kinds, cardinality and selector types are still documentation rather than kind contracts, dataset identity remains path-based, the raw/model boundary remains intentionally unenforced, and the lifecycle pseudocode does not actually guarantee the failure behavior claimed in the prose. The new clock also does not fully specify valuation alignment.
+
+#### Review B2's twelve required changes
+
+| # | Required change | Status |
+|---:|---|---|
+| 1 | Replace `typemin(DateTime)` scanning with efficient provider `asof` | **Resolved** |
+| 2 | Define selector type, cardinality, and temporal-mode metadata | **Partial** |
+| 3 | Separate visibility/knowledge time from effective time | **Resolved** |
+| 4 | Allow multiple instances of one kind | **Unaddressed** |
+| 5 | Specify heterogeneous selector routing and invariants | **Resolved** |
+| 6 | Replace broad `open`/`close` fallbacks with owned lifecycle API | **Resolved** |
+| 7 | Make open/close exception-safe and define closed behavior | **Partial** |
+| 8 | Preserve a structural raw/model boundary | **Unaddressed** |
+| 9 | Hash a dataset version/snapshot identity | **Partial** |
+| 10 | Complete the design-rule-5 convention study before API adoption | **Partial** |
+| 11 | Prototype and benchmark inference, routing, iteration, and I/O | **Partial** |
+| 12 | Land lifecycle/range improvements before requiring the generic API | **Unaddressed** |
+
+##### 1. Efficient `asof`: resolved
+
+V3 promotes `asof` to a protocol operation with no scan-based default. Vector-backed providers use indexed lookup, DuckDB providers use a descending limited query, and partitioned readers walk their known partition list backward. This fixes v2's pathological `between(..., typemin(DateTime), ts)` definition and restores the bounded-access principle documented in `docs/modules/data.md`.
+
+The proposal also uses `asof(data, SpotPrice, ..., exp.to)` to remove the current full-window timestamp scan in `src/experiment/experiment.jl`. That is directionally correct, subject to the clock/valuation alignment concern below.
+
+##### 2. Selector, cardinality, and temporal metadata: partial
+
+V3 improves the temporal contract substantially:
+
+- `timestamp` universally means visibility time.
+- Effective/ex-dividend dates are separate fields.
+- The natural operation for each kind is documented.
+- `asof` now promises to throw if two records occupy the winning timestamp.
+
+But selector type, cardinality, and temporal mode are still not declared in executable kind metadata. Nothing equivalent to these exists:
+
+```julia
+selector_type(::Type{SpotPrice}) = Underlying
+cardinality(::Type{SpotPrice}) = Singleton()
+temporal_mode(::Type{RateCurve}) = Snapshot()
+```
+
+Consequently, `at(data, RateCurve, SPY, t)` is not rejected by the generic API, and every consumer must still remember whether `only_or_missing` is required. Load-time validation covers provider kind and dependency presence, not these contracts.
+
+This omission now causes a concrete contradiction in Appendix B. The protocol says:
+
+```julia
+asof(src, ::Type{R}, sel, ts)::Union{R,Missing}
+```
+
+but the sketch implements `asof` for `OptionBar` and then derives `asof(OptionQuote)` from it. An option chain has many `OptionBar`s at its winning timestamp, not one `OptionBar`. `_latest_at_or_before` must either return a chain—violating the declared return type—or arbitrarily choose one contract. `asof` should be supported only by singleton snapshot/grid kinds, or its return shape must depend explicitly on cardinality.
+
+Required change: make selector type, cardinality, and supported temporal operations part of the kind contract. Remove `asof` from `OptionBar`/`OptionQuote`, or define a separate `group_asof` operation returning all records at the winning timestamp.
+
+##### 3. Visibility versus effective time: resolved
+
+V3 clearly defines `timestamp` as the moment a record became knowable and makes the time cut operate only on that field. `Split.effective` and `Dividend.ex_date` are separate domain fields. The revised dividend example correctly queries a bounded window of announcements visible by `t` and then filters on future ex-dates.
+
+The provider-level visibility convention for feeds that expose only effective dates is also correctly included in identity. That makes the lookahead assumption explicit and reproducible.
+
+Implementation must still verify source-specific semantics. In particular, Polygon bar timestamps need an explicit rule about whether a timestamp denotes interval start or when OHLCV values became observable; otherwise a record can be labeled “visibility time” while still exposing its interval's future high, low, or close. That belongs in `docs/modules/data.md` when the provider is ported.
+
+##### 4. Multiple providers of one kind: unaddressed
+
+V3 explicitly retains one entry per kind and says variant comparison should be separate experiments. This is a coherent simplification, but it does not satisfy Review B2's requirement.
+
+Separate experiments are sufficient when comparing complete backtest assumptions. They are not equivalent when one experiment or diagnostic needs concurrent access to vendor and synthesized quotes, two surfaces, or two feeds for the same underlying. More importantly, the claim that such runs share a `core_hash` family is inconsistent with the current identity design in `src/experiment/identity.jl`: the source and synthesizer affect fills and therefore belong in `core_hash`. Changing the synthesizer should normally change core identity.
+
+Required change: either support typed/named provider references, or narrow the proposal's scalability claim and explicitly declare that multi-convention comparisons are outside `MarketData`. At minimum, remove or define “sharing a `core_hash` family” so it does not imply identical core hashes for different input assumptions.
+
+##### 5. Heterogeneous selector routing: resolved in design
+
+`BySelector{R,P<:Tuple}` addresses the major v2 defects:
+
+- the record kind is a type parameter rather than inferred from the first value;
+- heterogeneous providers live in a tuple rather than a homogeneous `Dict`;
+- empty part lists are rejected;
+- mixed kinds are rejected;
+- duplicate selectors are rejected;
+- routing uses a small union of concrete provider types.
+
+This is a credible Julia representation, and the proposed `@code_warntype` gate is appropriate. The selector-type contract remains missing under item 2, but the heterogeneous routing requirement itself is resolved.
+
+##### 6. Project-owned lifecycle API: resolved
+
+V3 replaces `open(s)=s` and `close(x)=nothing` with project-owned `open_data` and `close_data!` generics. Resource-free specs opt in through narrowly typed methods, and specs lacking lifecycle methods fail validation. This fully resolves the unsafe Base-like catch-all methods identified in Review B2.
+
+The names should remain provisional until the convention check required by `docs/design.md`, but the ownership and dispatch shape are now sound.
+
+##### 7. Exception-safe lifecycle and closed behavior: partial
+
+The prose now specifies the right goals:
+
+- open entries in order;
+- unwind already-opened entries after an acquisition failure;
+- close in reverse order;
+- attempt every close;
+- rethrow the first close error;
+- use `with_data` around a run;
+- let a closed DuckDB connection reject later use.
+
+However, Appendix B does not fully implement those guarantees. Its failure path uses:
+
+```julia
+catch
+    foreach(close_data!, reverse(opened))
+    rethrow()
+end
+```
+
+If one cleanup close throws, `foreach` stops, later resources leak, and the cleanup exception can replace the original acquisition exception. `close_data!(BySelector)` has the same stop-on-first-error problem. The standalone `close_data!(MarketData)` does best-effort close, but records only one error and `with_data` can still replace an exception from `f` with a close exception.
+
+Required change: use one shared best-effort cleanup routine for `MarketData` and `BySelector`, preserve the primary exception, attach cleanup failures as composite/causal errors, and test failures during nested open, normal close, and close while unwinding. A raw DuckDB use-after-close error is acceptable if documented, though retaining an explicit state check would produce a better domain error than the current behavior in `src/data/parquet_source.jl`.
+
+##### 8. Structural raw/model boundary: unaddressed
+
+V3 explicitly declines this change. `OptionBar`, `OptionQuote`, `RateCurve`, `DivCurve`, and `VolSurface` still inhabit one unrestricted map, and `model_data` still dissolves. A documentation rule says policies should use `OptionQuote`, but the type passed to policies permits them to read vendor bars and permits derived providers to read unrelated kinds.
+
+That is weaker than the current architectural boundary in `docs/modules/model_data.md`, where raw sources know no math, model objects know no I/O, and builders are their meeting point.
+
+Required change: introduce capability-restricted views or separate raw and model-facing catalogs. For example, `QuotesFromBars` may receive a raw-data context, surface construction may receive canonical market observations, and policies may receive only canonical/model kinds. If this is consciously rejected, `docs/design.md` requires the boundary change to be accepted explicitly—not described as fully resolving Review B2.
+
+##### 9. Dataset version in identity: partial
+
+V3 reserves a `dataset` slot containing a logical ID/version shape, adds manifest `schema_version`, and acknowledges the issue. That is useful schema preparation, but today the proposed slot still carries only the root path. It therefore does not prevent identical run IDs from referring to changed parquet contents.
+
+This was explicitly required before the new identity schema lands. Deferring the fingerprint to another proposal leaves the reproducibility defect intact and risks another identity break immediately after the planned one-time break.
+
+Required change: define and hash at least a dataset snapshot/version token now. It could initially be a collector-generated immutable version, manifest digest, or explicit user-supplied dataset revision; it need not hash every parquet byte at experiment construction.
+
+##### 10. Convention study: partial
+
+Step 0 now gates all code and lists the exact questions the study must answer: marker dispatch, `Tables.partitions`, lifecycle naming, and measured inference for config-built maps. This is the correct process.
+
+Section 10 is still empty, so rule 5 of `docs/design.md` remains unsatisfied today. The API therefore cannot be adopted as-is until the findings are recorded and any resulting design changes are made.
+
+##### 11. Prototype and benchmarks: partial
+
+V3 adds useful gates:
+
+- `@code_warntype` for `entry` and `BySelector`;
+- point-versus-range timing over a month of real minute data;
+- `at == collect(between)`;
+- derived time-cut tests;
+- open-failure unwind tests;
+- baseline result reproduction.
+
+These checks are planned but not completed. More importantly, the Appendix B opening code uses abstract temporary vectors:
+
+```julia
+opened = Any[]
+opened = Pair[]
+```
+
+and then constructs/splats tuples at runtime. Even if the final values have concrete runtime tuple types, inference through `open_data` and config-built `Experiment` values may be unstable or induce recompilation per configuration. The proposal correctly downgrades type stability from a claim to a test, so this remains partial until the prototype passes.
+
+Required change: add allocation and inference assertions around `open_data`, not just `entry` and routing; measure lazy iterator memory retention; and record actual results before the old layer is removed.
+
+##### 12. Migration order: unaddressed
+
+V3 explicitly declines the requested order. Step 1 ports the entire new generic layer—including kinds, all protocol shapes, map, cut, routing, constants, both parquet readers, derived providers, curves, and lifecycle—before any consumer uses it.
+
+Keeping the old layer beside it and preserving a baseline reduces risk, but it does not deliver the smaller independently valuable changes first. It also creates a large first implementation step whose pieces cannot be validated by the real engine until step 2.
+
+The statement that current code is “not a consolidated base to protect” does not negate `docs/design.md`'s preference for small coherent progress, nor the fact that `src/data/parquet_source.jl` already has tested parsing, caching, lifecycle, and failure behavior worth preserving during the port.
+
+Required change: split step 1 into vertical increments. At minimum: lifecycle/spec-reader types with current-behavior adapter; raw point/range providers; map/cut; then derived providers. Each increment should have direct tests and updated module docs.
+
+#### New problems introduced by v3
+
+##### 1. `asof` is incoherent for many-valued kinds
+
+This is the most important new defect. The protocol returns one `R`, but Appendix B defines it for option bars and quotes, where a timestamp identifies an entire chain. The duplicate-at-winning-timestamp rule would also reject every normal option chain if applied literally. Restrict `asof` to singleton kinds or add a group-valued operation.
+
+##### 2. The declared clock does not fully define valuation time
+
+Adding `Clock{R}(sel)` solves the ambiguity over which timestamp series drives the engine. But `run_experiment` then obtains:
+
+```julia
+asof(data, SpotPrice, exp.clock.sel, exp.to)
+```
+
+That assumes the clock selector is also a valid spot selector. It fails conceptually for a currency or event clock and may be wrong when `SurfaceFrom.spot_for` remaps an option underlying to another spot underlying. It can also select a spot observation after the last actual engine tick, or an arbitrarily stale observation before `to`.
+
+The current `src/experiment/experiment.jl` instead finds the last chain timestamp in the window and requires a spot at that timestamp. V3's baseline gate may expose a changed result, but the intended valuation rule should be designed first.
+
+Required change: distinguish execution clock from valuation/settlement source, define whether window end is `to` or the last clock tick, and impose an explicit maximum staleness/alignment rule on `asof(SpotPrice)`.
+
+##### 3. `timestamps` is missing from important provider sketches
+
+The clock depends on `timestamps(data, OptionQuote, ...)`, yet Appendix B does not show `timestamps` forwarding for `QuotesFromBars` or `BySelector`, nor the raw reader implementation it relies upon. These are implementable, but they are on the critical engine path and should be part of the end-to-end contract rather than assumed.
+
+Required change: specify that derived timestamp enumeration delegates to the appropriate dependency under the same context and selector, and test time-cut behavior and ordering.
+
+##### 4. Resource cleanup can mask the causal error
+
+V3 introduces explicit unwind code, but its shown `foreach` cleanup can throw before `rethrow()`. This creates a new discrepancy between the prose guarantee and reference implementation. The implementation plan should require preservation of the original acquisition or user exception.
+
+##### 5. Visibility conventions can manufacture knowledge
+
+For a feed with only effective dates, `visible_days_before = 10` is an explicit assumption and correctly enters identity. But it is not factual provenance: it manufactures an announcement time. That may be acceptable for scenario modeling, but such records must be labeled synthetic/imputed, and metrics should not be presented as historically no-lookahead without qualification.
+
+Required change: distinguish observed visibility timestamps from imputed visibility policies in records/manifests and surface that assumption in run reporting.
+
+##### 6. `Constant` remains semantically asymmetric
+
+V3 keeps a sentinel “start of time” record: `asof` always finds it, while `at`, real-window `between`, and `timestamps` do not. This is internally explainable under the visibility rule but still confirms that a constant is not really an observation. It is not a blocker if `asof` is explicitly the only supported operation for `Constant`, but that returns to the need for per-kind/provider supported-operation metadata.
+
+#### Changes still required
+
+Before accepting the proposal as the replacement architecture:
+
+1. Add executable kind contracts for selector type, cardinality, and supported temporal operations.
+2. Restrict scalar `asof` to singleton kinds or add a separate chain/group `asof`; remove the contradictory option-bar/quote methods.
+3. Define execution-clock versus valuation-clock semantics, selector mapping, alignment, and maximum staleness.
+4. Specify and test `timestamps` for raw, routed, derived, and cut data paths.
+5. Make nested lifecycle acquisition and cleanup genuinely best-effort while preserving the primary exception.
+6. Decide explicitly whether multiple instances of one kind are supported; if not, narrow the extensibility claim and correct the `core_hash`-family language.
+7. Add capability-restricted raw/canonical/model views, or explicitly approve removal of the existing boundary as a design-rule change.
+8. Put a real dataset revision token in hashed identity before migrating persisted runs.
+9. Complete section 10 before public API names and dispatch shapes are accepted.
+10. Run and record inference, allocation, memory-retention, and real-data benchmarks—including `open_data` construction, not only lookup.
+11. Split the large port into smaller vertical commits with independently exercised behavior.
+12. Mark imputed visibility timestamps as assumptions in provenance and run reporting.
+
+#### Final assessment
+
+V3 resolves enough of Review B2 to justify proceeding with a prototype. The spec/reader split, lazy bounded ranges, visibility-time rule, provider-level `asof`, selector routing, cut propagation, declared clock, and owned lifecycle API form a credible core.
+
+The correct verdict remains **adopt with changes**, not adopt as-is. Resolve the `asof`/cardinality contradiction, clock-versus-valuation semantics, lifecycle error preservation, selector metadata, structural access boundary, and dataset identity before switching config, identity, persistence, and policies away from the existing interfaces. The convention study and benchmarks must then validate the chosen Julia representation before step 3 deletes `src/data/source.jl`, `src/model_data/source.jl`, or `src/backtest/time_cut.jl`.
+

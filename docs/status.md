@@ -96,7 +96,10 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
   `close_data!`, `BySelector` composition, derived providers that read
   through the map they are called from (structural time cut), and a
   declared engine `Clock`. Two review rounds (appendices A, C) are
-  answered in section 9. Plan: baseline run + rule-5 check, port the
+  answered in section 9; a third round (appendix D) finds the
+  architecture settled and asks for four text fixes before step 1:
+  `asof` return shape for grid kinds, `Constant` selector check, the
+  bar-time visibility convention, and the window-end rule. Plan: baseline run + rule-5 check, port the
   new layer beside the old, switch consumers, delete the old layer.
   Execution on the DevBox, where the data is.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
