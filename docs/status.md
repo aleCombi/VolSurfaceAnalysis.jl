@@ -95,7 +95,10 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
   readers, and derived providers (quote synthesis, surfaces) that read
   through the map they are called from, so the time cut is structural.
   v1 drew two reviews (appendix A of the doc); v2 answers each finding
-  (section 9). Decided: type-keyed map, selector as a verb argument,
+  (section 9). v2 drew a second round (appendix C): both reviewers now
+  say adopt with changes, with eight contracts to settle first (engine
+  clock, bounded `asof`, visibility vs effective time, lifecycle
+  failure, `ByUnderlying` typing, step ordering). Decided: type-keyed map, selector as a verb argument,
   lazy `between`, one-time run-id break. Next: step 0 (convention
   check) then execution on the machine with the data.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`

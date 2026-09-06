@@ -916,3 +916,351 @@ the one parquet bars reader. The engine's `resolve_quote` asks
 `at(cut, OptionQuote, SPY, t)` at the same tick and lands on the same
 bars reader and the same chain cache. Every read a derived provider
 makes goes through `cut`, because `cut` is the only map it was handed.
+
+## Appendix C. Reviews of v2
+
+The same two reviewers, on v2 at `7fe3382`. Both moved from "park the
+generic layer" to "adopt with changes": the structural holes are
+closed; what remains are protocol contracts to settle before config,
+identity and persistence migrate.
+
+### Review A2 (Claude, 2026-09-06)
+
+Reviewed v2 at `7fe3382` (including Appendix B) against `master` at
+`d08b76e`. Verdict: **adopt with changes.** v1's structural holes are
+closed; what remains are protocol contracts that are cheap to fix now
+and expensive after config, identity and persistence migrate.
+
+#### Resolved from Review A
+
+- **A1 duplicate readers.** Derived providers hold parameters only and
+  read through the map they are handed. Surface, quotes and
+  `resolve_quote` share one bars reader and one chain cache.
+- **A2 cardinality.** `only_or_missing` / `asof` in the library make
+  singleton call sites one-liners. Acceptable as documentation plus
+  helpers; a per-kind cardinality trait would let the loader check it.
+- **A3 `Flat` semantics.** `Constant{R}` at `typemin(DateTime)` is
+  coherent: `asof` finds it, `between` over a real window never does.
+- **A4 underlying.** Selector as a verb argument; `ByUnderlying`
+  composes sources per symbol.
+- **A5 materialization.** `between` is an iterable; one day in memory.
+- **A6 run-id break.** Decided explicitly; `schema_version` in the
+  manifest.
+- **A7 type stability.** Tuple lookup by `kind(p) === R` folds when
+  every entry is concrete. See item 6 below for the one entry that is
+  not.
+- **A8 rule 5.** A gated step 0 rather than an afterthought. Section 10
+  is still empty, so the proposal is not yet acceptable under rule 5.
+
+#### Still needed, ranked by cost of reversing later
+
+1. **The engine has no clock.** Under v2, `run_backtest`'s default tick
+   enumeration and `run_experiment`'s window-end walk both call
+   `timestamps(data, R, sel, from, to)`, and neither knows `R` or
+   `sel`. Today `available_timestamps(mds)` is implicitly the chain
+   source. The experiment (or the agent) must declare the clock kind and
+   selector, or `tick_times` must become mandatory. Not in the doc.
+2. **`asof` scans from the start of time.** The library default
+   `between(src, R, sel, typemin(DateTime), ts)` contradicts "ranges
+   are always bounded" and, on any day-partitioned provider modelled on
+   the parquet iterator, walks dates from year zero. Make `asof` a
+   provider operation with a required efficient implementation for
+   snapshot kinds.
+3. **Visibility time vs effective time.** Section 2.3 says nothing on
+   the list needs it. `Split` and `Dividend` are on the list and both
+   have a declaration date and an effective date. Appendix B's own
+   `between(cut, Dividend, u, t, t + Day(30))` is clamped to `t` by the
+   cut and returns nothing, so "events effective in the next 30 days
+   that were known at `t`" cannot be expressed. The cut must filter on
+   when a record became knowable; the effective date is a separate
+   field.
+4. **`open(s) = s` and `close(x) = nothing` on `Any`.** If these extend
+   `Base.open` / `Base.close` they are catch-all methods on exported
+   Base generics that silently absorb missing lifecycle
+   implementations. Use narrow methods or a project-owned pair.
+5. **Partial `open` failure leaks connections.** `map(open, entries)`
+   with the third entry throwing leaves the first two DuckDB connections
+   open and never returns a `MarketData` for the `finally` to close.
+   Today's finalizer and `closed` flag are removed without a
+   replacement. Open must close already-opened entries on failure;
+   use-after-close needs a defined error.
+6. **`ByUnderlying` breaks the type-stability claim.** `kind(p) =
+   kind(first(values(p.parts)))` is a runtime Dict read, so
+   `entry(m, SpotPrice)` does not fold when that entry is a
+   `ByUnderlying`. The motivating example (SPY parquet, SPX csv) also
+   needs two provider types in one `Dict{Underlying,P}`, which the
+   field cannot hold without widening `P`. Make the kind a type
+   parameter and define heterogeneous routing explicitly.
+7. **Steps 1 and 2 are not the reviewers' increments.** Section 8 says
+   they are; both v1 reviews asked for the spec/reader split behind the
+   *current* `get_*` API first, then the range benchmark, then the
+   generic map. v2's step 1 lands the whole generic layer before any
+   parquet code moves. Reordering costs nothing and de-risks the gate.
+8. **Section 10 is empty.** Fill it before calling the API accepted.
+
+Deferrable (real, but no harder to add after the migration): a dataset
+version fingerprint in the identity hash; more than one provider per
+kind for variant comparison; a structural raw-versus-model boundary
+beyond documentation.
+
+#### Practical notes for execution
+
+- `docs/status.md` says execution waits for "the machine with the
+  data". The DevBox is that machine: `~/data/massive` holds the parquet
+  tree (about 2974 option days) and
+  `configs/strangle_spy_16d_1dte.local.toml` already points at it. The
+  section 8 gate and the step 2 benchmark can run here.
+- No saved run exists in any store on the DevBox. The gate diffs
+  against "the run saved before step 1", so a run must be saved before
+  any code lands or the gate has nothing to compare to.
+
+### Review B2 (Codex, 2026-09-06)
+
+#### Scope
+
+The requested branch currently resolves to `7fe3382`, not `3379c5a`. Commit `3379c5a` contains the v2 revision and is its parent; `7fe3382` adds the end-to-end sketch in Appendix B. This review follows the requested `git show origin/claude/data-ingestion-scalability-av3tzj:docs/proposals/data_kinds.md`, so it evaluates v2 including that sketch. No branch was checked out and no repository file was modified.
+
+#### Updated verdict
+
+**Adopt with changes.**
+
+V2 is substantially stronger than v1. It resolves the most serious mechanical defects in the original proposal: range reads can now be lazy, queries have selectors, derived providers no longer embed and reopen their dependencies, the time cut is propagated through derived reads, invalid post-cut ranges return empty, and the migration plan now respects the documentation rule. The end-to-end sketch also makes the intended dispatch path much easier to audit.
+
+It is still not ready to adopt as-is. The largest remaining issues are:
+
+- `asof` is expressed as a scan from `typemin(DateTime)`, contradicting the bounded-scan principle and potentially producing pathological day iteration.
+- Cardinality is documented but still not part of the protocol, and snapshot duplicates can be silently accepted.
+- The one-provider-per-kind rule prevents two quote or surface variants for the same underlying.
+- The selector contract and heterogeneous routing story are underspecified and may undermine the claimed type stability.
+- The lifecycle sketch leaks resources if opening a later entry fails and uses dangerously broad `open`/`close` fallback methods.
+- Knowledge time versus effective time remains missing even though `Split` and `Dividend` are already proposed kinds that need richer temporal semantics.
+- Dataset versioning remains outside run identity.
+- The proposal still dissolves the raw/model boundary rather than merely making it extensible.
+
+The generic architecture is now credible enough to prototype, but those contracts should be settled before it replaces the current `DataSource` / `ModelDataSource` path in `src/data/source.jl` and `src/model_data/source.jl`.
+
+#### Findings v2 resolved
+
+##### B1: range materialization
+
+**Resolved in design.**
+
+`between` now promises an iterable rather than `Vector{R}`, and the parquet example uses a lazy day-by-day `Iterators.flatten`. The proposal also supplies `by_timestamp` for lazy chain grouping. This directly addresses the risk of collecting a month of minute-level option rows in memory and is consistent with the bounded-cache intent in `docs/modules/data.md`.
+
+The proposed benchmark and `at == collect(between)` equivalence test are appropriate validation gates. Implementation still needs to prove that `_day_bars` releases or evicts each day predictably, but the protocol-level flaw is fixed.
+
+##### B4: duplicated provider trees and reader ownership
+
+**Resolved for derived dependencies.**
+
+Derived providers now contain only transformation parameters and resolve inputs through the `MarketData` context. Consequently, `QuotesFromBars`, `SurfaceFrom`, and `resolve_quote` all reach the same `OptionBar` entry and reader. This removes v1's duplicated nested specs, duplicated caches, and ambiguous close ownership.
+
+The load-time check for required input kinds and duplicate kind entries is also a useful improvement.
+
+##### B5: no-lookahead through derived providers
+
+**Resolved within the supported interface.**
+
+`TimeCut` now passes itself as the context to the selected provider. A derived provider reading another kind therefore calls back through the cut rather than through an unrestricted embedded map. The explicit `from > cutoff` case also fixes the invalid-range bug called out in Review B.
+
+This matches the practical guarantee of the current `src/backtest/time_cut.jl`: code can still deliberately reach into public fields if it tries, but every supported data operation enforces the cut. The new step-3 derived-read cutoff test should be retained.
+
+##### B11: documentation updates lagging implementation
+
+**Resolved in the execution plan.**
+
+V2 explicitly requires affected module docs to change in the same commit. That brings the migration into compliance with rule 1 of `docs/design.md`.
+
+##### Missing multi-asset selector dimension
+
+**Resolved at the query level.**
+
+The `sel` argument gives queries an underlying or currency dimension, and `ByUnderlying` demonstrates per-symbol routing across storage implementations. This is materially better than v1's kind-only key and addresses the multi-asset limitation noted in `docs/modules/backtest.md`.
+
+##### Full-window timestamp scan
+
+**Resolved conceptually.**
+
+Walking bounded timestamp partitions backward from `to` avoids the current second full-window enumeration in `src/experiment/experiment.jl`. The exact API should be specified, but the proposed behavior is sound.
+
+#### Findings only partially addressed
+
+##### B2 and B9: cardinality and absence
+
+**Partially addressed.**
+
+V2 documents natural shapes and introduces `only_or_missing`, which distinguishes absent singleton data from duplicates: empty becomes `missing`, while `only` errors when there is more than one record. That is an improvement over forcing each consumer to invent its own check.
+
+However, cardinality remains documentation rather than a provider or kind contract. All `at` calls still return `Vector{R}` regardless of whether a kind is zero-or-one or zero-to-many. Every consumer must remember whether to call `only_or_missing`, and nothing lets the loader validate that a provider satisfies the declared shape.
+
+There is also an inconsistency in `asof`: `last_or_missing` silently selects the last record and does not reject two snapshot records at the same latest timestamp. Thus exact singleton lookup rejects duplicate spot records, while snapshot lookup can conceal duplicate curves.
+
+Concrete change: define cardinality and temporal mode as traits or explicit operations, and make singleton/as-of helpers detect duplicate records at the selected timestamp. Empty iterables are fine for many-valued queries; singleton lookup should have a distinct typed result contract.
+
+##### B3: exact versus as-of semantics
+
+**Partially addressed.**
+
+Adding `asof` and identifying `RateCurve` / `DivCurve` as snapshot kinds solves the basic exact-time problem. Time-cut clamping also composes correctly.
+
+But this implementation is unsafe:
+
+```julia
+asof(src, R, sel, ts) = last_or_missing(between(src, R, sel, typemin(DateTime), ts))
+```
+
+It violates the proposal's claim that ranges are always meaningfully bounded and the existing rule against accidental whole-dataset scans in `docs/modules/data.md`. On a day-partitioned provider modeled after the proposed parquet iterator, it can attempt to enumerate dates from year 0000 to the query date. Saying providers “may override the pattern” turns `asof` into a de facto protocol method despite calling it an ordinary library helper.
+
+Concrete change: make `asof` an explicit provider capability with an efficient required implementation for snapshot kinds, or add bounded reverse timestamp discovery such as `latest_at_or_before`. Do not define it using `typemin(DateTime)`.
+
+##### B8: constant-source semantics
+
+**Partially addressed.**
+
+`Constant{R}` no longer fabricates one record per queried timestamp, and its `asof` behavior is deterministic. That fixes the worst ambiguity in `Flat{R}`.
+
+Timestamping a timeless configured value at `typemin(DateTime)` is still a sentinel workaround. It creates deliberately inconsistent public behavior: `asof` finds the value, `at` at every real timestamp does not, `between` over an experiment window excludes it, and `timestamps` is empty. The value is admitted to be “a model input, not an observation,” yet it is forced into an observation record.
+
+Concrete change: model configured constants separately from historical snapshot providers, or give snapshot sources a direct `value_asof` operation whose constant implementation does not invent a timestamp. If a provenance timestamp matters, require an explicit `known_from` rather than using `typemin`.
+
+##### B6 and B7: raw/model boundary and `OptionBar` exposure
+
+**Partially addressed, despite section 9 calling them answered.**
+
+It is good that derived providers now read raw providers through a constrained map and that policies are documented to use `OptionQuote`, not `OptionBar`. The transformation direction is clearer than in v1.
+
+Nevertheless, the proposal still places vendor bars, canonical quotes, curve observations, and derived volatility surfaces in one undifferentiated `MarketData` tuple and explicitly dissolves `model_data`. Documentation alone does not preserve the current invariant in `docs/modules/model_data.md`: raw data knows no math, model objects know no I/O, and builders are their meeting point. Any policy can call `at(cut, OptionBar, ...)`, and any provider can reach any other kind through the map.
+
+Concrete change: retain a structural boundary. One option is a raw observation catalog plus a model-facing view whose allowed derived kinds are built from that catalog. Another is capability-restricted contexts: `QuotesFromBars` receives access to `OptionBar`, while policies receive only canonical/model capabilities. `OptionBar` can remain inspectable in diagnostic workflows without becoming part of every policy's supported interface.
+
+##### B10: identity canonicalization and reproducibility
+
+**Partially addressed.**
+
+Removing nested provider specs resolves v1's structural duplication problem, and adding `schema_version` gives persistence a clean compatibility failure. Explicitly accepting a one-time run-ID break is reasonable while the store is tiny.
+
+But the proposal explicitly defers dataset-version identity. A root path still identifies location, not data contents or snapshot. The same experiment hash can therefore produce different results after parquet files are corrected or extended. This is the larger reproducibility issue identified in Review B and remains unresolved in `src/experiment/identity.jl`'s current path-based projection as well.
+
+Concrete change: the initial schema should reserve and hash a logical dataset ID plus immutable version/snapshot/fingerprint. `schema_version` outside the hash only versions the manifest shape; it does not identify the data used.
+
+##### B12: community conventions
+
+**Partially addressed procedurally.**
+
+Moving the convention check to step 0 is the right sequence, but section 10 is still empty. Therefore rule 5 in `docs/design.md` has not yet been satisfied, and the proposal cannot be adopted as-is today.
+
+The check must specifically resolve lazy partition interfaces, safe resource APIs, whether extending `Base.open` / `Base.close` is appropriate, and the performance characteristics of tuple/type-marker lookup. Its conclusions may require changing the public API, not merely documenting the already-selected one.
+
+##### Over-engineering and timing
+
+**Still only partially answered.**
+
+The proposal intentionally rejects the recommendation to park the generic map. V2 makes that map much more coherent, but it does not create present demand for `CsvEvents`, inflation data, historical curve sources, or multiple provider families. The current flagship policy still uses sparse daily ticks in `src/policies/daily_short_strangle.jl`.
+
+Steps 1 and 2 are not quite the incremental path Review B recommended: step 1 introduces the entire generic kind/map/cut framework before extracting the concrete spec/reader split. The lower-risk sequence remains to extract lifecycle first behind the current API, benchmark range access, and then introduce the generic public layer when at least one additional real kind exercises it.
+
+#### Findings unaddressed
+
+##### Knowledge time versus effective time
+
+**Unaddressed.**
+
+V2 states that a future kind can carry both fields and that the provider will decide which one `between` bounds on, then claims nothing currently listed needs this distinction. That is not convincing: `Split` and `Dividend` are already listed kinds, and both naturally have announcement/declaration dates and effective/ex-dividend dates. Revised macro data makes the problem more obvious, but it is not the first use case.
+
+Leaving the choice to each provider also breaks the supposedly uniform meaning of `between`: two providers for the same kind could bound on different timestamps.
+
+Concrete change: define the protocol's visibility time explicitly and represent effective time separately. No-lookahead must always filter on when the record became knowable; domain logic can separately query its effective date.
+
+##### Lifecycle failure behavior
+
+**Unaddressed.**
+
+The proposal still does not handle partial failure during `open(MarketData)`. If opening entry three fails after entries one and two acquired DuckDB connections, no `MarketData` value is returned and the `finally` in `run_experiment` cannot close those earlier readers. Similarly, a failure while closing one entry can prevent later entries from being closed.
+
+The current `src/data/parquet_source.jl` has explicit closed-state checks and a finalizer. V2 removes those defenses without replacing failure cleanup or defining use-after-close behavior.
+
+Concrete change: implement exception-safe acquisition that closes already-opened entries in reverse order, best-effort close aggregation, and a specified use-after-close error. Add tests that inject failures during both open and close.
+
+##### Multiple providers or derived variants of one kind
+
+**Unaddressed and made more restrictive.**
+
+One entry per type means an experiment cannot simultaneously carry:
+
+- two `OptionQuote` series synthesized from the same bars with different spread assumptions;
+- vendor quotes and synthesized quotes for comparison;
+- two volatility surfaces built with different conventions;
+- two feeds for the same underlying and kind.
+
+The selector distinguishes instruments, not provenance or model variants. `ByUnderlying` cannot represent two sources for the same underlying. This matters directly for research and contradicts the proposal's goal of scalable composition.
+
+Concrete change: key entries by a typed capability plus a semantic instance ID, or introduce typed handles such as `DataRef{OptionQuote}` selected in policy/surface configuration. Preserve type dispatch while allowing more than one instance of a kind.
+
+##### Capability and selector contracts
+
+**Unaddressed.**
+
+The proposal says each kind has a selector, but does not define a `selector(::R)` or `selector_type(::Type{R})` contract in the main design. Appendix B calls `selector(r)` without defining it. Nothing statically or at load time prevents calling `RateCurve` with an `Underlying` or `SpotPrice` with a currency.
+
+`ByUnderlying{P}` is also shown with `Dict{Underlying,P}`, yet the motivating example routes SPY to parquet and SPX to CSV—different provider types. That requires an abstract/union-valued dictionary, a different tuple representation, or a wrapper, each with consequences for type stability. `kind(p::ByUnderlying) = kind(first(values(p.parts)))` fails for an empty map and assumes all parts share a kind.
+
+Concrete change: specify selector traits and validation, generalize routing to `BySelector`, define heterogeneous storage explicitly, reject empty/mixed-kind routes at construction, and benchmark the actual representation before claiming compile-time folding end to end.
+
+#### New problems introduced by v2
+
+##### 1. Blanket `open` and `close` fallbacks are unsafe
+
+Appendix B shows:
+
+```julia
+open(s) = s
+close(x) = nothing
+```
+
+If these extend Julia's exported `Base.open` and `Base.close`, they are extremely broad methods that can intercept unrelated values throughout the module and hide missing lifecycle implementations. If they create new module-local generics, their names are confusingly indistinguishable from Base operations.
+
+Use narrowly typed methods on a project-owned lifecycle API—such as `open_data`, `close_data!`, or `with_data`—and never define catch-all methods on `Any`. A no-resource provider should implement an explicit marker or narrow method.
+
+##### 2. `asof` reintroduces unbounded discovery under another name
+
+V1 preserved bounded ranges. V2 now legitimizes a `typemin(DateTime)` lower bound because expected event tables are small. That is a semantic regression: size assumptions belong to providers, and a generic helper should not silently turn into a whole-history scan. It is especially dangerous with the shown daily-partition iterator.
+
+##### 3. Future-looking event queries conflict with `TimeCut`
+
+The policy example includes:
+
+```julia
+between(cut, Dividend, underlying, t, t + Day(30))
+```
+
+The cut clamps this to `t`, so it cannot return future effective dividends even if those dividends were announced before `t`. This exposes why visibility time and effective time cannot be collapsed into one `timestamp`. The design currently cannot express “events effective in the next 30 days that were already known at the decision time.”
+
+##### 4. The “one reader per storage” claim is imprecise
+
+`ParquetOptionBars` and `ParquetSpots` have the same root but open separate DuckDB connections. V2 successfully guarantees one reader per *kind entry*, not necessarily one per storage. Separate readers may be acceptable, but the proposal should state that accurately or introduce a shared dataset/session layer if one connection per physical store is intended.
+
+##### 5. The type-stability claim is not established
+
+Tuple lookup over fully concrete entries may optimize well, but `_entry` uses a runtime `kind(p) === R` test, `ByUnderlying` may contain heterogeneous providers, derived calls pass a general context, and configuration construction may erase concrete types. The proposal should treat type stability as a benchmarkable hypothesis until step 0 and a prototype confirm inference with `@code_warntype` and realistic loaded configs.
+
+#### Concrete changes required before adoption
+
+1. Replace the `typemin(DateTime)` implementation of `asof` with an explicit efficient `latest_at_or_before`/`asof` provider operation or bounded reverse-index API.
+2. Define kind metadata for selector type, cardinality, and temporal mode; validate it at construction and make snapshot duplicate handling explicit.
+3. Model visibility/knowledge time separately from effective time before adding `Split`, `Dividend`, or revised macro kinds.
+4. Allow multiple named or typed instances of the same kind so research can compare quote and surface variants.
+5. Specify heterogeneous selector routing with a type-correct `BySelector` representation and construction invariants.
+6. Replace broad `open`/`close` fallbacks with a project-owned, narrowly dispatched lifecycle API.
+7. Make multi-resource opening and closing exception-safe; define use-after-close behavior and test partial failures.
+8. Preserve a structural raw-observation versus model-derived boundary, or use capability-restricted contexts instead of handing every provider and policy the full map.
+9. Include a dataset version/snapshot identifier in hashed experiment identity from the first new schema version.
+10. Complete and record the rule-5 convention study before accepting public names or dispatch shapes.
+11. Prototype and benchmark tuple lookup, heterogeneous routing, lazy day iteration, point-versus-range performance, and memory retention before deleting the old layer.
+12. Reorder migration so the spec/reader extraction and range benchmark can land behind existing APIs before the generic map becomes a required public surface.
+
+#### Final assessment
+
+V2 should not be rejected: it has turned the central idea into a plausible architecture and directly fixed several of Review B's strongest objections. It also should not be adopted as-is, because several unresolved points are protocol-level decisions that would be expensive to reverse after config, identity, policies, and persistence migrate.
+
+The right decision is **adopt with changes**: approve spec/reader separation, lazy bounded ranges, selector-aware access, quote synthesis as a derived transformation, and cut-aware derived reads; require the twelve changes above before approving the complete replacement of `DataSource` and `ModelDataSource`.
+
