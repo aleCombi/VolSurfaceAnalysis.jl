@@ -396,3 +396,353 @@ is claimed to be.
   current practice for trait-style dispatch on marker types in the
   Julia data ecosystem (`Tables.jl`, `DataInterpolations.jl`,
   `TimeSeries.jl`) and record findings in this section.
+
+## 9. Reviews
+
+Two independent reviews of this proposal against `master` at `d08b76e`,
+reaching the same verdict: adopt the spec/reader split and the synthesis
+move now as independent commits; park the generic kinds/records layer
+until a second data kind actually lands. Kept here so the decision on
+section 7 is traceable.
+
+### Review A (Claude, 2026-09-06)
+
+Reviewed against `master` at `d08b76e`. Verdict: **adopt with substantial
+changes, not as-is.** Two of the three motivating debts are real and worth
+fixing now, independently. The universal kinds/records layer built on top
+of them is premature and has unresolved semantic holes.
+
+#### Motivating claims checked against the code
+
+- **Spec/reader fusion: real.** `ParquetDataSource`
+  (`src/data/parquet_source.jl`) is `mutable`, holds a `DuckDB.DB`, a
+  finalizer, a `closed` flag and three caches. `Experiment` therefore
+  carries a live database handle, and `to_dict(::ParquetDataSource)` in
+  `src/experiment/identity.jl` hand-excludes the cache knobs. This is the
+  strongest part of the proposal.
+- **Five files per kind: accurate.** Adding e.g. dividends today touches
+  `src/data/source.jl` (verb), `src/model_data/source.jl` (field +
+  accessor), `src/backtest/time_cut.jl` (forwarder),
+  `src/experiment/config.jl` (builder) and `src/experiment/identity.jl`
+  (projection). But this cost has been paid zero times so far; nothing in
+  `docs/status.md` in-flight or backlog asks for a new kind.
+- **Point-query cost: weak for the current workload.** `get_chain` is
+  indeed one DuckDB query per timestamp, but `DailyShortStrangle` supplies
+  one tick per day through `tick_times`, so per-minute chain queries never
+  happen. The one present hot spot is `run_experiment`
+  (`src/experiment/experiment.jl`) calling `available_timestamps` over the
+  full ten-year window only to find the last timestamp: one `DISTINCT`
+  query per day, ~2500 queries. That is a ten-line fix and needs no
+  redesign.
+
+#### Flaws
+
+1. **Provider graph opens readers twice.** `SurfaceFrom` cannot hold the
+   `MarketData` it lives in (an immutable `NamedTuple` cannot contain
+   itself), so it must hold copies of its input specs. `open` then creates
+   two DuckDB connections and two chain caches for the same bars: one under
+   `option_quote`, one nested under `vol_surface`. The strangle policy calls
+   `get_surface`, `get_chain` and the engine calls `resolve_quote` at the
+   same tick; today all three share one chain cache. Section 4 calls the
+   duplication "harmless" for identity; it is a resource regression at run
+   time. Fix: memoize `open` by spec identity, or have derived providers
+   reference keys and resolve against the map at open time.
+2. **Cardinality is pushed onto every consumer.** `SpotPrice`, `RateCurve`,
+   `DivCurve` and `VolSurface` are singletons at a timestamp but come back
+   as `Vector{R}`, so every call site does `isempty` then `only`. Today's
+   `get_chain` vs `get_spot` makes the cardinality difference explicit.
+3. **`Flat{RateCurve}` has no honest `timestamps` semantics.** A constant
+   curve fabricates a record at any queried instant. A bounded range of it
+   is either one record or infinitely many; the proposal does not say. The
+   existing `FlatCurve` is a timeless model input and is simpler and more
+   honest.
+4. **No underlying dimension.** The map is keyed by kind only, yet "a
+   second underlying" is listed in section 1 as a motivation. The design
+   does not support its own use case; it needs either `(kind, underlying)`
+   keys or an underlying argument on the verb.
+5. **Range results materialize whole intervals.** `records(src, OptionBar,
+   from, to)::Vector` over a month of minute-level SPY chains conflicts with
+   the bounded-memory rule in `docs/modules/data.md` and with the 3.7 GB
+   dev box. The sequential day pass should be an iterator of per-day (or
+   per-timestamp) blocks, not one vector.
+6. **Every stored run id changes.** The identity projection moves from a
+   `[source]` table to `[data.*]` keys, so every `run_id` in the `RunStore`
+   knowledge base stops matching its rehydrated experiment. Section 7 says
+   "existing configs rewritten" and stops. `docs/vision.md` makes the
+   accumulating KB a first-class goal; this needs a migration story (or a
+   documented id break) before step 5.
+7. **Type-stability claim is asserted, not shown.** `getproperty(nt,
+   key(R))` is only type-stable if `key(R)` constant-folds. Doable with
+   `Val` or a generated function, but the nested parametric types
+   (`TimeCut{MarketData{NamedTuple{..., QuotesFromBars{...}}}}`) also mean
+   every distinct config is a new type and a recompile, which matters on a
+   2-core box with Revise.
+8. **Design rule 5 deferred rather than met.** The public API shape
+   (`open`/`close` on non-IO types, `key(::Type)` trait, single verb with a
+   type marker) is chosen before the convention check the rule requires.
+
+#### Recommended path
+
+Take the valuable pieces now as independent small commits; park the
+generic layer until a second kind actually arrives.
+
+1. Split `ParquetDataSource` into an immutable spec and a run-scoped
+   reader; `run_experiment` opens and closes in `try/finally`. Keep the
+   downstream `get_*` API unchanged. This alone removes the `mutable`
+   struct, the finalizer, the `closed` flag and the identity hack, and
+   unlocks per-task readers for parallel sweeps.
+2. Fix the window-end scan in `run_experiment`: walk days backward from
+   `to` and stop at the first non-empty day.
+3. Bound the surface cache in `ModelDataSource`.
+4. Move OHLCV-to-quote synthesis into an adapter between reader and
+   consumer, keeping `OptionQuote` as the only canonical downstream output.
+5. Revisit the kinds/records verb when the first real second kind lands.
+   Before that design is accepted it must answer the shared-reader,
+   underlying-key, cardinality, as-of and run-id questions above, and cite
+   the rule-5 convention check.
+
+### Review B (Codex, 2026-09-06)
+
+#### Verdict
+
+Recommend **adopting with substantial changes**, not as-is.
+
+The proposal correctly identifies architectural debt in `src/data/parquet_source.jl` and a likely future extensibility problem in `src/data/source.jl`. Its best ideas are worth implementing independently:
+
+- Separate immutable, serializable source specifications from opened runtime readers.
+- Add efficient bounded-range reads.
+- Move quote synthesis out of the parquet reader.
+- Represent historical rate/dividend curves with separate observation time and maturity time.
+
+The proposed universal kinds/providers/readers system, however, introduces unresolved cardinality, ownership, time-semantics, and memory problems. It should not replace `DataSource` and `ModelDataSource` wholesale in its current form.
+
+#### Does it solve a real problem?
+
+Partly.
+
+The spec/reader problem is real. `ParquetDataSource` currently contains identity-bearing configuration, cache policy, mutable caches, a DuckDB connection, and lifecycle state in one object. That forces `src/experiment/identity.jl` to manually omit operational fields and makes a persisted `Experiment` carry something conceptually live. Splitting:
+
+```julia
+ParquetSpec → open → ParquetReader
+```
+
+would materially improve serialization, lifecycle management, parallel-run isolation, and testing.
+
+The hardcoded-kind problem is plausible but not yet severe. The current protocol has only chains and spots, while `src/model_data/source.jl` adds rates, dividends, and surfaces. Adding splits, historical curves, or multiple underlyings would indeed spread changes through the time cut, config, identity, and model composition. A typed generic access mechanism could reduce that repetition.
+
+The point-query performance claim is weaker for the current flagship workflow. `ParquetDataSource` really does execute a DuckDB chain query per requested timestamp, but `DailyShortStrangle` already supplies one candidate tick per day in `src/policies/daily_short_strangle.jl`. It does not walk every market minute. Meanwhile spots already have efficient day-block reads. Range-loading chains becomes important for dense policies and historical feature construction, but the proposal correctly calls for a benchmark because the current repo has not yet demonstrated that bottleneck.
+
+#### Strengths
+
+1. **Spec/reader separation is the clearest improvement.**
+
+   Immutable specs fit naturally into `Experiment`, config, hashing, and persistence. Per-run readers fit the lifecycle of `src/experiment/experiment.jl`. This eliminates the brittle special projection currently needed in `to_dict(::ParquetDataSource)`.
+
+2. **The `(observation time, maturity)` distinction for curves is correct.**
+
+   Current `get_rate(ts)` conflates “the curve known at time `t`” with “the curve value for maturity `T`.” A record containing a curve observed at `t`, later evaluated at `T`, is a materially better foundation for historical rates and dividends. It also makes the no-lookahead interpretation clearer than the current passthrough exception in `src/backtest/time_cut.jl`.
+
+3. **Separating vendor bars from quote synthesis is sound.**
+
+   `src/data/parquet_source.jl` currently reads Polygon bars and synthesizes `OptionQuote`s in the same row loop. A `QuotesFromBars` transformation would let a live quote feed serve canonical quotes directly while keeping the OHLCV assumption explicit in experiment identity.
+
+4. **Bounded point and range operations are useful.**
+
+   Retaining bounded discovery preserves the important anti-accidental-scan rule documented in `docs/modules/data.md`. Requiring point and bounded-range access also creates a proper place for storage-specific batching.
+
+5. **The proposal surfaces rule changes explicitly.**
+
+   Its section 6 handles design rule 3 from `docs/design.md` well. Changes to absence semantics, `OptionBar`, curve handling, and module boundaries are stated rather than silently introduced.
+
+6. **The migration includes meaningful validation gates.**
+
+   Comparing saved metrics and `PnLSeries`, plus benchmarking range versus point reads, is the right general shape.
+
+#### Flaws and risks
+
+##### 1. The interval return type does not scale to option chains
+
+The proposal promises:
+
+```julia
+records(source, OptionBar, from, to)::Vector{OptionBar}
+```
+
+A month of minute-level SPY option rows can be enormous. Materializing the entire interval into one vector conflicts with the bounded-memory motivation and with the current bounded-cache policy in `docs/modules/data.md`.
+
+It also loses the natural chain grouping by timestamp. Most consumers want a sequence of timestamped chain blocks, not one flat vector that they must regroup.
+
+The range API should expose a lazy or chunked shape, such as an iterator of `RecordBatch{R}`, daily partitions, or `(timestamp, records)` groups. Point lookup can still return a materialized vector.
+
+##### 2. Cardinality is underspecified
+
+`OptionQuote` is many-valued at a timestamp; `SpotPrice`, `RateCurve`, and `DivCurve` are expected to be exactly one. Returning `Vector{R}` for everything merely moves cardinality enforcement into every consumer:
+
+```julia
+only(records(data, SpotPrice, ts))
+```
+
+The proposal uses `only` inside `SurfaceFrom`, but does not define what duplicates mean, how they are validated, or what error users receive.
+
+The design needs declared cardinality or explicit helpers such as:
+
+```julia
+records_at(...)
+record_at(...)       # exactly zero or one
+required_record_at(...)
+record_asof(...)
+```
+
+Without that, one generic verb creates uniform syntax but not a reliable protocol.
+
+##### 3. Exact timestamp lookup is wrong for several proposed kinds
+
+Splits, dividends, inflation releases, and curve snapshots have more complex time semantics:
+
+- announcement time;
+- publication or ingestion time;
+- effective date;
+- ex-dividend date;
+- curve observation time;
+- maturity time.
+
+An exact `records(..., ts)` operation will often return nothing even though the consumer needs the latest record known as of `ts`. This is especially important for avoiding lookahead around revised macroeconomic data.
+
+The proposal needs an explicit temporal model before claiming these kinds fit the same protocol. At minimum it needs `asof` semantics and a distinction between knowledge time and effective time.
+
+##### 4. Provider ownership forms an ambiguous graph
+
+The config includes `option_bar` as a top-level provider and embeds/references it again beneath `option_quote`. `SurfaceFrom` then contains another `MarketData`. As written, recursively calling `open` can:
+
+- open the same parquet specification more than once;
+- create duplicate DuckDB connections and caches;
+- synthesize duplicate reader subtrees;
+- close a shared dependency more than once if sharing is later introduced.
+
+The proposal calls this an immutable tree, but the conceptual structure is a dependency graph. It needs one owner responsible for opening each distinct provider once, dependency resolution, topological close order, cycle detection, and reuse.
+
+This also undermines the claim that specs are “per storage, not per kind”: `ParquetOptionBars` and `ParquetSpots` are separate specs for two kinds even when they come from the same dataset root. A single dataset/storage spec with multiple typed capabilities may be the better boundary.
+
+##### 5. Derived-provider no-lookahead is only a convention
+
+The invariant that derived providers “may not widen” a query is useful, but unenforced. A derived provider directly holding unrestricted inputs can simply request a later timestamp. Wrapping only the outer `MarketData` in `TimeCut` does not constrain those internal calls.
+
+The current system’s protection is also limited to its supported interface, but `src/backtest/time_cut.jl` makes every supported accessor enforce the cut. In the proposed design, derived providers should receive cut-aware dependency handles, or queries should carry an explicit bounded context that cannot be widened.
+
+There is also a concrete edge case:
+
+```julia
+records(c.inner, R, from, min(to, c.cutoff))
+```
+
+When `from > cutoff`, this forwards an invalid range instead of immediately returning `R[]`.
+
+##### 6. It weakens the raw-data/model-object boundary
+
+`docs/modules/model_data.md` deliberately says raw sources know no math, model objects know no I/O, and builders are where they meet. Putting `OptionBar`, `OptionQuote`, `RateCurve`, `DivCurve`, and `VolSurface` into one undifferentiated provider map erases that distinction.
+
+A volatility surface is not merely another stored record. It is a derived model object whose result depends on quote convention, spot alignment, rate/dividend curves, pricing assumptions, and failure policy.
+
+The generic machinery could be reused on both sides, but the architectural distinction should remain—perhaps as raw `MarketData` plus a model-facing derived view. Dissolving `model_data` is unnecessary to obtain the proposal’s useful extensibility.
+
+##### 7. Making `OptionBar` first-class leaks vendor shape downstream
+
+The current boundary in `docs/modules/data.md` promises canonical records to downstream users and treats `OptionBar` as an adapter representation. Letting experiments request bars directly makes vendor storage details part of the public experiment vocabulary.
+
+Bars may deserve a typed internal provider, but ordinary policies and model builders should generally depend on canonical `OptionQuote`s. Otherwise consumers can accidentally couple themselves to Polygon-specific OHLCV availability.
+
+##### 8. `Flat{R}` has unclear record and timestamp semantics
+
+A constant curve is naturally a timeless model input. Turning it into a provider of timestamped `RateCurve` records raises unanswered questions:
+
+- Does a point request fabricate a record whose timestamp equals the query?
+- What does a range request return—one record, one per tick, or infinitely many conceptual observations?
+- Which timestamp enters experiment identity?
+- Is a flat rate known for the whole run or observed separately at every instant?
+
+The current `FlatCurve` in `src/model_data/curves.jl` is simpler and more honest. Historical curve providers and timeless configured curves should not be forced into identical observational semantics.
+
+##### 9. Absence unification is cosmetically neat but loses useful meaning
+
+Today:
+
+- `nothing` means no aggregate chain/surface;
+- `missing` means an absent scalar or field.
+
+That convention is documented in `docs/modules/data.md` and used consistently by `src/model_data/source.jl` and the engine.
+
+An empty vector is natural for zero-to-many records, but less expressive for required singleton observations. Combined with the missing cardinality rules, it can turn corrupted duplicate data and genuinely absent data into ad hoc consumer checks. Absence should follow operation cardinality rather than forcing every operation into a vector.
+
+##### 10. Identity is not sufficiently canonical
+
+Inlining nested specs may be deterministic, but it does not establish whether two logically identical provider graphs have identical identity. For example, one config could share a bar provider by reference while another spells the same spec twice. The runtime result may be identical while the structural projection differs—or two entries may drift despite supposedly referring to the same source.
+
+Identity needs canonical provider IDs/references and clear rules about:
+
+- repeated specifications;
+- local paths versus logical dataset identity;
+- transformations and their parameters;
+- data version/snapshot identity;
+- ordering;
+- historical-data revisions.
+
+The current implementation already hashes resolved local paths but not the actual parquet dataset version. A redesign is a good opportunity to address that larger reproducibility gap.
+
+##### 11. The execution plan conflicts with design rule 1
+
+The plan says steps 1–5 introduce the new public API, migrate readers, change engine/policy signatures, and rewrite config/identity, while step 6 updates the module docs. That violates rule 1 in `docs/design.md`, which requires module documentation to remain coherent with code on every commit.
+
+Each migration step must update affected module docs in the same commit, even while both systems coexist.
+
+##### 12. Design rule 5 has not yet been satisfied
+
+The proposal acknowledges that Julia ecosystem conventions still need research, but it has already selected a public API shape involving `open`, `close`, trait-like `key(::Type)`, heterogeneous `NamedTuple` dispatch, and record-table semantics.
+
+That research should be completed before accepting the API, not merely before implementation. In particular, the proposal should determine whether interoperability with `Tables.jl` tables/partitions or iterator conventions would solve the range-materialization problem more idiomatically.
+
+#### What is over-engineered?
+
+For the repo’s current one-provider, one-policy state, these pieces are premature:
+
+- A universal provider for arbitrary CSV event kinds.
+- Separate `RateCurve` and `DivCurve` record wrappers before there is a historical curve source.
+- A configurable provider entry for every intermediate representation.
+- Exposing both raw bars and synthesized quotes as independently addressable experiment inputs.
+- Dissolving the entire `model_data` layer.
+- A heterogeneous generic map before multi-asset lookup and key parameterization are designed.
+
+The existing system’s five-file-change argument is somewhat overstated. Some repetition is real, but explicit methods can be valuable when kinds have genuinely different cardinality and time semantics. Eliminating method names is not automatically scalability.
+
+#### What is missing?
+
+Before implementation, the design needs:
+
+- Cardinality contracts for zero/one/many records.
+- Exact versus as-of lookup semantics.
+- Knowledge time versus effective time for event data.
+- Underlying/instrument keys for multi-asset queries; a kind alone is insufficient.
+- Lazy/chunked range results for large option datasets.
+- Provider dependency-graph construction, sharing, cycle detection, and close ordering.
+- Capability validation when constructing `MarketData`, rather than a late `getproperty` failure.
+- Explicit error behavior for missing, duplicate, malformed, and misaligned inputs.
+- Data-version identity, not just provider configuration identity.
+- Tests proving time-cut safety through derived providers.
+- A clear boundary between raw observations and derived mathematical objects.
+- A lifecycle policy for use-after-close and partial failure during `open`.
+- Benchmarks demonstrating that the proposed range reader improves an actual workload.
+
+#### Recommended path
+
+Adopt the valuable changes incrementally:
+
+1. Extract an immutable `ParquetDataSpec` from a run-scoped `ParquetDataReader`, without changing downstream APIs.
+2. Make `run_experiment` open and close readers in `try/finally`.
+3. Move OHLCV-to-quote synthesis into a separate adapter while keeping `OptionQuote` as the canonical public output.
+4. Add a chunked/grouped bounded-range chain API and benchmark it against point queries on a dense workload.
+5. Introduce historical `(t, T)` curve observations only when the first real historical curve source is added.
+6. Prototype a typed `MarketData` capability map once a third genuinely distinct data kind or multi-asset policy requires it.
+7. Preserve a model-facing layer for surface construction even if it internally uses the same provider machinery.
+8. Update module docs alongside every migration commit, as required by `docs/design.md`.
+
+That path captures the real benefits without committing the repository to an overly uniform abstraction before its semantics are established.
+

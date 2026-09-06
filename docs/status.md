@@ -96,8 +96,11 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
   (splits, dividends, rate-curve histories) currently costs a field, a
   verb, a forwarder, a builder, and an identity branch; the parquet
   source fuses its description with its running machinery. Proposal
-  written; execution plan and rule changes are listed in the doc and
-  await a decision.
+  written and reviewed (two independent reviews appended to the doc,
+  section 9). Both recommend adopting the spec/reader split and the
+  synthesis move now as standalone commits and parking the generic
+  kinds/records layer until a second data kind lands. Awaiting a
+  decision.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail
