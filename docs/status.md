@@ -87,20 +87,17 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
 
 ## In flight
 
-- **Data layer redesign (proposal).**
+- **Data layer redesign (proposal v2).**
   [proposals/data_kinds.md](proposals/data_kinds.md) replaces the
   hardcoded `DataSource` / `ModelDataSource` slots with kinds (record
-  types), one `records` verb, per-storage provider specs, run-scoped
-  readers, and derived providers (quote synthesis, surfaces) over an
-  immutable kind-to-provider map. Motivation: every new data need
-  (splits, dividends, rate-curve histories) currently costs a field, a
-  verb, a forwarder, a builder, and an identity branch; the parquet
-  source fuses its description with its running machinery. Proposal
-  written and reviewed (two independent reviews appended to the doc,
-  section 9). Both recommend adopting the spec/reader split and the
-  synthesis move now as standalone commits and parking the generic
-  kinds/records layer until a second data kind lands. Awaiting a
-  decision.
+  types keyed by type), a two-shape protocol (`at`, `between`) with
+  `asof` as a library helper, per-storage provider specs, run-scoped
+  readers, and derived providers (quote synthesis, surfaces) that read
+  through the map they are called from, so the time cut is structural.
+  v1 drew two reviews (appendix A of the doc); v2 answers each finding
+  (section 9). Decided: type-keyed map, selector as a verb argument,
+  lazy `between`, one-time run-id break. Next: step 0 (convention
+  check) then execution on the machine with the data.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail
