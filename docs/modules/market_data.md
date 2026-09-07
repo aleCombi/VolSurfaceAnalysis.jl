@@ -106,7 +106,7 @@ every series in its storage.
   never contain it over a real window.
 
 Specs that need nothing at run time are their own readers (see
-Lifecycle, once it lands).
+Lifecycle).
 
 ## Derived providers
 
@@ -171,6 +171,32 @@ one kind for one selector, enumerated with `timestamps(m, clock, from,
 to)`. The selector is checked against `selector_type(R)` at
 construction and stored concretely typed. The clock is declared per
 experiment and is part of core identity.
+
+## Lifecycle
+
+A reader is the opened form of a spec: it owns what the storage needs
+at run time (a connection, bounded caches, a partition list). Specs that
+need nothing are their own reader. `Experiment` holds the spec map; the
+run opens and closes it.
+
+- **Project-owned pair, no `Any` fallback.** `open_data(spec)` and
+  `close_data!(reader)` are the project's own generics with explicit
+  one-line opt-ins for resource-free specs. A spec without `open_data`
+  fails `has_lifecycle`, which the config loader checks; nothing is
+  silently a no-op. No method is added to `Base.open` / `Base.close`.
+- **Unwind on open failure.** A composite (`MarketData`, `BySelector`)
+  opens its parts in order through a recursive tuple open; a failure
+  closes what was opened, quietly (a close error during the unwind is a
+  warning), so the original error is the one that propagates. The
+  recursive form is also type-stable, so `open_data(m)` infers to the
+  reader map's concrete type.
+- **Best-effort close.** Every part is closed in reverse order even if
+  one throws; the first error is rethrown after the loop.
+- **Scoped form.** `with_data(f, m)` opens, calls `f`, closes. If `f`
+  throws, the close is quiet and `f`'s error propagates; on success a
+  close error propagates normally.
+- **Use after close** is the storage's own error (a closed DuckDB
+  connection throws). The parquet readers add no flag.
 
 ## Naming
 

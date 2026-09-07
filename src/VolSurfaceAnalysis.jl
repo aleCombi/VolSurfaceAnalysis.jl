@@ -15,6 +15,7 @@ include("market_data/map.jl")
 include("market_data/by_selector.jl")
 include("market_data/time_cut.jl")
 include("market_data/clock.jl")
+include("market_data/lifecycle.jl")
 include("model_data/curves.jl")
 include("surfaces/bs.jl")
 include("surfaces/surface.jl")
@@ -53,6 +54,7 @@ export OptionType, Call, Put,
        only_or_missing, by_timestamp,
        InMemory, Constant, QuotesFromBars, inputs,
        MarketData, entry, BySelector, TimeCut, Clock,
+       open_data, close_data!, with_data,
        Curve, FlatCurve, PCCurve,
        VolatilitySurface, RawSurface, ExpirySlice,
        expiries, get_slice, iv, price, delta, gamma, vega, forward,
