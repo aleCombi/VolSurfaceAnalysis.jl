@@ -84,7 +84,10 @@ The `Curve` types themselves (`FlatCurve`, `PCCurve`) live in
 `market_data/curves.jl` and stay pure math. The two-argument
 constructors stamp the start of time, which under the visibility rule
 reads "always known": the `Constant` case, today's flat rate and
-dividend yield. A curve history is the same kind with real timestamps.
+dividend yield. A stamped curve is visible from its stamp and not
+before — in every shape, `asof` included — so an experiment can say
+"this curve became known in June" and a January query sees nothing. A
+curve history is the same kind with real timestamps.
 Snapshot kinds are read with `only_or_missing(asof(...))`, and the
 earlier rate/div time-cut passthrough is gone: a curve snapshot is
 visible or it is not.
@@ -117,10 +120,12 @@ per kind, and the selector is a query argument, so one spec serves
 every series in its storage.
 
 - `InMemory{R}(rows)` — fixtures; rows kept stably sorted by timestamp.
-- `Constant{R}(record)` — one record visible from the start of time,
-  the flat-curve case. `asof` returns it only for its own selector (a
-  constant for SPY says nothing about SPX); `between` and `timestamps`
-  never contain it over a real window.
+- `Constant{R}(record)` — one record visible **from its own
+  timestamp**, the flat-curve case. `asof` returns it only for its own
+  selector (a constant for SPY says nothing about SPX) and only at or
+  after its stamp, so the visibility rule holds for this provider as it
+  does for every other; `between` and `timestamps` never contain it
+  over a real window.
 
 Specs that need nothing at run time are their own readers (see
 Lifecycle).

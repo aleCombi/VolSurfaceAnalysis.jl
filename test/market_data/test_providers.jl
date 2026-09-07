@@ -58,6 +58,22 @@ end
     @test inputs(c) == ()
 end
 
+@testset "Constant: asof honours the visibility stamp" begin
+    stamp = DateTime(2024, 6, 1)
+    rec = RateCurve(_MD_USD, FlatCurve(0.04), stamp)
+    m = MarketData(Constant(rec))
+
+    @test asof(m, RateCurve, _MD_USD, stamp - Millisecond(1)) == RateCurve[]
+    @test asof(m, RateCurve, _MD_USD, stamp) == [rec]
+    @test asof(m, RateCurve, _MD_USD, stamp + Day(30)) == [rec]
+
+    # between / timestamps are unchanged: the stamp must lie inside the range.
+    @test between(m, RateCurve, _MD_USD, stamp, stamp) == [rec]
+    @test between(m, RateCurve, _MD_USD, typemin(DateTime), stamp - Millisecond(1)) == RateCurve[]
+    @test between(m, RateCurve, _MD_USD, stamp + Day(1), stamp + Day(2)) == RateCurve[]
+    @test timestamps(m, RateCurve, _MD_USD, typemin(DateTime), stamp) == [stamp]
+end
+
 @testset "QuotesFromBars: reads OptionBar through the map" begin
     synth = SpreadFromOHLCV(0.7)
     bars = InMemory(_md_bars())

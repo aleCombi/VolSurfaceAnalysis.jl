@@ -44,11 +44,13 @@ timestamps(p::InMemory{R}, ctx, ::Type{R}, sel, from::DateTime, to::DateTime) wh
 """
     Constant{R}(record)
 
-One record, visible from the start of time: `asof` returns it for its
-own selector (`selector(record) == sel`) and nothing for any other;
-`between` and `timestamps` contain it only when the selector matches
-and its timestamp lies in the range, so over any real window they are
-empty. The natural spec for a flat rate or dividend curve.
+One record, visible from its own timestamp -- which the two-argument
+curve constructors stamp at the start of time, so the flat-curve case
+reads "always known". `asof` returns it only for its own selector
+(`selector(record) == sel`) and only at or after its stamp; `between`
+and `timestamps` contain it only when the selector matches and its
+timestamp lies in the range, so over any real window they are empty.
+The natural spec for a flat rate or dividend curve.
 """
 struct Constant{R}
     record::R
@@ -56,8 +58,8 @@ end
 
 kind(::Constant{R}) where {R} = R
 
-asof(c::Constant{R}, ::Any, ::Type{R}, sel, ::DateTime) where {R} =
-    selector(c.record) == sel ? R[c.record] : R[]
+asof(c::Constant{R}, ::Any, ::Type{R}, sel, ts::DateTime) where {R} =
+    (selector(c.record) == sel && c.record.timestamp <= ts) ? R[c.record] : R[]
 
 between(c::Constant{R}, ::Any, ::Type{R}, sel, from::DateTime, to::DateTime) where {R} =
     (selector(c.record) == sel && from <= c.record.timestamp <= to) ? R[c.record] : R[]
