@@ -13,6 +13,7 @@ using Dates
     include("market_data/test_library.jl")
     include("market_data/test_providers.jl")
     include("market_data/test_map.jl")
+    include("market_data/test_by_selector.jl")
     include("market_data/test_time_cut.jl")
     include("market_data/test_clock.jl")
     include("model_data/test_curves.jl")

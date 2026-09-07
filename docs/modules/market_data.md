@@ -139,6 +139,18 @@ context to the provider. Consequences:
 Each distinct provider tuple type compiles once; with one config family
 that is a few seconds. Accepted.
 
+## Composition: `BySelector`
+
+`BySelector{R}(sel => provider, ...)` is "SPY spots from parquet, SPX
+spots from csv" inside the one `SpotPrice` entry. Invariants, checked
+at construction: at least one part, every selector a `selector_type(R)`,
+every part of kind `R`, no duplicate selector. Every shape routes on the
+selector and forwards the context untouched, so a cut or a derived
+provider above it sees no difference; an unknown selector throws
+`KeyError`. Routing on a runtime selector yields a small union of part
+types whose shapes all return the same record type, which keeps call
+sites inferable (union-split routing; measured in proposal section 10).
+
 ## Time cut
 
 `TimeCut(m, cutoff)` masks every shape at the cutoff and passes

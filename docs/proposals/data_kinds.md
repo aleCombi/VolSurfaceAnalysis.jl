@@ -517,8 +517,29 @@ benchmark are filled as their commits land (1.3, 2.2, 2.4).
 
 ### 10.5 Measured inference
 
-Filled at commit 1.3 (`@inferred entry`, `BySelector` routing) and
-revisited at 2.2 on a config-built map.
+Commit 1.3, Julia 1.12.7, on a map whose one `SpotPrice` entry is a
+two-part heterogeneous `BySelector` (`SPY => InMemory{SpotPrice}`,
+`SPX => Constant{SpotPrice}`), the case union-split routing has to
+handle:
+
+- `@code_warntype entry(m, SpotPrice)`: body typed
+  `BySelector{SpotPrice, Tuple{Pair{Underlying, InMemory{SpotPrice}},
+  Pair{Underlying, Constant{SpotPrice}}}}`, the tuple walk reduced to
+  one `_apply_iterate` of `_entry` with the kind as `Core.Const`; no
+  `Any`, no `Union`. `@allocated entry(m, SpotPrice) == 0`.
+- `@code_warntype at(m, SpotPrice, SPY, t)`: body `Vector{SpotPrice}`;
+  the routed provider call `at(%entry, m, SpotPrice, sel, ts)` infers
+  `Vector{SpotPrice}` even though `_route` yields
+  `Union{InMemory{SpotPrice}, Constant{SpotPrice}}` at run time,
+  because every branch returns the same record vector type.
+  `@allocated` is 240 bytes, the result vector itself.
+- `Base.return_types` for `at`, `asof` on `(typeof(m), Type{SpotPrice},
+  Underlying, DateTime)` are each `[Vector{SpotPrice}]`, and for `entry`
+  the concrete part type. These three are pinned by
+  `test/market_data/test_by_selector.jl`.
+
+Revisited at commit 2.2 on the config-built map (`open_data` return
+type, `@allocated entry`).
 
 ### 10.6 Naming and layout
 
