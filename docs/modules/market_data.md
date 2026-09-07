@@ -91,6 +91,75 @@ Ordinary functions over protocol results, not part of the protocol:
   ahead, so it composes with a lazy `between` without materializing the
   range. Unsorted input throws.
 
+## Provider specs
+
+A spec is an immutable value describing *where* records of one kind
+come from: what config builds, identity hashes, persistence writes. It
+holds no resources and answers `kind(spec)`. Specs are per storage, not
+per kind, and the selector is a query argument, so one spec serves
+every series in its storage.
+
+- `InMemory{R}(rows)` — fixtures; rows kept stably sorted by timestamp.
+- `Constant{R}(record)` — one record visible from the start of time,
+  the flat-curve case. `asof` returns it only for its own selector (a
+  constant for SPY says nothing about SPX); `between` and `timestamps`
+  never contain it over a real window.
+
+Specs that need nothing at run time are their own readers (see
+Lifecycle, once it lands).
+
+## Derived providers
+
+A derived provider serves a kind by reading other kinds **through the
+map it is called from**. It holds only its own parameters, never its
+inputs, and declares them with `inputs(spec)` so the loader can check
+they are present. `QuotesFromBars(synthesizer)` is the first: it serves
+`OptionQuote` from the map's `OptionBar` entry, which moves OHLCV-to-
+quote synthesis out of the storage reader. The parquet reader becomes
+vendor-only code; a future feed that has quotes serves `OptionQuote`
+directly and `QuotesFromBars` is simply not configured. Policies depend
+on `OptionQuote`; `OptionBar` is addressable but vendor-level.
+
+## The map
+
+`MarketData` is an immutable tuple of providers, one per kind, looked
+up by type (`entry(m, R)`); lookup over a concrete tuple folds at
+compile time. Every map-level shape passes the map itself as the
+context to the provider. Consequences:
+
+- **One reader per entry.** Every read of `OptionBar`, whether from the
+  quote provider, the surface provider or the engine, reaches the one
+  `OptionBar` entry, so one connection and one cache serve them all.
+- **No ordering at open.** Derived providers resolve on each call.
+- **What an experiment gets** is the set of kinds in its map. A kind not
+  provided fails at `entry`, with the kind's name.
+- One entry per kind is deliberate. Comparing two synthesizers or two
+  surface conventions is two runs, which is what the run store is for.
+
+Each distinct provider tuple type compiles once; with one config family
+that is a few seconds. Accepted.
+
+## Time cut
+
+`TimeCut(m, cutoff)` masks every shape at the cutoff and passes
+**itself** down as the context, so a derived provider's input reads go
+through the cut. No-lookahead through derived data is therefore
+structural: the provider was handed the cut and can see nothing else.
+Because `timestamp` is visibility time, the cut is the complete
+no-lookahead rule.
+
+Derived caches stay cut-independent by one invariant: a derived
+provider reads its inputs at or before the requested `ts`, so a cache
+entry keyed on `(sel, ts)` is valid under any cutoff `>= ts`.
+
+## Clock
+
+`Clock{R}(sel)` names the grid the engine ticks on: the timestamps of
+one kind for one selector, enumerated with `timestamps(m, clock, from,
+to)`. The selector is checked against `selector_type(R)` at
+construction and stored concretely typed. The clock is declared per
+experiment and is part of core identity.
+
 ## Naming
 
 `between` is the project's own generic function. `Base.between`

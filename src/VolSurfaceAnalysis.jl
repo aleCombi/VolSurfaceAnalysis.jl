@@ -10,6 +10,10 @@ include("data/parquet_source.jl")
 include("market_data/kinds.jl")
 include("market_data/protocol.jl")
 include("market_data/library.jl")
+include("market_data/providers.jl")
+include("market_data/map.jl")
+include("market_data/time_cut.jl")
+include("market_data/clock.jl")
 include("model_data/curves.jl")
 include("surfaces/bs.jl")
 include("surfaces/surface.jl")
@@ -46,6 +50,8 @@ export OptionType, Call, Put,
        Currency, selector, selector_type,
        at, between, asof, timestamps, kind,
        only_or_missing, by_timestamp,
+       InMemory, Constant, QuotesFromBars, inputs,
+       MarketData, entry, TimeCut, Clock,
        Curve, FlatCurve, PCCurve,
        VolatilitySurface, RawSurface, ExpirySlice,
        expiries, get_slice, iv, price, delta, gamma, vega, forward,
