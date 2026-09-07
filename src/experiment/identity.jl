@@ -167,8 +167,8 @@ _hash16(s::AbstractString) = bytes2hex(sha2_256(codeunits(s)))[1:_IDENTITY_HEX_L
 """
     core_hash(exp::Experiment) -> String
 
-16-hex content hash of the backtest-determining inputs (source, agent,
-window). Identical across experiments that differ only in outputs
+16-hex content hash of the backtest-determining inputs (data, clock,
+agent, window). Identical across experiments that differ only in outputs
 (metrics / artifacts) or in the human `name`. This is the key for
 recognising that two experiments share a backtest.
 """

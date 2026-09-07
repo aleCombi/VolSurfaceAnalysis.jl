@@ -223,8 +223,8 @@ identity (the reserved `dataset` slot of the parquet specs), so the
 same config on a machine with the data elsewhere is a distinct run.
 
 New concrete types register themselves by adding one entry to the
-relevant builder table (`_CURVE_BUILDERS`, `_SYNTHESIZER_BUILDERS`,
-`_POLICY_BUILDERS`, `_AGENT_BUILDERS`) -- same pattern as
+relevant builder table (`_PROVIDER_BUILDERS`, `_CURVE_BUILDERS`,
+`_SYNTHESIZER_BUILDERS`, `_POLICY_BUILDERS`, `_AGENT_BUILDERS`) -- same pattern as
 `_METRIC_TABLE` in [`metrics`](metrics.md). A new sum-type also needs a
 `to_dict` method (`identity.jl`) so it contributes to the run hashes; a
 new provider spec needs `kind`, `inputs` (if derived), a lifecycle

@@ -130,7 +130,7 @@ surface builder.
 
 **Does NOT own:**
 
-- Raw chain access (that is `data`).
+- Raw chain access (that is `market_data`).
 - Storage. `SurfaceFrom` reads its inputs through the `market_data`
   map and evaluates the curve records it is handed; where quotes,
   spots and curves come from is the map's business.
