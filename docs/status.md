@@ -103,8 +103,15 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
   DevBox, where the data is. **Step 0 done** (2026-09-07): baseline run
   `4647bcfa219d0cfb` saved under `scripts/runs/` on the DevBox with
   `dirty=false`, `scripts/compare_runs.jl` as the reproduction gate,
-  convention check recorded in proposal section 10. Next: step 1, the
-  new `market_data` layer beside the old.
+  convention check recorded in proposal section 10. **Step 1 done**
+  (2026-09-07): the `market_data` layer is complete beside the old one
+  (kinds and selectors, the four shapes, `MarketData`, `TimeCut`,
+  `Clock`, `BySelector`, lifecycle with unwind, parquet readers with
+  the partition convention, curve kinds, `SurfaceFrom`), all tested
+  including a real-day cross-check against `ParquetDataSource`; nothing
+  downstream reads it yet. Next: step 2, consumers switch (engine,
+  policies, experiment, config, identity), gated on reproducing the
+  baseline.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail

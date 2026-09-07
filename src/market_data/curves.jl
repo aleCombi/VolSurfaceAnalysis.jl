@@ -56,3 +56,40 @@ function (c::PCCurve)(ts::DateTime)
     i == 0 && return c.values[1]
     return c.values[i]
 end
+
+# --- curve kinds ------------------------------------------------------------
+# A curve as a market-data record: the curve *as of* `timestamp` (visibility
+# time), evaluated at a maturity by calling it. Snapshot kinds: they hold
+# until superseded, so consumers read them with `only_or_missing(asof(...))`.
+# The two-argument constructors stamp the start of time, the `Constant` case.
+
+"""
+    RateCurve(currency, curve[, timestamp])
+
+The rate `Curve` for `currency` as of `timestamp` (visibility time;
+defaults to the start of time, "always known"). Selector: the currency.
+"""
+struct RateCurve
+    currency::Currency
+    curve::Curve
+    timestamp::DateTime
+end
+RateCurve(currency::Currency, curve::Curve) = RateCurve(currency, curve, typemin(DateTime))
+
+"""
+    DivCurve(underlying, curve[, timestamp])
+
+The dividend-yield `Curve` for `underlying` as of `timestamp`. Selector:
+the underlying.
+"""
+struct DivCurve
+    underlying::Underlying
+    curve::Curve
+    timestamp::DateTime
+end
+DivCurve(underlying::Underlying, curve::Curve) = DivCurve(underlying, curve, typemin(DateTime))
+
+selector(r::RateCurve) = r.currency
+selector(r::DivCurve)  = r.underlying
+selector_type(::Type{RateCurve}) = Currency
+selector_type(::Type{DivCurve})  = Underlying

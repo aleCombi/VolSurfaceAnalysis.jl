@@ -39,7 +39,9 @@ returns `Float64`. Math operations (parallel shifts, bumps for
 greeks, forwards between two dates) will live on `Curve` as they
 appear; not in this initial slice.
 
-Concrete subtypes today (`src/model_data/curves.jl`):
+Concrete subtypes today (`src/market_data/curves.jl`, moved there at
+step 1.6 of the data-kinds plan, where `RateCurve` / `DivCurve` wrap
+them as market-data records):
 
 - `FlatCurve(value)` -- constant. `(c)(ts) = c.value`.
 - `PCCurve(knots, values)` -- piecewise constant. Lookup via
@@ -166,20 +168,21 @@ methods.
 
 ## Layout
 
-Per Julia community conventions (no submodules unless required):
-
 ```
-src/model_data/
-    curves.jl     # Curve, FlatCurve, PCCurve
-    source.jl     # ModelDataSource + accessors
-
-test/model_data/
-    test_curves.jl
-    test_source.jl
+src/market_data/curves.jl   # Curve, FlatCurve, PCCurve (+ RateCurve, DivCurve kinds)
+src/model_data/source.jl    # ModelDataSource (this module's remaining file)
+test/market_data/test_curves.jl
+test/model_data/test_source.jl
 ```
 
-All files are `include`d into the top-level `VolSurfaceAnalysis`
+Files are `include`d directly into the top-level `VolSurfaceAnalysis`
 module. No `module Curves` / `module ModelData` wrappers.
+
+**Scheduled for deletion.** This module is replaced by the
+[`market_data`](market_data.md) map plus the `SurfaceFrom` derived
+provider (the new layer is complete beside it since step 1 of the
+data-kinds plan); `ModelDataSource`, `TimeCutModelDataSource` and this
+doc are removed at step 3, once the consumers have switched.
 
 ## Failure modes
 

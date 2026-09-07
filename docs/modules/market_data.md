@@ -79,6 +79,27 @@ kinds with one record per instant (`SpotPrice`) use
 (curves) use `only_or_missing(asof(...))`; event kinds use `between`
 over a bounded lookback and filter on the effective field.
 
+## Curve kinds
+
+`RateCurve(currency, curve[, timestamp])` and `DivCurve(underlying,
+curve[, timestamp])` are `(t, T)`-dependent records: the `Curve` as of
+the visibility time `timestamp`, evaluated at a maturity by calling it.
+The `Curve` types themselves (`FlatCurve`, `PCCurve`) live in
+`market_data/curves.jl` and stay pure math. The two-argument
+constructors stamp the start of time, which under the visibility rule
+reads "always known": the `Constant` case, today's flat rate and
+dividend yield. A curve history is the same kind with real timestamps.
+Snapshot kinds are read with `only_or_missing(asof(...))`, and the
+earlier rate/div time-cut passthrough is gone: a curve snapshot is
+visible or it is not.
+
+| kind | shape | natural call |
+|---|---|---|
+| `OptionQuote`, `OptionBar` | grid, many per instant | `at` |
+| `SpotPrice`, `VolatilitySurface` | grid, one per instant | `only_or_missing(at(...))` |
+| `RateCurve`, `DivCurve` | snapshot, holds until superseded | `only_or_missing(asof(...))` |
+| event kinds (future) | bounded lookback | `between`, then filter on the effective field |
+
 ## Library
 
 Ordinary functions over protocol results, not part of the protocol:
@@ -138,6 +159,9 @@ context to the provider. Consequences:
 
 Each distinct provider tuple type compiles once; with one config family
 that is a few seconds. Accepted.
+
+The second derived provider, `SurfaceFrom`, lives with the
+[`surfaces`](surfaces.md) module it builds for.
 
 ## Composition: `BySelector`
 

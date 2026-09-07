@@ -59,3 +59,30 @@ end
     struct _DummyCurve <: Curve end
     @test_throws ErrorException _DummyCurve()(DateTime(2024, 1, 1))
 end
+
+# ---------- curve kinds ----------
+
+@testset "RateCurve / DivCurve: kinds with a visibility time and a selector" begin
+    rc = RateCurve(_MD_USD, FlatCurve(0.04))
+    dc = DivCurve(_MD_SPY, FlatCurve(0.015))
+    @test rc.timestamp == typemin(DateTime) && dc.timestamp == typemin(DateTime)
+    @test rc.curve(_MD_T1) == 0.04 && dc.curve(_MD_T1) == 0.015
+    @test selector(rc) === _MD_USD && selector(dc) === _MD_SPY
+    @test selector_type(RateCurve) === Currency && selector_type(DivCurve) === Underlying
+    stamped = RateCurve(_MD_USD, PCCurve([_MD_T1], [0.05]), _MD_T2)
+    @test stamped.timestamp == _MD_T2
+    @test_throws MethodError RateCurve(_MD_SPY, FlatCurve(0.04))       # selector type enforced by the field
+    @test Clock{RateCurve}(_MD_USD) isa Clock{RateCurve,Currency}
+    @test_throws ArgumentError Clock{RateCurve}(_MD_SPY)
+end
+
+@testset "Constant{RateCurve}: the flat-curve case on the protocol" begin
+    m = MarketData(Constant(RateCurve(_MD_USD, FlatCurve(0.04))), Constant(DivCurve(_MD_SPY, FlatCurve(0.015))))
+    @test only_or_missing(asof(m, RateCurve, _MD_USD, _MD_T1)).curve(_MD_T1) == 0.04
+    @test asof(m, RateCurve, Currency("EUR"), _MD_T1) == RateCurve[]
+    @test only_or_missing(asof(m, DivCurve, _MD_SPY, _MD_T1)).curve(_MD_T3) == 0.015
+    @test asof(m, DivCurve, _MD_SPX, _MD_T1) == DivCurve[]
+    @test timestamps(m, RateCurve, _MD_USD, _MD_T1, _MD_T3) == DateTime[]
+    @test collect(between(m, DivCurve, _MD_SPY, _MD_T1, _MD_T3)) == DivCurve[]
+    @test asof(TimeCut(m, _MD_T1), RateCurve, _MD_USD, _MD_T3) == asof(m, RateCurve, _MD_USD, _MD_T1)
+end

@@ -65,6 +65,33 @@ mark-price convention (`ParquetDataSource`'s output). The seam for
 multi-vendor support is a future `QuoteConvention` trait on the
 chain source.
 
+## `SurfaceFrom`: the derived provider
+
+`SurfaceFrom(; currency, spot_for)` is the [`market_data`](market_data.md)
+provider that serves `VolatilitySurface`. It holds only its parameters:
+the currency that selects the `RateCurve`, and an optional `spot_for`
+remap naming whose `SpotPrice` prices a surface (e.g. `SPY => SPX`).
+Its inputs, `OptionQuote`, `SpotPrice`, `RateCurve`, `DivCurve`, are
+read through the map it is called from, so a time cut handed as the
+context bounds everything it can see. It evaluates the curves at the
+surface's timestamp and calls `build_surface`.
+
+- **Failure is empty.** An absent chain, spot or curve, or a build
+  with no surviving expiry, yields an empty result, and the empty
+  result is cached so absence is not retried.
+- **Bounded cache, cut-independent.** The reader caches surfaces per
+  `(underlying, timestamp)` in a bounded LRU. Every input read is at
+  or before the requested timestamp, so an entry is valid under any
+  cutoff at or after it: the same surface object comes back through
+  the bare map and through any cut, and a cut's mask never reaches the
+  cache.
+- Shapes follow the quote grid: `timestamps` and `between` enumerate
+  the `OptionQuote` timestamps, `asof` builds at the latest visible
+  quote timestamp.
+
+`selector(surface)` is its underlying, so `VolatilitySurface` is a kind
+like any other; the loader's name for it is `"vol_surface"`.
+
 ## BS helpers (`src/surfaces/bs.jl`)
 
 Self-contained Black-Scholes with continuous dividend yield. Inputs
@@ -104,8 +131,9 @@ surface builder.
 **Does NOT own:**
 
 - Raw chain access (that is `data`).
-- Composition with rate/div curves at a specific `ts` (that is
-  `model_data` -- it evaluates curves and hands the scalars here).
+- Storage. `SurfaceFrom` reads its inputs through the `market_data`
+  map and evaluates the curve records it is handed; where quotes,
+  spots and curves come from is the map's business.
 - Strategy logic, position pricing as a whole portfolio, P&L --
   downstream.
 
