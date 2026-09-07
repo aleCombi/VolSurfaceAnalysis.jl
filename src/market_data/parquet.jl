@@ -384,6 +384,28 @@ function _append_spots!(out::Vector{SpotPrice}, u::Underlying, b::SpotBlock, fro
     out
 end
 
+# Spots are a snapshot kind, read through `only_or_missing`, so two rows
+# at one instant abort the read. Two ways to get there without anyone
+# writing bad code: a vendor re-delivers a minute into one partition, or
+# the same after-midnight row lands in both a partition's spill and the
+# next partition's body. Equal price collapses -- there is no information
+# to lose; a disagreement throws, because taking the first is a silent
+# choice between two answers.
+function _collapse_duplicates!(out::Vector{SpotPrice}, u::Underlying)
+    isempty(out) && return out
+    w = 1
+    for i in 2:length(out)
+        prev, cur = out[w], out[i]
+        if cur.timestamp == prev.timestamp
+            cur.price == prev.price && continue
+            throw(ConflictingRecords(SpotPrice, u, cur.timestamp, prev.price, cur.price))
+        end
+        w += 1
+        out[w] = cur
+    end
+    resize!(out, w)
+end
+
 function between(r::ParquetSpotsReader, ::Any, ::Type{SpotPrice}, u::Underlying,
                  from::DateTime, to::DateTime)
     _assert_open(r)
@@ -393,7 +415,7 @@ function between(r::ParquetSpotsReader, ::Any, ::Type{SpotPrice}, u::Underlying,
         _append_spots!(out, u, _block(r, u, d), from, to)
     end
     issorted(out; by = s -> s.timestamp) || sort!(out; by = s -> s.timestamp)
-    out
+    _collapse_duplicates!(out, u)
 end
 
 function asof(r::ParquetSpotsReader, ::Any, ::Type{SpotPrice}, u::Underlying, ts::DateTime)
@@ -419,5 +441,5 @@ function timestamps(r::ParquetSpotsReader, ::Any, ::Type{SpotPrice}, u::Underlyi
         append!(out, view(t, searchsortedfirst(t, from):searchsortedlast(t, to)))
     end
     issorted(out) || sort!(out)
-    out
+    unique!(out)                    # the grid is distinct instants, as InMemory's is
 end

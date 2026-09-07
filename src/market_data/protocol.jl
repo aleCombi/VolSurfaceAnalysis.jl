@@ -73,3 +73,29 @@ function kind end
 
 at(p, ctx, ::Type{R}, sel, ts::DateTime) where {R} =
     collect(R, between(p, ctx, R, sel, ts, ts))
+
+# --- Errors ---------------------------------------------------------------
+#
+# Named failures for the questions the protocol cannot answer with an
+# empty result. Empty is reserved for "served, and nothing at this
+# instant"; everything else has a type and says enough to fix the cause.
+
+"""
+    ConflictingRecords(kind, selector, timestamp, a, b)
+
+Two records of `kind` for `selector` at the same `timestamp` disagree.
+Exact duplicates collapse silently; a store that disagrees with itself
+about a value is worth stopping for, because taking the first is a
+silent choice between two answers.
+"""
+struct ConflictingRecords <: Exception
+    kind      :: Type
+    selector  :: Any
+    timestamp :: DateTime
+    a         :: Any
+    b         :: Any
+end
+
+Base.showerror(io::IO, e::ConflictingRecords) = print(io,
+    "ConflictingRecords: two $(e.kind) records for $(e.selector) at $(e.timestamp) ",
+    "disagree ($(e.a) vs $(e.b))")

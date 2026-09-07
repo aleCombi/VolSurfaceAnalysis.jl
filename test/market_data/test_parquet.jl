@@ -164,6 +164,56 @@ mktempdir() do root
 
 end
 
+# ---------- spot duplicates: collapse identical, throw on conflict ----------
+# Its own small tree rather than the shared fixture, so the assertions above
+# keep describing a store with no duplicates.
+
+mktempdir() do root
+    spots = joinpath(root, "spots_1min")
+    t1 = DateTime(2024, 1, 15, 15, 30)
+    spill = DateTime(2024, 1, 16, 0, 30)
+    t2 = DateTime(2024, 1, 16, 15, 30)
+    # t1 delivered twice inside one partition; the spill row present in both
+    # the 01-15 partition (per the convention) and the 01-16 body.
+    _md_write_spot_parquet(joinpath(spots, "date=2024-01-15", "symbol=SPY", "data.parquet"),
+                           [t1, t1, spill], [480.0, 480.0, 480.7])
+    _md_write_spot_parquet(joinpath(spots, "date=2024-01-16", "symbol=SPY", "data.parquet"),
+                           [spill, t2], [480.7, 481.0])
+
+    @testset "parquet spots: identical duplicates collapse, in and across partitions" begin
+        with_data(MarketData(ParquetSpots(spots))) do d
+            @test only_or_missing(at(d, SpotPrice, _MD_SPY, t1)).price == 480.0
+            @test only_or_missing(at(d, SpotPrice, _MD_SPY, spill)).price == 480.7
+            out = between(d, SpotPrice, _MD_SPY, t1, t2)
+            @test [s.timestamp for s in out] == [t1, spill, t2]
+            @test [s.price for s in out] == [480.0, 480.7, 481.0]
+            @test timestamps(d, SpotPrice, _MD_SPY, t1, t2) == [t1, spill, t2]
+        end
+    end
+end
+
+mktempdir() do root
+    spots = joinpath(root, "spots_1min")
+    t = DateTime(2024, 1, 15, 15, 30)
+    _md_write_spot_parquet(joinpath(spots, "date=2024-01-15", "symbol=SPY", "data.parquet"),
+                           [t, t], [480.0, 481.0])
+
+    @testset "parquet spots: two prices at one instant throw ConflictingRecords" begin
+        with_data(MarketData(ParquetSpots(spots))) do d
+            @test_throws ConflictingRecords at(d, SpotPrice, _MD_SPY, t)
+            @test_throws ConflictingRecords between(d, SpotPrice, _MD_SPY, t, t)
+            err = try
+                at(d, SpotPrice, _MD_SPY, t)
+            catch e
+                e
+            end
+            msg = sprint(showerror, err)
+            @test occursin("480.0", msg) && occursin("481.0", msg)
+            @test occursin("SPY", msg) && occursin(string(t), msg)
+        end
+    end
+end
+
 # ---------- volume / OHLC absent, ticker mismatch, parsed_* authoritative ----------
 
 mktempdir() do root

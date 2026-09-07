@@ -261,6 +261,22 @@ makes `at == collect(between(ts, ts))` an identity rather than a
 coincidence. A ticker whose underlying is not the partition's throws:
 under `symbol=` partitioning that is a corrupt store.
 
+*Spot de-duplication.* Consulting two partitions means the same row can
+be read twice — the convention permits an after-midnight row in both
+the earlier partition's spill and the later partition's body — and a
+vendor can re-deliver a minute into one partition. Spots are a snapshot
+kind read through `only_or_missing`, so either one would abort the read.
+The spot reader therefore applies one rule after its sort: **equal
+timestamp and equal price collapse silently; equal timestamp and
+different price throws `ConflictingRecords`**, naming the instant and
+both values. Taking the first would be a silent choice between two
+answers, on a number nobody verified. `timestamps` on the same reader is
+made distinct for the same reason.
+
+Bars are left alone deliberately. A chain has many rows per timestamp by
+design, so its de-duplication key is the contract, not the instant, and
+what "conflicting" means over six fields is a separate question.
+
 *Bar-time allowance.* Rows carry Polygon's bar-open stamp, kept as the
 visibility time (see Kinds).
 
