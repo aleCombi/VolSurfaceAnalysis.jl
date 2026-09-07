@@ -43,6 +43,7 @@ Four shapes, each in two arities:
 | range | `between(m, R, sel, from, to) -> iterable of R` | `between(p, ctx, R, sel, from, to)` |
 | latest visible | `asof(m, R, sel, ts) -> Vector{R}` | `asof(p, ctx, R, sel, ts)` |
 | grid | `timestamps(m, R, sel, from, to) -> Vector{DateTime}` | `timestamps(p, ctx, R, sel, from, to)` |
+| served? | `serves(m, R, sel) -> Union{Bool,Missing}` | `serves(p, ctx, R, sel)` |
 
 `ctx` is the map (or cut) the call came through. Raw providers ignore
 it, derived providers read their inputs through it, composition
@@ -53,9 +54,38 @@ Rules:
 - Results are sorted by `timestamp`. `at` and `between` return only
   records in range; `asof` returns every record at the largest visible
   timestamp `<= ts` (a whole chain for grid kinds, one record for a
-  snapshot kind). **Empty means absent** for all four shapes; no shape
-  returns `missing`, which is reserved for absent scalar fields inside
-  a record.
+  snapshot kind). No shape returns `missing`, which is reserved for
+  absent scalar fields inside a record.
+- **Empty means temporal absence only**, and every other unanswerable
+  question has a name. A consumer that cannot tell "not yet" from "not
+  ever" correctly concludes it has nothing to do, and the run completes
+  with no positions and no diagnostic:
+
+  | state | result |
+  |---|---|
+  | nothing serves this selector | throws `UnservedSelector` (structural) |
+  | served, nothing at this instant | empty (temporal) — the only legitimate case |
+  | two rows, two answers | throws `ConflictingRecords` |
+
+  `serves(m, R, sel)` is the shape that answers the structural question,
+  and the four map-level shapes on `MarketData` and on `TimeCut` check it
+  before doing anything else. Structural beats temporal: an unserved
+  selector throws even for a query past a cut's cutoff.
+- `serves` is **three-valued**. `true` and `false` are answers; `missing`
+  is "cannot say", and it is required. A parquet *spec* cannot answer
+  without walking a tree it has not opened, and a **derived provider does
+  not answer at all** — it delegates, so its input's error propagates and
+  the failure names the real cause (a surface asked for SPX reports
+  `OptionBar`/SPX unserved, not "no surface"). `missing` is also the
+  default, so a provider with no method opts out rather than breaking.
+  Providers answering `false` also implement `served_description`, which
+  puts what the entry *does* serve into the message: a bare key error
+  naming only the selector does not say enough to fix a config.
+- The check lives at the map level, not inside each provider's four
+  shapes: that would be sixteen call sites and would also fire on the
+  provider-level delegation `BySelector` and `QuotesFromBars` already do.
+  Provider-level calls (`at(p, ctx, R, sel, ts)`) are therefore
+  unchecked, which is the arity internal delegation and tests use.
 - `between` promises an iterable, not a container. Large providers
   yield lazily, one partition in memory at a time; the iterator is
   valid only while its reader is open.
@@ -120,12 +150,16 @@ per kind, and the selector is a query argument, so one spec serves
 every series in its storage.
 
 - `InMemory{R}(rows)` — fixtures; rows kept stably sorted by timestamp.
+  Its rows are the whole world, so it serves exactly the selectors they
+  carry and an empty one serves nothing.
 - `Constant{R}(record)` — one record visible **from its own
   timestamp**, the flat-curve case. `asof` returns it only for its own
   selector (a constant for SPY says nothing about SPX) and only at or
   after its stamp, so the visibility rule holds for this provider as it
   does for every other; `between` and `timestamps` never contain it
-  over a real window.
+  over a real window. It serves one selector, so `Constant` expresses all
+  three states without overlap: another selector throws, its own selector
+  before the stamp is empty, at or after the stamp is the record.
 
 Specs that need nothing at run time are their own readers (see
 Lifecycle).
@@ -171,8 +205,10 @@ spots from csv" inside the one `SpotPrice` entry. Invariants, checked
 at construction: at least one part, every selector a `selector_type(R)`,
 every part of kind `R`, no duplicate selector. Every shape routes on the
 selector and forwards the context untouched, so a cut or a derived
-provider above it sees no difference; an unknown selector throws
-`KeyError`. Routing on a runtime selector yields a small union of part
+provider above it sees no difference. Its routes are the whole world for
+that entry, so a selector with no route is structural absence and throws
+`UnservedSelector` naming the routes there are; a route that exists
+delegates the question to the part it routes to. Routing on a runtime selector yields a small union of part
 types whose shapes all return the same record type, which keeps call
 sites inferable (union-split routing; measured in proposal section 10).
 
@@ -252,6 +288,10 @@ synthesis is `QuotesFromBars` above the reader.
   called once per run in practice.
 - **`timestamps`** is the cached per-partition lists intersected with
   the range; a partition absent from the list costs no file probe.
+- **`serves`** is `!isempty(partition list)`: an empty `date=` list means
+  the tree holds nothing for that symbol at any instant. The specs answer
+  `missing` — the tree is not open yet, and a spec is what an
+  `Experiment` and the config loader hold.
 
 *Partition convention.* A partition `D` may hold any timestamp in
 `[D 00:00, D+1 02:00)` UTC: the collector writes a US session into its

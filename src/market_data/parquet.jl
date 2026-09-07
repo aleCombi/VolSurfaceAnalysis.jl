@@ -62,6 +62,15 @@ end
 kind(::ParquetOptionBars) = OptionBar
 kind(::ParquetSpots) = SpotPrice
 
+# A spec cannot answer the structural question: the partition list is a
+# readdir walk over a tree that is not open yet, and `build_market_data`
+# holds specs. The readers can, and do.
+serves(::ParquetOptionBars, ::Any, ::Type{OptionBar}, ::Any) = missing
+serves(::ParquetSpots, ::Any, ::Type{SpotPrice}, ::Any) = missing
+
+served_description(s::ParquetOptionBars) = "ParquetOptionBars under $(s.root)"
+served_description(s::ParquetSpots) = "ParquetSpots under $(s.root)"
+
 # --- partitions -----------------------------------------------------------
 
 _partition_path(root::AbstractString, u::Underlying, d::Date) = joinpath(
@@ -170,6 +179,14 @@ end
 
 _partitions(r::ParquetBarsReader, u::Underlying) =
     get!(() -> _list_partitions(r.spec.root, u), r.partitions, u)
+
+# An empty date= list means the tree holds nothing for this symbol at any
+# instant. The list is already cached per selector, so this costs one
+# readdir per underlying per reader.
+serves(r::ParquetBarsReader, ::Any, ::Type{OptionBar}, u::Underlying) =
+    !isempty(_partitions(r, u))
+served_description(r::ParquetBarsReader) =
+    "ParquetOptionBars under $(r.spec.root), with no date= partition holding a file for it"
 
 # Only called for dates in the partition list, so no per-day isfile.
 _meta(r::ParquetBarsReader, u::Underlying, d::Date)::PartitionMeta =
@@ -379,6 +396,11 @@ end
 
 _partitions(r::ParquetSpotsReader, u::Underlying) =
     get!(() -> _list_partitions(r.spec.root, u), r.partitions, u)
+
+serves(r::ParquetSpotsReader, ::Any, ::Type{SpotPrice}, u::Underlying) =
+    !isempty(_partitions(r, u))
+served_description(r::ParquetSpotsReader) =
+    "ParquetSpots under $(r.spec.root), with no date= partition holding a file for it"
 
 # Rows without a close are dropped: a spot without a price is no observation.
 function _load_spot_block(con::DuckDB.DB, path::AbstractString)::SpotBlock

@@ -79,9 +79,9 @@ end
 @testset "Constant{RateCurve}: the flat-curve case on the protocol" begin
     m = MarketData(Constant(RateCurve(_MD_USD, FlatCurve(0.04))), Constant(DivCurve(_MD_SPY, FlatCurve(0.015))))
     @test only_or_missing(asof(m, RateCurve, _MD_USD, _MD_T1)).curve(_MD_T1) == 0.04
-    @test asof(m, RateCurve, Currency("EUR"), _MD_T1) == RateCurve[]
+    @test_throws UnservedSelector asof(m, RateCurve, Currency("EUR"), _MD_T1)
     @test only_or_missing(asof(m, DivCurve, _MD_SPY, _MD_T1)).curve(_MD_T3) == 0.015
-    @test asof(m, DivCurve, _MD_SPX, _MD_T1) == DivCurve[]
+    @test_throws UnservedSelector asof(m, DivCurve, _MD_SPX, _MD_T1)
     @test timestamps(m, RateCurve, _MD_USD, _MD_T1, _MD_T3) == DateTime[]
     @test collect(between(m, DivCurve, _MD_SPY, _MD_T1, _MD_T3)) == DivCurve[]
     @test asof(TimeCut(m, _MD_T1), RateCurve, _MD_USD, _MD_T3) == asof(m, RateCurve, _MD_USD, _MD_T1)

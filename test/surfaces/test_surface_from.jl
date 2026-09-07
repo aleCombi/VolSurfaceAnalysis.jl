@@ -53,6 +53,11 @@ end
     s = SurfaceFrom(currency=_MD_USD)
     @test kind(s) === VolatilitySurface
     @test inputs(s) == (OptionQuote, SpotPrice, RateCurve, DivCurve)
+    # derived: it delegates the structural question rather than answering it
+    @test serves(s, nothing, VolatilitySurface, _MD_SPY) === missing
+    @test collect(demands(s)) == [(RateCurve, _MD_USD)]
+    @test collect(demands(SurfaceFrom(currency=_MD_USD, spot_for=Dict(_MD_SPY => _MD_SPX)))) ==
+          [(RateCurve, _MD_USD), (SpotPrice, _MD_SPX)]
     @test isempty(s.spot_for)
     @test SurfaceFrom(currency=_MD_USD, spot_for=Dict(_MD_SPY => _MD_SPX)).spot_for[_MD_SPY] === _MD_SPX
     @test selector_type(VolatilitySurface) === Underlying
@@ -75,7 +80,15 @@ end
         @test s.spot == _SF_SPOT && s.rate == _SF_R && s.div == _SF_Q
         s2 = only_or_missing(at(d, VolatilitySurface, _MD_SPY, _SF_TS2))
         @test iv(s2, _SF_EXPIRY, 480.0) ≈ 0.21 atol = 1e-4
-        @test at(d, VolatilitySurface, _MD_SPX, _SF_TS1) == VolatilitySurface[]
+        # SPX has no bars: the derived read fails on its input, and the error
+        # names the input kind and selector, not the surface.
+        err = try
+            at(d, VolatilitySurface, _MD_SPX, _SF_TS1)
+        catch e
+            e
+        end
+        @test err isa UnservedSelector
+        @test err.kind === OptionBar && err.selector === _MD_SPX
         @test at(d, VolatilitySurface, _MD_SPY, _SF_TS1) isa Vector{VolatilitySurface}
     end
 end
@@ -94,12 +107,17 @@ end
         @test !isempty(at(d, VolatilitySurface, _MD_SPY, _SF_TS1))
         @test at(d, VolatilitySurface, _MD_SPY, _SF_TS2) == VolatilitySurface[]
     end
-    # rate for the wrong currency, div for the wrong underlying
+    # rate for the wrong currency, div for the wrong underlying: structural,
+    # so each throws naming the curve kind the surface asked for
     with_data(_sf_map(rate=Constant(RateCurve(Currency("EUR"), FlatCurve(_SF_R))))) do d
-        @test at(d, VolatilitySurface, _MD_SPY, _SF_TS1) == VolatilitySurface[]
+        err = try at(d, VolatilitySurface, _MD_SPY, _SF_TS1) catch e; e end
+        @test err isa UnservedSelector && err.kind === RateCurve
+        @test occursin("EUR", sprint(showerror, err))
     end
     with_data(_sf_map(div=Constant(DivCurve(_MD_SPX, FlatCurve(_SF_Q))))) do d
-        @test at(d, VolatilitySurface, _MD_SPY, _SF_TS1) == VolatilitySurface[]
+        err = try at(d, VolatilitySurface, _MD_SPY, _SF_TS1) catch e; e end
+        @test err isa UnservedSelector && err.kind === DivCurve
+        @test occursin("SPX", sprint(showerror, err))
     end
     # every expiry already passed: build_surface returns nothing -> empty
     with_data(_sf_map(bars=InMemory(_sf_bars(expiry=DateTime(2024, 1, 12, 21, 0))))) do d
@@ -114,9 +132,11 @@ end
         @test s.spot == 4800.0
         @test s.underlying === _MD_SPY
     end
-    # remap to an underlying without spots -> empty
+    # remap to an underlying the spot entry does not serve -> structural throw
     with_data(_sf_map(surface=SurfaceFrom(currency=_MD_USD, spot_for=Dict(_MD_SPY => _MD_SPX)))) do d
-        @test at(d, VolatilitySurface, _MD_SPY, _SF_TS1) == VolatilitySurface[]
+        err = try at(d, VolatilitySurface, _MD_SPY, _SF_TS1) catch e; e end
+        @test err isa UnservedSelector
+        @test err.kind === SpotPrice && err.selector === _MD_SPX
     end
 end
 

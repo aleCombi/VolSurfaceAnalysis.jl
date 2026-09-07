@@ -188,6 +188,30 @@ end
     @test_throws ErrorException build_market_data(_cfg_data(rate_curve = Dict{String,Any}("type" => "constant", "underlying" => "SPY", "value" => 0.04)))
 end
 
+@testset "build_market_data: a statically demanded selector nobody serves fails at load" begin
+    # the surface selects its rate curve by currency; the only one built is USD
+    d = _cfg_data(vol_surface = Dict{String,Any}("type" => "surface_from", "currency" => "EUR"))
+    err = try build_market_data(d); nothing catch e; e end
+    @test err isa ErrorException
+    @test occursin("rate_curve", err.msg)
+    @test occursin("EUR", err.msg) && occursin("USD", err.msg)
+
+    # a spot_for remap onto a selector the spot entry does not route
+    d2 = _cfg_data(
+        vol_surface = Dict{String,Any}("type" => "surface_from", "currency" => "USD",
+            "spot_for" => Dict{String,Any}("SPY" => "SPX")),
+        spot_price = Dict{String,Any}("type" => "by_selector",
+            "SPY" => Dict{String,Any}("type" => "parquet_spots", "root" => "/x/spots_1min")))
+    @test_throws ErrorException build_market_data(d2)
+
+    # ... and the check never touches the filesystem: every root above is
+    # nonexistent, and a parquet spec answers `missing` rather than probing.
+    @test build_market_data(_cfg_data()) isa MarketData
+    @test build_market_data(_cfg_data(
+        vol_surface = Dict{String,Any}("type" => "surface_from", "currency" => "USD",
+            "spot_for" => Dict{String,Any}("SPY" => "SPX")))) isa MarketData
+end
+
 @testset "build_clock: kind name and typed selector" begin
     c = build_clock(Dict{String,Any}("kind" => "option_quote", "underlying" => "spy"))
     @test c == Clock{OptionQuote}(Underlying("SPY"))

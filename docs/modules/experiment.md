@@ -216,8 +216,18 @@ selector naming a sub-table (`SPY = { type = "parquet_spots", root =
 
 Load-time checks, each with a clear message: every table name is a
 known kind; the built spec serves that kind; every derived spec's input
-kinds are present; every spec has a lifecycle pair; the clock's kind
-has a table and its selector has the right type. Cache sizes are
+kinds are present; every spec has a lifecycle pair; every selector a
+derived spec `demands` statically is one the map `serves`; the clock's
+kind has a table and its selector has the right type.
+
+The selector-demand check is a **fast path, not the mechanism**. A
+mistyped currency on a `vol_surface` table then fails in a second rather
+than after a backtest has been running, but the guarantee comes from
+`serves` in the four map-level shapes (see
+[`market_data`](market_data.md)). It skips providers that answer
+`missing`, which is what keeps it off the filesystem: a parquet spec
+cannot answer until it is opened, so a config is never validated by
+probing a data root. Cache sizes are
 `open_data` kwargs, never config, never identity; the data roots *are*
 identity (the reserved `dataset` slot of the parquet specs), so the
 same config on a machine with the data elsewhere is a distinct run.
@@ -228,7 +238,9 @@ relevant builder table (`_PROVIDER_BUILDERS`, `_CURVE_BUILDERS`,
 `_METRIC_TABLE` in [`metrics`](metrics.md). A new sum-type also needs a
 `to_dict` method (`identity.jl`) so it contributes to the run hashes; a
 new provider spec needs `kind`, `inputs` (if derived), a lifecycle
-pair, and its `to_dict`.
+pair, and its `to_dict`; a closed-world provider also needs `serves` and
+`served_description`, and a derived spec that names selectors in its own
+configuration should implement `demands`.
 
 Run from the CLI:
 

@@ -200,11 +200,18 @@ end
     after = Experiment(name="after-data", agent=StaticAgent(NoOpPolicy()),
                        data=f.data, clock=_EX_CLOCK, from=f.ts3 + Hour(1), to=f.ts3 + Hour(2))
     @test_throws ErrorException run_experiment(after)
-    # window-end spot missing at the last clock tick
-    no_spots = _ex_map(entry(f.data, OptionQuote).rows, SpotPrice[])
+    # window-end spot missing at the last clock tick: SPY is served, but has
+    # no row at ts3, so this is the loud temporal error
+    thin_spots = _ex_map(entry(f.data, OptionQuote).rows,
+                         [SpotPrice(_EX_UND, f.spot, f.ts1)])
     exp2 = Experiment(name="no-spot", agent=StaticAgent(NoOpPolicy()),
-                      data=no_spots, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
+                      data=thin_spots, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
     @test_throws ErrorException run_experiment(exp2)
+    # nothing serves SpotPrice for SPY at all: structural, so it is named
+    no_spots = _ex_map(entry(f.data, OptionQuote).rows, SpotPrice[])
+    exp2b = Experiment(name="unserved-spot", agent=StaticAgent(NoOpPolicy()),
+                       data=no_spots, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
+    @test_throws UnservedSelector run_experiment(exp2b)
     # a clock whose selector is not an Underlying cannot settle
     exp3 = Experiment(name="ccy-clock", agent=StaticAgent(NoOpPolicy()),
                       data=f.data, clock=Clock{RateCurve}(_EX_USD), from=f.ts1, to=f.ts3)

@@ -194,7 +194,8 @@ Build the provider map from a `[data]` table: one sub-table per kind,
 keyed by kind name, each with a `type` discriminator. Load-time checks:
 every table name is a known kind; the built spec serves that kind;
 every derived spec's input kinds are present; every spec has a
-lifecycle pair.
+lifecycle pair; and every selector a derived spec `demands` statically
+is one the map serves.
 """
 function build_market_data(d::AbstractDict)::MarketData
     isempty(d) && error("load_experiment: [data] has no entries")
@@ -213,12 +214,23 @@ function build_market_data(d::AbstractDict)::MarketData
         need in present || error(
             "load_experiment: data.$(kind_name(kind(s))) needs $(kind_name(need)), " *
             "which no [data.*] table provides")
-        has_lifecycle(s) || error(
-            "load_experiment: data.$(kind_name(kind(s))) has no open_data method")
     end
     for s in m.entries
         has_lifecycle(s) || error(
             "load_experiment: data.$(kind_name(kind(s))) has no open_data method")
+    end
+    # Fast path over the closed-world providers: a derived spec naming a
+    # selector nobody serves fails in a second rather than after a
+    # backtest has been running. `missing` is skipped, which is what keeps
+    # this check off the filesystem -- a parquet spec cannot answer until
+    # it is opened. The mechanism is `serves` in the four map-level
+    # shapes; this is only the fast path.
+    for s in m.entries, (K, sel) in demands(s)
+        K in present || continue
+        serves(m, K, sel) === false && error(
+            "load_experiment: data.$(kind_name(kind(s))) needs $(kind_name(K)) for " *
+            "$(sel), which data.$(kind_name(K)) does not serve " *
+            "($(served_description(entry(m, K))))")
     end
     return m
 end

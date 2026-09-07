@@ -17,6 +17,9 @@ _md_pq_map(fx) = MarketData(ParquetOptionBars(fx.opts_root), QuotesFromBars(_MD_
     @test_throws ArgumentError open_data(s)
     @test_throws ArgumentError open_data(ParquetSpots("/nonexistent/spots"))
     @test_throws ArgumentError open_data(MarketData(s))
+    # a spec cannot answer the structural question: the tree is not open
+    @test serves(s, nothing, OptionBar, Underlying("SPY")) === missing
+    @test serves(ParquetSpots("/x"), nothing, SpotPrice, Underlying("SPY")) === missing
 end
 
 mktempdir() do root
@@ -36,7 +39,8 @@ mktempdir() do root
             @test c.expiry == DateTime(2024, 1, 29, 21, 0)
             @test at(d, OptionBar, _MD_SPY, DateTime(fx.d1, Time(16, 0))) == OptionBar[]
             @test at(d, OptionBar, _MD_SPY, DateTime(2024, 1, 17, 15, 30)) == OptionBar[]
-            @test at(d, OptionBar, Underlying("QQQ"), fx.t1a) == OptionBar[]
+            # no date= partition holds a file for QQQ: structural, not temporal
+            @test_throws UnservedSelector at(d, OptionBar, Underlying("QQQ"), fx.t1a)
             r = entry(d, OptionBar)
             @test length(r.contracts) == 2
             @test r.contracts["O:SPY240129C00406000"].strike == 406.0
@@ -100,9 +104,14 @@ mktempdir() do root
             @test timestamps(d, Clock{OptionQuote}(_MD_SPY), fx.t1b, fx.t2a) == [fx.t1b, fx.t2a]
             @test timestamps(d, OptionBar, _MD_SPY, fx.t2a + Day(1), fx.t2a + Day(2)) == DateTime[]
             @test timestamps(d, OptionBar, _MD_SPY, fx.t2a, fx.t1a) == DateTime[]
-            @test timestamps(d, OptionBar, Underlying("QQQ"), fx.t1a, fx.t2a) == DateTime[]
+            @test_throws UnservedSelector timestamps(d, OptionBar, Underlying("QQQ"), fx.t1a, fx.t2a)
             # only the partition list was consulted; no chain was loaded
             @test length(entry(d, OptionBar).chains) == 0
+            # the reader answers the structural question from that same list
+            r = entry(d, OptionBar)
+            @test serves(r, nothing, OptionBar, _MD_SPY) === true
+            @test serves(r, nothing, OptionBar, Underlying("QQQ")) === false
+            @test serves(entry(d, SpotPrice), nothing, SpotPrice, _MD_SPY) === true
         end
     end
 

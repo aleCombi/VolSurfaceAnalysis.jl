@@ -15,8 +15,14 @@
 # Rules (docs/modules/market_data.md):
 # - results are sorted by `timestamp`; `at`/`between` return only records
 #   in range; `asof` returns every record at the largest visible timestamp
-#   <= ts; EMPTY MEANS ABSENT for all four shapes, no shape returns
-#   `missing`;
+#   <= ts; no shape returns `missing`;
+# - EMPTY MEANS TEMPORAL ABSENCE ONLY -- "this selector is served, and has
+#   nothing at this instant". STRUCTURAL absence, "nothing here serves this
+#   selector at all", is a named error (`UnservedSelector`), because a
+#   consumer that cannot tell "not yet" from "not ever" correctly concludes
+#   it has nothing to do and the run dies silently. `serves` is the shape
+#   that answers the structural question, and the four map-level shapes
+#   check it;
 # - `between` promises an iterable, not a container, valid only while its
 #   reader is open;
 # - `asof` has no default: each provider implements it with what its
@@ -71,6 +77,44 @@ The kind a provider spec or reader serves.
 """
 function kind end
 
+"""
+    serves(m, ::Type{R}, sel) -> Union{Bool,Missing}
+    serves(p, ctx, ::Type{R}, sel) -> Union{Bool,Missing}
+
+Whether anything here serves selector `sel` for kind `R`. Static by
+definition, so there is no timestamp argument: the answer cannot vary
+with one.
+
+Three-valued, and the third value is required. `true` and `false` are
+answers; `missing` is "cannot say", returned by
+
+- a **parquet spec**, which would have to walk a tree it has not opened
+  (and `build_market_data` holds specs, not readers); and
+- every **derived provider**, by decision. It delegates rather than
+  answering, so its input's error propagates and the failure names the
+  real cause: a `SurfaceFrom` asked for SPX reports `OptionBar`/SPX
+  unserved, not "no surface".
+
+The default is `missing`, so a provider with no method opts out of the
+check rather than breaking. `Union{Bool,Missing}` is deliberate: Julia's
+three-valued `&` already gives `missing & false === false`, so a future
+provider delegating conjunctively over several inputs gets Kleene
+semantics for free.
+"""
+function serves end
+
+serves(::Any, ::Any, ::Type, ::Any) = missing
+
+"""
+    served_description(p) -> String
+
+What `p` does serve, in one phrase, for the message on an
+[`UnservedSelector`](@ref). A bare key error naming only the selector
+does not say enough to fix a config, which is the point of the named
+error.
+"""
+served_description(p) = string(nameof(typeof(p)))
+
 at(p, ctx, ::Type{R}, sel, ts::DateTime) where {R} =
     collect(R, between(p, ctx, R, sel, ts, ts))
 
@@ -79,6 +123,24 @@ at(p, ctx, ::Type{R}, sel, ts::DateTime) where {R} =
 # Named failures for the questions the protocol cannot answer with an
 # empty result. Empty is reserved for "served, and nothing at this
 # instant"; everything else has a type and says enough to fix the cause.
+
+"""
+    UnservedSelector(kind, selector, served)
+
+Nothing in this configuration serves `selector` for `kind`. Structural,
+not temporal: it does not vary with the instant asked for, so it is a
+configuration-grade problem and gets a name rather than an empty vector.
+`served` says what the entry does serve.
+"""
+struct UnservedSelector <: Exception
+    kind     :: Type
+    selector :: Any
+    served   :: String
+end
+
+Base.showerror(io::IO, e::UnservedSelector) = print(io,
+    "UnservedSelector: nothing serves $(e.kind) for $(e.selector). ",
+    "The entry: $(e.served)")
 
 """
     ConflictingRecords(kind, selector, timestamp, a, b)

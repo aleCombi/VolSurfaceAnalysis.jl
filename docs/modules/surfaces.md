@@ -76,9 +76,16 @@ read through the map it is called from, so a time cut handed as the
 context bounds everything it can see. It evaluates the curves at the
 surface's timestamp and calls `build_surface`.
 
-- **Failure is empty.** An absent chain, spot or curve, or a build
-  with no surviving expiry, yields an empty result, and the empty
-  result is cached so absence is not retried.
+- **Failure is empty only when it is temporal.** A chain, spot or curve
+  that is *served* but has nothing at this instant, or a build with no
+  surviving expiry, yields an empty result, and the empty result is
+  cached so absence is not retried. An input selector nothing serves is
+  structural and throws `UnservedSelector` — from the *input's* entry,
+  naming the input kind and selector, because `SurfaceFrom` delegates the
+  question rather than answering it (see
+  [`market_data`](market_data.md)). A surface configured for EUR over a
+  USD rate curve therefore says so at load, and a surface asked for SPX
+  over a SPY-only chain reports `OptionBar`/SPX, not "no surface".
 - **Bounded cache, cut-independent.** The reader caches surfaces per
   `(underlying, timestamp)` in a bounded LRU. Every input read is at
   or before the requested timestamp, so an entry is valid under any

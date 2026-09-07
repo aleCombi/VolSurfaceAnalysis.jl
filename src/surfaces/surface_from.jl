@@ -33,6 +33,12 @@ Base.hash(s::SurfaceFrom, h::UInt) = hash(s.spot_for, hash(s.currency, hash(:Sur
 kind(::SurfaceFrom) = VolatilitySurface
 inputs(::SurfaceFrom) = (OptionQuote, SpotPrice, RateCurve, DivCurve)
 
+# The two selectors a SurfaceFrom names in its own configuration, for the
+# load-time fast path. The chain and the dividend curve follow the surface's
+# own underlying, which is a query argument, so they cannot be checked here.
+demands(s::SurfaceFrom) = ((RateCurve, s.currency),
+                           ((SpotPrice, v) for v in values(s.spot_for))...)
+
 struct SurfaceReader
     spec::SurfaceFrom
     cache::LRU{Tuple{Underlying,DateTime},Vector{VolatilitySurface}}
@@ -40,6 +46,12 @@ end
 
 kind(::SurfaceReader) = VolatilitySurface
 inputs(r::SurfaceReader) = inputs(r.spec)
+
+# Derived: spec and reader both delegate rather than answering, so an
+# unserved input surfaces as that input's own error and names the real
+# cause -- a SurfaceFrom asked for SPX reports OptionBar/SPX unserved,
+# not "no surface".
+serves(::Union{SurfaceFrom,SurfaceReader}, ::Any, ::Type{VolatilitySurface}, ::Any) = missing
 
 """
     open_data(s::SurfaceFrom; max_surfaces=64)

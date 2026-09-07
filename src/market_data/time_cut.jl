@@ -23,11 +23,24 @@ end
 
 entry(c::TimeCut, ::Type{R}) where {R} = entry(c.inner, R)
 
-at(c::TimeCut, ::Type{R}, sel, ts::DateTime) where {R} =
+serves(c::TimeCut, ::Type{R}, sel) where {R} = serves(entry(c, R), c, R, sel)
+
+# The structural check runs BEFORE the cutoff mask, so an unserved
+# selector throws even for a query past the cutoff: structural beats
+# temporal, and a cut cannot turn a broken configuration into silence.
+function at(c::TimeCut, ::Type{R}, sel, ts::DateTime) where {R}
+    _require_served(c, R, sel)
     ts <= c.cutoff ? at(entry(c, R), c, R, sel, ts) : R[]
-between(c::TimeCut, ::Type{R}, sel, from::DateTime, to::DateTime) where {R} =
+end
+function between(c::TimeCut, ::Type{R}, sel, from::DateTime, to::DateTime) where {R}
+    _require_served(c, R, sel)
     from <= c.cutoff ? between(entry(c, R), c, R, sel, from, min(to, c.cutoff)) : R[]
-asof(c::TimeCut, ::Type{R}, sel, ts::DateTime) where {R} =
+end
+function asof(c::TimeCut, ::Type{R}, sel, ts::DateTime) where {R}
+    _require_served(c, R, sel)
     asof(entry(c, R), c, R, sel, min(ts, c.cutoff))
-timestamps(c::TimeCut, ::Type{R}, sel, from::DateTime, to::DateTime) where {R} =
+end
+function timestamps(c::TimeCut, ::Type{R}, sel, from::DateTime, to::DateTime) where {R}
+    _require_served(c, R, sel)
     from <= c.cutoff ? timestamps(entry(c, R), c, R, sel, from, min(to, c.cutoff)) : DateTime[]
+end

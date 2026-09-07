@@ -36,11 +36,34 @@ entry(m::MarketData, ::Type{R}) where {R} = _entry(R, m.entries...)
 @inline _entry(::Type{R}, p, rest...) where {R} = kind(p) === R ? p : _entry(R, rest...)
 _entry(::Type{R}) where {R} = error("MarketData has no provider for $R")
 
-at(m::MarketData, ::Type{R}, sel, ts::DateTime) where {R} =
+serves(m::MarketData, ::Type{R}, sel) where {R} = serves(entry(m, R), m, R, sel)
+
+# Structural absence throws, and the check lives here rather than inside
+# each provider's four shapes: that would be sixteen call sites, and it
+# would also fire on the provider-level delegation `BySelector` and
+# `QuotesFromBars` already do. Two consequences, both deliberate:
+# provider-level calls (`at(p, ctx, R, sel, ts)`) are unchecked, which is
+# the arity tests and internal delegation use; and a provider with no
+# `serves` method (`missing`) opts out.
+@inline function _require_served(m, ::Type{R}, sel) where {R}
+    serves(m, R, sel) === false &&
+        throw(UnservedSelector(R, sel, served_description(entry(m, R))))
+    return nothing
+end
+
+function at(m::MarketData, ::Type{R}, sel, ts::DateTime) where {R}
+    _require_served(m, R, sel)
     at(entry(m, R), m, R, sel, ts)
-between(m::MarketData, ::Type{R}, sel, from::DateTime, to::DateTime) where {R} =
+end
+function between(m::MarketData, ::Type{R}, sel, from::DateTime, to::DateTime) where {R}
+    _require_served(m, R, sel)
     between(entry(m, R), m, R, sel, from, to)
-asof(m::MarketData, ::Type{R}, sel, ts::DateTime) where {R} =
+end
+function asof(m::MarketData, ::Type{R}, sel, ts::DateTime) where {R}
+    _require_served(m, R, sel)
     asof(entry(m, R), m, R, sel, ts)
-timestamps(m::MarketData, ::Type{R}, sel, from::DateTime, to::DateTime) where {R} =
+end
+function timestamps(m::MarketData, ::Type{R}, sel, from::DateTime, to::DateTime) where {R}
+    _require_served(m, R, sel)
     timestamps(entry(m, R), m, R, sel, from, to)
+end

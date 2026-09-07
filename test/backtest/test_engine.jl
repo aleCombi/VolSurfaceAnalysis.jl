@@ -133,9 +133,11 @@ end
 @testset "run_backtest: the clock defines the ticks" begin
     f = _en_fixture()
     trd = Trade(_EN_UND, 480.0, f.expiry, Call)
-    # A clock on a selector with no quotes yields no ticks at all.
-    @test isempty(run_backtest(_OpenOnceAt(f.ts2, trd), f.data, f.ts1, f.ts3,
-                               Clock{OptionQuote}(Underlying("QQQ"))))
+    # A clock on a selector nothing serves is a broken configuration, not an
+    # empty grid: enumerating it throws rather than running zero ticks.
+    @test_throws UnservedSelector run_backtest(_OpenOnceAt(f.ts2, trd), f.data,
+                                               f.ts1, f.ts3,
+                                               Clock{OptionQuote}(Underlying("QQQ")))
     # A clock on the spot grid ticks at the same instants here.
     @test length(run_backtest(_OpenOnceAt(f.ts2, trd), f.data, f.ts1, f.ts3,
                               Clock{SpotPrice}(_EN_UND))) == 1
@@ -144,8 +146,15 @@ end
 @testset "run_backtest: missing spot at a fill errors" begin
     f = _en_fixture()
     trd = Trade(_EN_UND, 480.0, f.expiry, Call)
+    # served, but no row at the fill instant: the loud "missing spot" error
+    thin_spots = MarketData(entry(f.data, OptionQuote),
+                            InMemory([SpotPrice(_EN_UND, f.spot, f.ts1)]))
+    @test_throws ErrorException run_backtest(_OpenOnceAt(f.ts2, trd), thin_spots,
+                                             f.ts1, f.ts3, _EN_CLOCK)
+    # nothing serves SpotPrice for SPY at all: structural, so it is named
     no_spots = MarketData(entry(f.data, OptionQuote), InMemory(SpotPrice[]))
-    @test_throws ErrorException run_backtest(_OpenOnceAt(f.ts2, trd), no_spots, f.ts1, f.ts3, _EN_CLOCK)
+    @test_throws UnservedSelector run_backtest(_OpenOnceAt(f.ts2, trd), no_spots,
+                                               f.ts1, f.ts3, _EN_CLOCK)
 end
 
 @testset "resolve_quote: strike not in chain errors" begin

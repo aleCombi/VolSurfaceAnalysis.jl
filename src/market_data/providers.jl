@@ -15,14 +15,28 @@ Serves every selector present in `rows`.
 struct InMemory{R}
     rows::Vector{R}
     ts::Vector{DateTime}                  # rows[i].timestamp, for searchsorted
+    sels::Set{Any}                        # the selectors present, for `serves`
     function InMemory{R}(rows) where {R}
         sorted = sort(collect(R, rows); by = r -> r.timestamp)   # default sort is stable
-        new{R}(sorted, DateTime[r.timestamp for r in sorted])
+        new{R}(sorted, DateTime[r.timestamp for r in sorted],
+               Set{Any}(selector(r) for r in sorted))
     end
 end
 InMemory(rows::AbstractVector{R}) where {R} = InMemory{R}(rows)
 
 kind(::InMemory{R}) where {R} = R
+
+# The rows are the whole world, so a selector with no row is structurally
+# absent, not temporally. An empty InMemory therefore serves nothing.
+serves(p::InMemory{R}, ::Any, ::Type{R}, sel) where {R} = sel in p.sels
+
+function served_description(p::InMemory)
+    isempty(p.sels) && return "InMemory with no rows"
+    ss = sort!(String[string(s) for s in p.sels])
+    length(ss) <= 8 || return "InMemory rows for " * join(ss[1:8], ", ") *
+                              " and $(length(ss) - 8) more"
+    "InMemory rows for " * join(ss, ", ")
+end
 
 function between(p::InMemory{R}, ::Any, ::Type{R}, sel, from::DateTime, to::DateTime) where {R}
     lo = searchsortedfirst(p.ts, from)
@@ -67,6 +81,11 @@ between(c::Constant{R}, ::Any, ::Type{R}, sel, from::DateTime, to::DateTime) whe
 timestamps(c::Constant{R}, ctx, ::Type{R}, sel, from::DateTime, to::DateTime) where {R} =
     DateTime[r.timestamp for r in between(c, ctx, R, sel, from, to)]
 
+# A constant for SPY says nothing about SPX, so it serves exactly one
+# selector; before its stamp it is temporally, not structurally, absent.
+serves(c::Constant{R}, ::Any, ::Type{R}, sel) where {R} = selector(c.record) == sel
+served_description(c::Constant) = "Constant for $(selector(c.record))"
+
 """
     inputs(spec) -> Tuple of kinds
 
@@ -74,6 +93,18 @@ The kinds a derived provider reads through the map. `()` for raw
 providers. The config loader checks every input kind is present.
 """
 inputs(::Any) = ()
+
+"""
+    demands(spec) -> iterable of (kind, selector)
+
+The selectors a derived spec needs *statically*, known without a query.
+`()` for everything else. `build_market_data` uses it as a load-time
+fast path: a mistyped currency fails in a second rather than after a
+backtest has been running. It is only the fast path -- the mechanism is
+`serves` in the four map-level shapes -- so a spec that cannot name its
+selectors ahead of time simply demands nothing.
+"""
+demands(::Any) = ()
 
 """
     QuotesFromBars(synthesizer)
@@ -99,3 +130,10 @@ asof(p::QuotesFromBars, m, ::Type{OptionQuote}, u, ts::DateTime) =
     OptionQuote[synthesize(p.synthesizer, b) for b in asof(m, OptionBar, u, ts)]
 timestamps(::QuotesFromBars, m, ::Type{OptionQuote}, u, from::DateTime, to::DateTime) =
     timestamps(m, OptionBar, u, from, to)
+
+# Explicit, not the default: a derived provider does not answer the
+# structural question, it delegates. The map-level check waves the quote
+# read through, the read reaches the OptionBar entry through the map, and
+# that entry's own check throws naming OptionBar and the selector -- the
+# real cause, rather than "no quote".
+serves(::QuotesFromBars, ::Any, ::Type{OptionQuote}, ::Any) = missing

@@ -36,8 +36,12 @@ end
     @test only_or_missing(asof(m, SpotPrice, _MD_SPY, _MD_T3 + Day(1))).timestamp == _MD_T3
     @test asof(m, SpotPrice, _MD_SPX, _MD_T1 - Day(1)) == SpotPrice[]
     @test timestamps(m, SpotPrice, _MD_SPX, _MD_T1, _MD_T2) == [_MD_T1, _MD_T2]
-    @test_throws KeyError at(m, SpotPrice, _MD_QQQ, _MD_T1)
-    @test_throws KeyError timestamps(m, SpotPrice, _MD_QQQ, _MD_T1, _MD_T3)
+    @test serves(m, SpotPrice, _MD_SPY) === true
+    @test serves(m, SpotPrice, _MD_QQQ) === false          # the routes are the world
+    @test_throws UnservedSelector at(m, SpotPrice, _MD_QQQ, _MD_T1)
+    @test_throws UnservedSelector timestamps(m, SpotPrice, _MD_QQQ, _MD_T1, _MD_T3)
+    err = try at(m, SpotPrice, _MD_QQQ, _MD_T1) catch e; e end
+    @test occursin("SPY", sprint(showerror, err)) && occursin("SPX", sprint(showerror, err))
 end
 
 @testset "BySelector: forwards the context untouched" begin
