@@ -1,6 +1,6 @@
 # Config-file loading: TOML -> Experiment.
 #
-# Stdlib TOML only. Each dispatched sum-type (DataSource, Curve, Policy,
+# Stdlib TOML only. Each dispatched sum-type (data provider, Curve, Policy,
 # Agent) has its own builder registry keyed by a string discriminator
 # (`type = "..."` in the config); the rest of that table is forwarded
 # as the builder's kwargs. New concrete types register themselves by
@@ -131,36 +131,144 @@ kind_name(T::Type) = get(_KIND_NAMES, T) do
     error("kind_name: no config name for kind $T (known: $(sort(collect(keys(_KINDS)))))")
 end
 
-# ---- [source] (transitional) -------------------------------------------
-# The old single-table schema, mapped onto a MarketData + Clock so the
-# existing configs stay valid until the `[data.*]` schema lands (plan
-# step 2.2). `max_days_cached` is read and ignored: cache sizes are
-# open_data kwargs, never config, never identity.
+# ---- Provider builders (`[data.<kind>]` tables) ------------------------
+# One table per kind. The table name selects the kind; `type` selects the
+# builder; the builder gets the rest of the table and the kind and returns
+# a spec. Every builder has the signature `(d, R) -> spec`.
 
-function _build_market_data_from_source(d::AbstractDict)
-    t = _pop_type!(d, "source")
-    t == "parquet" || error("load_experiment: unknown source type \"$t\". Known: [\"parquet\"]")
-    underlying = Underlying(String(_require(d, "underlying", "source(parquet)")))
-    synth = build_synthesizer(Dict{String,Any}(_require(d, "synthesizer", "source(parquet)")))
-    rate  = build_curve(Dict{String,Any}(_require(d, "rate", "source")))
-    div_  = build_curve(Dict{String,Any}(_require(d, "div",  "source")))
-    opts_root, spot_root = if haskey(d, "root")
-        (joinpath(String(d["root"]), DEFAULT_OPTIONS_SUBDIR),
-         joinpath(String(d["root"]), DEFAULT_SPOTS_SUBDIR))
-    else
-        (String(_require(d, "options_root", "source(parquet) without \"root\"")),
-         String(_require(d, "spot_root",    "source(parquet) without \"root\"")))
+_selector_key(::Type{Underlying}) = "underlying"
+_selector_key(::Type{Currency})   = "currency"
+_parse_selector(::Type{Underlying}, s) = Underlying(String(s))
+_parse_selector(::Type{Currency}, s)   = Currency(String(s))
+
+# The selector of kind `R`, read from the key its type is named by.
+function _selector_from(d::AbstractDict, ::Type{R}, where_::AbstractString) where {R}
+    S = selector_type(R)
+    key = _selector_key(S)
+    return _parse_selector(S, _require(d, key, where_))
+end
+
+_build_parquet_option_bars(d::AbstractDict, ::Type) =
+    ParquetOptionBars(String(_require(d, "root", "data(parquet_option_bars)")))
+
+_build_parquet_spots(d::AbstractDict, ::Type) =
+    ParquetSpots(String(_require(d, "root", "data(parquet_spots)")))
+
+_build_from_bars(d::AbstractDict, ::Type) =
+    QuotesFromBars(build_synthesizer(Dict{String,Any}(_require(d, "synthesizer", "data(from_bars)"))))
+
+# `value` is a flat curve; `curve = { type = ... }` any curve builder.
+function _curve_from(d::AbstractDict, where_::AbstractString)::Curve
+    if haskey(d, "curve")
+        return build_curve(Dict{String,Any}(d["curve"]))
+    elseif haskey(d, "value")
+        return FlatCurve(Float64(d["value"]))
     end
-    usd = Currency("USD")
-    data = MarketData(
-        ParquetOptionBars(opts_root),
-        QuotesFromBars(synth),
-        ParquetSpots(spot_root),
-        Constant(RateCurve(usd, rate)),
-        Constant(DivCurve(underlying, div_)),
-        SurfaceFrom(currency=usd),
-    )
-    return (data=data, clock=Clock{OptionQuote}(underlying))
+    error("load_experiment: $where_ needs \"value\" (flat) or a \"curve\" table")
+end
+
+_constant_record(::Type{RateCurve}, sel::Currency,  c::Curve) = RateCurve(sel, c)
+_constant_record(::Type{DivCurve},  sel::Underlying, c::Curve) = DivCurve(sel, c)
+_constant_record(::Type{R}, sel, ::Curve) where {R} = error(
+    "load_experiment: data(constant) supports rate_curve and div_curve, not $(kind_name(R))")
+
+function _build_constant(d::AbstractDict, ::Type{R}) where {R}
+    sel = _selector_from(d, R, "data(constant)")
+    return Constant(_constant_record(R, sel, _curve_from(d, "data(constant)")))
+end
+
+function _build_surface_from(d::AbstractDict, ::Type)
+    currency = Currency(String(_require(d, "currency", "data(surface_from)")))
+    spot_for = Dict{Underlying,Underlying}()
+    if haskey(d, "spot_for")
+        for (k, v) in d["spot_for"]
+            spot_for[Underlying(String(k))] = Underlying(String(v))
+        end
+    end
+    return SurfaceFrom(currency=currency, spot_for=spot_for)
+end
+
+# Every key other than `type` is `selector = { sub-table }`.
+function _build_by_selector(d::AbstractDict, ::Type{R}) where {R}
+    parts = Pair[]
+    for (k, v) in d
+        k == "type" && continue
+        v isa AbstractDict || error(
+            "load_experiment: data(by_selector) entry \"$k\" must be a table with a \"type\"")
+        sel = _parse_selector(selector_type(R), k)
+        push!(parts, sel => _build_provider(Dict{String,Any}(v), R, "data(by_selector).$k"))
+    end
+    isempty(parts) && error("load_experiment: data(by_selector) has no parts")
+    sort!(parts; by = p -> string(first(p)))
+    return BySelector{R}(parts...)
+end
+
+const _PROVIDER_BUILDERS = Dict{String, Function}(
+    "parquet_option_bars" => _build_parquet_option_bars,
+    "parquet_spots"       => _build_parquet_spots,
+    "from_bars"           => _build_from_bars,
+    "constant"            => _build_constant,
+    "surface_from"        => _build_surface_from,
+    "by_selector"         => _build_by_selector,
+)
+
+function _build_provider(d::AbstractDict, ::Type{R}, where_::AbstractString) where {R}
+    t = _pop_type!(d, where_)
+    spec = _dispatch(_PROVIDER_BUILDERS, t, "data provider")(d, R)
+    kind(spec) === R || error(
+        "load_experiment: $where_ has type \"$t\", which serves " *
+        "$(kind_name(kind(spec))), not $(kind_name(R))")
+    return spec
+end
+
+"""
+    build_market_data(d::AbstractDict) -> MarketData
+
+Build the provider map from a `[data]` table: one sub-table per kind,
+keyed by kind name, each with a `type` discriminator. Load-time checks:
+every table name is a known kind; the built spec serves that kind;
+every derived spec's input kinds are present; every spec has a
+lifecycle pair.
+"""
+function build_market_data(d::AbstractDict)::MarketData
+    isempty(d) && error("load_experiment: [data] has no entries")
+    specs = Any[]
+    for name in sort!(collect(keys(d)))
+        haskey(_KINDS, name) || error(
+            "load_experiment: unknown data kind \"$name\". Known: $(sort(collect(keys(_KINDS))))")
+        R = _KINDS[name]
+        tbl = d[name]
+        tbl isa AbstractDict || error("load_experiment: [data.$name] must be a table")
+        push!(specs, _build_provider(Dict{String,Any}(tbl), R, "data.$name"))
+    end
+    m = MarketData(Tuple(specs))
+    present = Set(kind(s) for s in m.entries)
+    for s in m.entries, need in inputs(s)
+        need in present || error(
+            "load_experiment: data.$(kind_name(kind(s))) needs $(kind_name(need)), " *
+            "which no [data.*] table provides")
+        has_lifecycle(s) || error(
+            "load_experiment: data.$(kind_name(kind(s))) has no open_data method")
+    end
+    for s in m.entries
+        has_lifecycle(s) || error(
+            "load_experiment: data.$(kind_name(kind(s))) has no open_data method")
+    end
+    return m
+end
+
+"""
+    build_clock(d::AbstractDict) -> Clock
+
+Build the tick grid from a `clock = { kind = "...", <selector> = "..." }`
+table; the selector key is `underlying` or `currency` per the kind.
+"""
+function build_clock(d::AbstractDict)::Clock
+    name = String(_require(d, "kind", "clock"))
+    haskey(_KINDS, name) || error(
+        "load_experiment: unknown clock kind \"$name\". Known: $(sort(collect(keys(_KINDS))))")
+    R = _KINDS[name]
+    return Clock{R}(_selector_from(d, R, "clock"))
 end
 
 # ---- Policy builders ----------------------------------------------------
@@ -258,40 +366,49 @@ end
 
 Parse a TOML file and construct the [`Experiment`](@ref) it describes.
 
-The schema is a flat header (`name`, `from`, `to`) plus nested tables
-(`[outputs]`, `[source]`, `[agent]`). Every dispatched sum-type (data
-source, synthesizer, curve, policy, agent) is keyed by a `type`
-discriminator; the rest of that table is forwarded to the matching
-builder. Optional metrics live under `[outputs]`; top-level `metrics`
-is rejected so old configs do not silently default to a different output
-set.
+The schema is a flat header (`name`, `from`, `to`, `clock`) plus nested
+tables (`[outputs]`, `[data.<kind>]`, `[agent]`). Every dispatched
+sum-type (data provider, synthesizer, curve, policy, agent) is keyed by
+a `type` discriminator; the rest of that table is forwarded to the
+matching builder. Optional metrics live under `[outputs]`; top-level
+`metrics` and the old `[source]` table are rejected with a pointer.
 
 # Example
 
 ```toml
-name = "noop_smoke"
-from = 2024-01-15T15:30:00
-to   = 2024-01-15T15:32:00
+name  = "noop_smoke"
+from  = 2024-01-15T15:30:00
+to    = 2024-01-15T15:32:00
+clock = { kind = "option_quote", underlying = "SPY" }
 
 [outputs]
 metrics = ["sharpe", "max_drawdown"]
 
-[source]
-type       = "parquet"
-underlying = "SPY"
-root       = "C:/data/polygon"
+[data.option_bar]
+type = "parquet_option_bars"
+root = "C:/data/polygon/options_1min"
 
-[source.synthesizer]
-type   = "ohlcv_spread"
-lambda = 0.7
+[data.option_quote]
+type = "from_bars"
+synthesizer = { type = "ohlcv_spread", lambda = 0.7 }
 
-[source.rate]
-type = "flat"
+[data.spot_price]
+type = "parquet_spots"
+root = "C:/data/polygon/spots_1min"
+
+[data.rate_curve]
+type = "constant"
+currency = "USD"
 value = 0.04
 
-[source.div]
-type = "flat"
+[data.div_curve]
+type = "constant"
+underlying = "SPY"
 value = 0.015
+
+[data.vol_surface]
+type = "surface_from"
+currency = "USD"
 
 [agent]
 type = "static"
@@ -337,12 +454,19 @@ function _experiment_from_cfg(cfg::AbstractDict)::Experiment
     haskey(cfg, "metrics") && error(
         "load_experiment: top-level \"metrics\" is no longer supported; " *
         "move it under [outputs] as metrics = [...]")
-    source_tbl = _require(cfg, "source", "config")
-    agent_tbl  = _require(cfg, "agent",  "config")
-    dc     = _build_market_data_from_source(Dict{String,Any}(source_tbl))
-    agent  = build_agent(Dict{String,Any}(agent_tbl))
+    haskey(cfg, "source") && error(
+        "load_experiment: the [source] table is no longer supported; " *
+        "use [data.<kind>] tables and a top-level clock (see docs/modules/experiment.md)")
+    data_tbl  = _require(cfg, "data",  "config")
+    clock_tbl = _require(cfg, "clock", "config")
+    agent_tbl = _require(cfg, "agent", "config")
+    data  = build_market_data(Dict{String,Any}(data_tbl))
+    clock = build_clock(Dict{String,Any}(clock_tbl))
+    any(kind(s) === kind(clock) for s in data.entries) || error(
+        "load_experiment: clock kind \"$(kind_name(kind(clock)))\" has no [data.*] table")
+    agent = build_agent(Dict{String,Any}(agent_tbl))
     outputs = haskey(cfg, "outputs") ?
         build_output_spec(Dict{String,Any}(cfg["outputs"])) : OutputSpec()
-    return Experiment(; name=name, agent=agent, data=dc.data, clock=dc.clock,
+    return Experiment(; name=name, agent=agent, data=data, clock=clock,
                        from=from, to=to, outputs=outputs)
 end

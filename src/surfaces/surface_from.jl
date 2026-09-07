@@ -26,6 +26,10 @@ end
 SurfaceFrom(; currency::Currency, spot_for=Dict{Underlying,Underlying}()) =
     SurfaceFrom(Dict{Underlying,Underlying}(spot_for), currency)
 
+# Value semantics: the Dict field would otherwise make == an identity test.
+Base.:(==)(a::SurfaceFrom, b::SurfaceFrom) = a.currency == b.currency && a.spot_for == b.spot_for
+Base.hash(s::SurfaceFrom, h::UInt) = hash(s.spot_for, hash(s.currency, hash(:SurfaceFrom, h)))
+
 kind(::SurfaceFrom) = VolatilitySurface
 inputs(::SurfaceFrom) = (OptionQuote, SpotPrice, RateCurve, DivCurve)
 

@@ -2,8 +2,8 @@
 #
 # A run's id is `full_hash(result.experiment)`, and `save_run` validates
 # that the persisted config.toml rebuilds that same experiment. So these
-# tests save *config-buildable* experiments (parquet source, validated
-# lazily so no data tree is needed) paired with a hand-built ledger. The
+# tests save *config-buildable* experiments (parquet specs, pure values,
+# so no data tree is needed) paired with a hand-built ledger. The
 # hand-built positions exercise the serialization layer directly -- they
 # need not come from a real backtest, and an in-memory source could not be
 # hashed/saved anyway.
@@ -16,30 +16,39 @@ using DuckDB: DBInterface
 # without any data on disk; only open_data (a run) would throw.
 function _smoke_config(; name="persist-smoke", metrics="[\"sharpe\", \"max_drawdown\"]")
     """
-    name = "$name"
-    from = 2024-01-15T15:30:00
-    to   = 2024-01-15T15:32:00
+    name  = "$name"
+    from  = 2024-01-15T15:30:00
+    to    = 2024-01-15T15:32:00
+    clock = { kind = "option_quote", underlying = "SPY" }
 
     [outputs]
     metrics = $metrics
 
-    [source]
-    type = "parquet"
-    underlying = "SPY"
-    options_root = "/nonexistent/opts"
-    spot_root = "/nonexistent/spot"
+    [data.option_bar]
+    type = "parquet_option_bars"
+    root = "/nonexistent/opts"
 
-    [source.synthesizer]
-    type = "ohlcv_spread"
-    lambda = 0.7
+    [data.option_quote]
+    type = "from_bars"
+    synthesizer = { type = "ohlcv_spread", lambda = 0.7 }
 
-    [source.rate]
-    type = "flat"
+    [data.spot_price]
+    type = "parquet_spots"
+    root = "/nonexistent/spot"
+
+    [data.rate_curve]
+    type = "constant"
+    currency = "USD"
     value = 0.04
 
-    [source.div]
-    type = "flat"
+    [data.div_curve]
+    type = "constant"
+    underlying = "SPY"
     value = 0.015
+
+    [data.vol_surface]
+    type = "surface_from"
+    currency = "USD"
 
     [agent]
     type = "static"

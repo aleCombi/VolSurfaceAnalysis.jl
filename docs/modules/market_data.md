@@ -8,9 +8,9 @@ mapping. Design and rationale are in
 [proposals/data_kinds.md](../proposals/data_kinds.md); this doc states
 the rules the code keeps.
 
-Status: landing beside the old `DataSource` / `ModelDataSource` layer,
-which is deleted at step 3 of the plan. Until then both exist and
-nothing downstream reads through this module yet.
+Status: the engine, policies, agents and experiment read through this
+module (plan step 2). The old `DataSource` / `ModelDataSource` layer
+still exists beside it, off the run path, until step 3 deletes it.
 
 ## Kinds and the visibility rule
 
@@ -262,6 +262,17 @@ under `symbol=` partitioning that is a corrupt store.
 
 *Bar-time allowance.* Rows carry Polygon's bar-open stamp, kept as the
 visibility time (see Kinds).
+
+## Config and identity
+
+Config builds specs, one `[data.<kind>]` table per kind plus a
+`clock`; the string-to-kind table and the provider builders live in
+the [`experiment`](experiment.md) loader, nothing on the runtime path
+knows a name. Identity (`to_dict`) projects one entry per kind, the
+clock, and per-spec fields that determine the records served; readers,
+cache sizes and part order never enter the hash. The parquet specs'
+root sits in a reserved `dataset` slot, the place a logical dataset id
+and version would go.
 
 ## Naming
 

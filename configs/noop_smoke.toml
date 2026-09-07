@@ -1,38 +1,49 @@
-# First end-to-end experiment: NoOpPolicy over a real ParquetDataSource.
+# First end-to-end experiment: NoOpPolicy over the real parquet trees.
 #
 # This config is the canonical "does the experiment runner wire together
 # correctly" smoke test. The policy never trades, so the run produces
 # zero positions and zero PnL -- the value is in confirming that
 # loader, engine, metrics, and printer cooperate end to end.
 #
-# Running it requires a Polygon-style parquet tree at `source.root`
-# (options under `options_1min/`, spots under `spots_1min/`). Edit the
-# path to match your data tree.
+# Running it requires a Polygon-style parquet tree: options under
+# `options_1min/`, spots under `spots_1min/`. Each [data.*] table names
+# the tree it reads; edit the roots to match your data. The roots are
+# part of the run_id hash (the reserved `dataset` slot), so the same
+# experiment on a machine with the data elsewhere gets a distinct id.
 
-name = "noop_smoke"
-from = 2024-01-16T14:30:00
-to   = 2024-01-16T14:35:00
+name  = "noop_smoke"
+from  = 2024-01-16T14:30:00
+to    = 2024-01-16T14:35:00
+clock = { kind = "option_quote", underlying = "SPY" }
 
 [outputs]
 metrics = ["sharpe", "max_drawdown"]
 
-[source]
-type            = "parquet"
-underlying      = "SPY"
-root            = "C:/repos/options-collector/data/massive"
-max_days_cached = 3
+[data.option_bar]
+type = "parquet_option_bars"
+root = "C:/repos/options-collector/data/massive/options_1min"
 
-[source.synthesizer]
-type   = "ohlcv_spread"
-lambda = 0.7
+[data.option_quote]
+type = "from_bars"
+synthesizer = { type = "ohlcv_spread", lambda = 0.7 }
 
-[source.rate]
-type  = "flat"
-value = 0.04
+[data.spot_price]
+type = "parquet_spots"
+root = "C:/repos/options-collector/data/massive/spots_1min"
 
-[source.div]
-type  = "flat"
-value = 0.015
+[data.rate_curve]
+type     = "constant"
+currency = "USD"
+value    = 0.04
+
+[data.div_curve]
+type       = "constant"
+underlying = "SPY"
+value      = 0.015
+
+[data.vol_surface]
+type     = "surface_from"
+currency = "USD"
 
 [agent]
 type = "static"

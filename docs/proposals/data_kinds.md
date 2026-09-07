@@ -538,8 +538,26 @@ handle:
   the concrete part type. These three are pinned by
   `test/market_data/test_by_selector.jl`.
 
-Revisited at commit 2.2 on the config-built map (`open_data` return
-type, `@allocated entry`).
+Commit 2.2, on the map built from
+`configs/strangle_spy_16d_1dte.local.toml` (six entries, the loader
+orders them by kind name, so the tuple type is
+`MarketData{Tuple{Constant{DivCurve}, ParquetOptionBars,
+QuotesFromBars{SpreadFromOHLCV}, Constant{RateCurve}, ParquetSpots,
+SurfaceFrom}}`):
+
+- `Base.return_types(open_data, (typeof(exp.data),))` is one concrete
+  type, the same tuple with `ParquetBarsReader`, `ParquetSpotsReader`
+  and `SurfaceReader` in place of their specs: the recursive tuple open
+  infers.
+- `@inferred entry(m, OptionBar)` and `@inferred entry(m,
+  VolatilitySurface)` pass; `@allocated entry(m, SpotPrice) == 0` and
+  `@allocated entry(m, VolatilitySurface) == 0`.
+- On the opened map: `Base.return_types(at, (typeof(d),
+  Type{OptionQuote}, Underlying, DateTime)) == [Vector{OptionQuote}]`
+  (through `QuotesFromBars` into the parquet reader), and through a
+  `TimeCut{typeof(d)}` for `VolatilitySurface` it is
+  `[Vector{VolatilitySurface}]`; `asof` for `RateCurve` with a
+  `Currency` is `[Vector{RateCurve}]`.
 
 ### 10.6 Naming and layout
 
@@ -594,7 +612,11 @@ in `pnl_series` (timestamp, then pnl ascending) stated as a rule
 change in `metrics.md`, and `compare_runs.jl` comparing the series in
 that canonical order with `max_drawdown` recomputed from it for both
 runs (the baseline's stored value is from the build-dependent order
-and is reported, not compared). Verdict after the fix: recorded below.
+and is reported, not compared). Verdict after the fix (commit
+`077e377`, run `5700d3f242f8132e` rerun, `core_hash` `5a2d17c64948e1ba`,
+`dirty=false`, 1:37 wall, 1.58 GB peak): positions, canonical
+`pnl_series`, all ten metrics (stored `max_drawdown` now 59.001 on both
+sides) and manifest identical. **Gate run #1 passes.**
 
 ## Appendix A. Reviews of v1
 

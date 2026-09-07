@@ -145,51 +145,51 @@ via `identity.jl`).
 ## Config loading
 
 A TOML file resolves to an `Experiment` via `load_experiment(path)`.
-Schema is a flat header (`name`, `from`, `to`) plus nested tables:
-`[source]`, `[agent]`, and an optional `[outputs]`. Every sum-type
-(`Curve`, `QuoteSynthesizer`, `Policy`, `Agent`) is keyed by a string
-`type` discriminator; the rest of that table is forwarded to the
-matching builder.
-
-*Transitional (data-kinds plan, step 2.1):* the `[source]` table is
-still the old single-source schema. The loader maps it onto a
-`MarketData` of six entries -- `parquet_option_bars` and
-`parquet_spots` under `root/options_1min` and `root/spots_1min`,
-`from_bars` with the synthesizer, constant USD rate and per-underlying
-div curves, `surface_from` -- and a `Clock{OptionQuote}(underlying)`.
-`max_days_cached` is read and ignored (cache sizes are `open_data`
-kwargs, never config, never identity). The `[data.*]` + `clock` schema
-replaces it at step 2.2. The kind-name table lives in the loader
-(`kind_name`): `option_bar`, `option_quote`, `spot_price`,
-`rate_curve`, `div_curve`, `vol_surface`. `[outputs]` lists `metrics` / `artifacts` plus
-per-metric `[outputs.metric_params.<m>]`; omitted, it defaults to all
-metrics and the default artifacts. Legacy top-level `metrics` is rejected
-with a clear error; metrics must live under `[outputs]`.
+Schema: a flat header (`name`, `from`, `to`, `clock`) plus nested
+tables: one `[data.<kind>]` table per kind, `[agent]`, and an optional
+`[outputs]`. Every sum-type (data provider, `Curve`, `QuoteSynthesizer`,
+`Policy`, `Agent`) is keyed by a string `type` discriminator; the rest
+of that table is forwarded to the matching builder. `[outputs]` lists
+`metrics` / `artifacts` plus per-metric `[outputs.metric_params.<m>]`;
+omitted, it defaults to all metrics and the default artifacts. The old
+top-level `metrics` and the old `[source]` table are rejected with a
+pointer here.
 
 ```toml
-name = "noop_smoke"
-from = 2024-01-16T14:30:00
-to   = 2024-01-16T14:35:00
+name  = "noop_smoke"
+from  = 2024-01-16T14:30:00
+to    = 2024-01-16T14:35:00
+clock = { kind = "option_quote", underlying = "SPY" }
 
 [outputs]                      # optional; omit for all-metrics defaults
 metrics = ["sharpe", "max_drawdown"]
 
-[source]
-type       = "parquet"
+[data.option_bar]
+type = "parquet_option_bars"
+root = "C:/data/polygon/options_1min"
+
+[data.option_quote]
+type = "from_bars"
+synthesizer = { type = "ohlcv_spread", lambda = 0.7 }
+
+[data.spot_price]
+type = "parquet_spots"
+root = "C:/data/polygon/spots_1min"
+
+[data.rate_curve]
+type = "constant"
+currency = "USD"
+value = 0.04                   # or curve = { type = "pc", knots = [...], values = [...] }
+
+[data.div_curve]
+type = "constant"
 underlying = "SPY"
-root       = "C:/data/polygon"
-
-[source.synthesizer]
-type   = "ohlcv_spread"
-lambda = 0.7
-
-[source.rate]
-type  = "flat"
-value = 0.04
-
-[source.div]
-type  = "flat"
 value = 0.015
+
+[data.vol_surface]
+type = "surface_from"
+currency = "USD"
+# spot_for = { SPY = "SPX" }   # optional remap of the pricing spot
 
 [agent]
 type = "static"
@@ -197,6 +197,30 @@ type = "static"
 [agent.policy]
 type = "noop"
 ```
+
+The loader owns the only string-to-kind table:
+
+| table name | kind | provider types |
+|---|---|---|
+| `option_bar` | `OptionBar` | `parquet_option_bars` |
+| `option_quote` | `OptionQuote` | `from_bars` |
+| `spot_price` | `SpotPrice` | `parquet_spots` |
+| `rate_curve` | `RateCurve` | `constant` (`currency`) |
+| `div_curve` | `DivCurve` | `constant` (`underlying`) |
+| `vol_surface` | `VolatilitySurface` | `surface_from` |
+
+`by_selector` composes any kind: every key other than `type` is a
+selector naming a sub-table (`SPY = { type = "parquet_spots", root =
+... }`). The clock's selector key follows its kind (`underlying` or
+`currency`).
+
+Load-time checks, each with a clear message: every table name is a
+known kind; the built spec serves that kind; every derived spec's input
+kinds are present; every spec has a lifecycle pair; the clock's kind
+has a table and its selector has the right type. Cache sizes are
+`open_data` kwargs, never config, never identity; the data roots *are*
+identity (the reserved `dataset` slot of the parquet specs), so the
+same config on a machine with the data elsewhere is a distinct run.
 
 New concrete types register themselves by adding one entry to the
 relevant builder table (`_CURVE_BUILDERS`, `_SYNTHESIZER_BUILDERS`,

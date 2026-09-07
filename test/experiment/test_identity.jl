@@ -3,23 +3,30 @@
 # Experiments are built through the config loader pointed at nonexistent
 # roots: specs are pure values, so nothing is opened and nothing to close.
 
-# Source + agent body shared by the structural tests. Explicit roots, so
-# there is no platform path-separator ambiguity.
+# Data + clock + agent body shared by the structural tests. Explicit roots,
+# so there is no platform path-separator ambiguity.
 const _ID_SRC_TOML = """
-[source]
-type = "parquet"
-underlying = "SPY"
-options_root = "/nonexistent/opts"
-spot_root = "/nonexistent/spot"
-[source.synthesizer]
-type = "ohlcv_spread"
-lambda = 0.7
-[source.rate]
-type = "flat"
+clock = { kind = "option_quote", underlying = "SPY" }
+[data.option_bar]
+type = "parquet_option_bars"
+root = "/nonexistent/opts"
+[data.option_quote]
+type = "from_bars"
+synthesizer = { type = "ohlcv_spread", lambda = 0.7 }
+[data.spot_price]
+type = "parquet_spots"
+root = "/nonexistent/spot"
+[data.rate_curve]
+type = "constant"
+currency = "USD"
 value = 0.04
-[source.div]
-type = "flat"
+[data.div_curve]
+type = "constant"
+underlying = "SPY"
 value = 0.015
+[data.vol_surface]
+type = "surface_from"
+currency = "USD"
 [agent]
 type = "static"
 [agent.policy]
@@ -73,12 +80,13 @@ end
     @test core_hash(moved) != core_hash(base)
 end
 
-@testset "identity: invariant to whitespace, key order, name, cache knobs, omitted defaults" begin
+@testset "identity: invariant to whitespace, key order, name, omitted defaults" begin
     a = load_experiment_str(_id_toml(name="a"))   # outputs omitted -> default all
     b_toml = """
     to   =  2024-01-15T15:31:00
     from =  2024-01-15T15:30:00
     name = "b"
+    clock = { underlying = "spy", kind = "option_quote" }
 
     [outputs]
     metrics = ["max_drawdown", "profit_factor", "sharpe", "sortino", "volatility"]
@@ -89,56 +97,72 @@ end
     [agent.policy]
     type = "noop"
 
-    [source]
-    type = "parquet"
-    underlying = "SPY"
-    options_root = "/nonexistent/opts"
-    spot_root = "/nonexistent/spot"
-    max_days_cached = 99
-    [source.synthesizer]
-    type = "ohlcv_spread"
-    lambda = 0.7
-    [source.rate]
-    type = "flat"
-    value = 0.04
-    [source.div]
-    type = "flat"
+    [data.vol_surface]
+    currency = "usd"
+    type = "surface_from"
+    [data.div_curve]
     value = 0.015
+    underlying = "SPY"
+    type = "constant"
+    [data.rate_curve]
+    curve = { type = "flat", value = 0.04 }
+    currency = "USD"
+    type = "constant"
+    [data.spot_price]
+    root = "/nonexistent/spot"
+    type = "parquet_spots"
+    [data.option_quote]
+    synthesizer = { lambda = 0.7, type = "ohlcv_spread" }
+    type = "from_bars"
+    [data.option_bar]
+    root = "/nonexistent/opts"
+    type = "parquet_option_bars"
     """
     b = load_experiment_str(b_toml)
     @test core_hash(a) == core_hash(b)
     @test full_hash(a) == full_hash(b)
 end
 
-@testset "identity: cache knobs excluded from hashes" begin
-    mk(mdc) = """
-    name = "a"
-    from = 2024-01-15T15:30:00
-    to   = 2024-01-15T15:31:00
-    [source]
-    type = "parquet"
-    underlying = "SPY"
-    options_root = "/x/opts"
-    spot_root = "/x/spot"
-    max_days_cached = $mdc
-    [source.synthesizer]
-    type = "ohlcv_spread"
-    lambda = 0.7
-    [source.rate]
-    type = "flat"
+@testset "identity: spot_for and by_selector order in TOML do not change the hash" begin
+    mk(spot_for, parts) = """
+    name  = "a"
+    from  = 2024-01-15T15:30:00
+    to    = 2024-01-15T15:31:00
+    clock = { kind = "option_quote", underlying = "SPY" }
+    [data.option_bar]
+    type = "parquet_option_bars"
+    root = "/x/opts"
+    [data.option_quote]
+    type = "from_bars"
+    synthesizer = { type = "ohlcv_spread", lambda = 0.7 }
+    [data.spot_price]
+    type = "by_selector"
+    $parts
+    [data.rate_curve]
+    type = "constant"
+    currency = "USD"
     value = 0.04
-    [source.div]
-    type = "flat"
+    [data.div_curve]
+    type = "constant"
+    underlying = "SPY"
     value = 0.015
+    [data.vol_surface]
+    type = "surface_from"
+    currency = "USD"
+    spot_for = { $spot_for }
     [agent]
     type = "static"
     [agent.policy]
     type = "noop"
     """
-    a = load_experiment_str(mk(3))
-    b = load_experiment_str(mk(99))
+    p1 = "SPY = { type = \"parquet_spots\", root = \"/x/spot\" }\nSPX = { type = \"parquet_spots\", root = \"/y/spot\" }"
+    p2 = "SPX = { type = \"parquet_spots\", root = \"/y/spot\" }\nSPY = { type = \"parquet_spots\", root = \"/x/spot\" }"
+    a = load_experiment_str(mk("SPY = \"SPX\", SPX = \"SPY\"", p1))
+    b = load_experiment_str(mk("SPX = \"SPY\", SPY = \"SPX\"", p2))
     @test core_hash(a) == core_hash(b)
     @test full_hash(a) == full_hash(b)
+    c = load_experiment_str(mk("SPY = \"SPX\"", p1))
+    @test core_hash(c) != core_hash(a)
 end
 
 @testset "identity: in-memory providers are not hashable (so not saveable)" begin
