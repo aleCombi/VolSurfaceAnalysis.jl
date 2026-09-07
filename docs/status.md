@@ -96,12 +96,15 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
   `close_data!`, `BySelector` composition, derived providers that read
   through the map they are called from (structural time cut), and a
   declared engine `Clock`. Two review rounds (appendices A, C) are
-  answered in section 9; a third round (appendix D) finds the
-  architecture settled and asks for four text fixes before step 1:
-  `asof` return shape for grid kinds, `Constant` selector check, the
-  bar-time visibility convention, and the window-end rule. Plan: baseline run + rule-5 check, port the
-  new layer beside the old, switch consumers, delete the old layer.
-  Execution on the DevBox, where the data is.
+  answered in section 9; a third round (appendix D) found the
+  architecture settled and asked for four text fixes, folded in as
+  v3.1. Execution follows
+  [proposals/data_kinds_plan.md](proposals/data_kinds_plan.md) on the
+  DevBox, where the data is. **Step 0 done** (2026-09-07): baseline run
+  `4647bcfa219d0cfb` saved under `scripts/runs/` on the DevBox with
+  `dirty=false`, `scripts/compare_runs.jl` as the reproduction gate,
+  convention check recorded in proposal section 10. Next: step 1, the
+  new `market_data` layer beside the old.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail

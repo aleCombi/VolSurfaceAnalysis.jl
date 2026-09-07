@@ -1,9 +1,13 @@
 # Proposal: kinds, providers, readers -- a scalable data layer (v3)
 
-Status: proposal, third revision. v1 drew two reviews (Appendix A), v2
-answered them and drew a second round (Appendix C), v3 settles the
-protocol contracts that round raised. Section 9 maps every finding of
-both rounds to what changed. Appendix B is the end-to-end sketch.
+Status: v3.1, accepted; implementation in progress. v1 drew two reviews
+(Appendix A), v2 answered them and drew a second round (Appendix C), v3
+settled the protocol contracts that round raised and drew a third
+(Appendix D); v3.1 folds in Review A3's text fixes. Section 9 maps every
+finding of the first two rounds to what changed; section 10 records the
+convention check and the step-0 baseline. Appendix B is the end-to-end
+sketch. The commit-by-commit plan is
+[data_kinds_plan.md](data_kinds_plan.md).
 
 ## 1. Why
 
@@ -48,6 +52,15 @@ Every kind carries two things the protocol depends on:
   other date a record carries (ex-date, effective date, maturity) is an
   ordinary field. A bar's visibility time is its bar time; a curve
   snapshot's is the snapshot time; a dividend's is its announcement.
+  *Bar-time convention:* Polygon minute bars are stamped at the bar
+  open, and the close, high and low are only knowable at bar end. The
+  open stamp is kept as the visibility time, so a decision at `t` sees
+  the `[t, t+1min)` bar. This is a documented one-minute allowance, not
+  a shift: shifting to bar end would move every timestamp (the 19:30
+  entry would read the 19:29 bar, an expiry settle the 19:59 spot bar),
+  so the step-0 gate could not pass and the change would not be
+  attributable. A `stamp = :bar_end` option on the parquet spec, in
+  identity, is the clean later addition (backlog).
 - **A selector**: the field that distinguishes parallel series of the
   same kind (`Underlying` for market data, a currency for rate curves).
   Kinds without parallel series have none.
@@ -83,25 +96,27 @@ Three shapes and a timestamp enumerator. `sel` is the kind's selector.
 ```julia
 at(src,      ::Type{R}, sel, ts)        -> Vector{R}          timestamp == ts
 between(src, ::Type{R}, sel, from, to)  -> iterable of R      from <= timestamp <= to
-asof(src,    ::Type{R}, sel, ts)        -> Union{R, Missing}  the record with the largest timestamp <= ts
+asof(src,    ::Type{R}, sel, ts)        -> Vector{R}          every record at the largest timestamp <= ts
 timestamps(src, ::Type{R}, sel, from, to) -> Vector{DateTime}
 ```
 
 Rules:
 
 - Results are sorted by `timestamp`. `at` and `between` return only
-  records in range; **empty means absent**. `missing` is only for absent
-  scalar fields *inside* a record.
+  records in range; `asof` returns every record at the winning
+  timestamp (a whole chain for grid kinds, one record for snapshots).
+  **Empty means absent** for all four shapes. `missing` is only for
+  absent scalar fields *inside* a record; no shape returns it.
 - **`between` promises an iterable, not a container.** Small providers
   return a vector; large ones return a lazy iterator, one day file in
   memory at a time. Consumers use Julia's iteration protocol
   (`collect`, `Iterators.filter`, `Iterators.map`). An iterator is
   valid only while its reader is open (section 3).
 - **`asof` has no default** and every provider implements it with what
-  its storage does well: a vector does `searchsortedlast`, DuckDB does
-  `ORDER BY timestamp DESC LIMIT 1`, a partitioned reader walks its own
-  partition list backward. A provider that finds two records at the
-  winning timestamp throws.
+  its storage does well: a vector does `searchsortedlast` and returns
+  the run of rows sharing that timestamp, DuckDB does `ORDER BY
+  timestamp DESC LIMIT 1` and then reads that instant, a partitioned
+  reader walks its own partition list backward.
 - Ranges are always bounded. There is no unbounded discovery verb, and
   `asof` is not a scan.
 - The default `at` is `collect(between(src, R, sel, ts, ts))`;
@@ -114,7 +129,7 @@ Rules:
 Ordinary functions over the protocol, not part of it.
 
 ```julia
-only_or_missing(v) = isempty(v) ? missing : only(v)     # grid singletons; errors on duplicates
+only_or_missing(v) = isempty(v) ? missing : only(v)     # singletons of `at` / `asof`; errors on duplicates
 by_timestamp(it)   = ...   # lazy run-length grouping of a sorted iterable into (ts, Vector{R})
 ```
 
@@ -125,7 +140,7 @@ documentation, not a construct:
 |---|---|---|
 | `OptionQuote`, `OptionBar` | grid, many per `ts` | `at` |
 | `SpotPrice`, `VolSurface` | grid, one per `ts` | `only_or_missing(at(...))` |
-| `RateCurve`, `DivCurve` | snapshot, holds until superseded | `asof` |
+| `RateCurve`, `DivCurve` | snapshot, holds until superseded | `only_or_missing(asof(...))` |
 | `Split`, `Dividend` | event | `between` over a bounded lookback, then filter on the effective field |
 
 "Dividends going ex in the next 30 days that were announced before `t`"
@@ -165,8 +180,10 @@ checks this with `@code_warntype`.
 
 `Constant{RateCurve}` is one record timestamped at the start of time,
 which under the visibility rule reads as "always known": `asof` returns
-it, `between` over any real window never contains it, `timestamps` is
-empty.
+it when `selector(c.record) == sel` and is empty for any other selector
+(a constant configured for SPY says nothing about SPX); `between` and
+`timestamps` apply the same selector check and never contain it over a
+real window.
 
 ### 2.5 Derived providers
 
@@ -213,8 +230,7 @@ Consequences:
   experiment in config. Asking for a kind not provided fails at `entry`.
 
 One entry per kind is deliberate. Comparing two synthesizers or two
-surface conventions is two experiments sharing a `core_hash` family,
-which is what the run store is for.
+surface conventions is two runs, which is what the run store is for.
 
 ### 2.7 Time cut
 
@@ -236,18 +252,29 @@ structural, not a convention. Because `timestamp` is visibility time,
 the cut is the complete no-lookahead rule: nothing announced after the
 cutoff is visible, whatever its effective date.
 
+Derived caches are cut-independent by one invariant: a derived provider
+reads its inputs at or before the requested `ts`, so a cache entry keyed
+on `(sel, ts)` is valid under any cutoff `>= ts`. `SurfaceFrom` relies
+on it; the same surface object comes back through the bare map and
+through any cut at or after its timestamp.
+
 ### 2.8 Clock
 
 The engine ticks on a declared grid, not on an implicit one.
 
 ```julia
-struct Clock{R}; sel end                         # Clock{OptionQuote}(SPY)
+struct Clock{R,S}; sel::S end                    # Clock{OptionQuote}(SPY); sel isa selector_type(R)
 ```
 
 `Experiment` carries a required `clock`; `run_backtest` enumerates
 `timestamps(data, R, clock.sel, from, to)` unless the agent's
 `tick_times` overrides. The clock is part of core identity. The window
-end is `asof(data, SpotPrice, u, to)`: one call, no scan.
+end is the **last clock tick**: the timestamp of
+`asof(data, R, clock.sel, to)`, one partition walk and no scan; it is an
+error if that is empty or before `from`. The settle spot is
+`at(data, SpotPrice, clock.sel, window_end)`, so a day with spots but no
+chains, or a stale spot well before `to`, can never move the residual
+mark.
 
 ## 3. Lifecycle
 
@@ -267,8 +294,11 @@ close_data!(::Constant)          = nothing
 ```
 
 A spec without both methods is a load-time error. The composite opens
-in order and unwinds on failure; close is best-effort in reverse, first
-error rethrown; `with_data(f, m)` is the scoped form. A closed DuckDB
+in order and unwinds on failure, closing what it opened best-effort so
+the original error is the one that propagates; close is best-effort in
+reverse, every reader attempted, first error rethrown; `with_data(f, m)`
+is the scoped form and closes quietly when `f` throws, so a close error
+never masks `f`'s. A closed DuckDB
 connection throws on use, which is the use-after-close behaviour; a
 `closed::Ref{Bool}` on the parquet readers is the whole change if a
 nicer message is ever wanted.
@@ -315,9 +345,11 @@ Policies name kinds and selectors, never entries.
 
 `to_dict(::MarketData)` emits one entry per kind, keyed by the loader's
 kind name, sorted, each the `to_dict` of its spec, plus the clock. With
-one entry per kind and derived providers holding no inputs, there is
-nothing to canonicalize. Readers never appear because they are not on
-specs.
+one entry per kind and derived providers holding no inputs, the only
+order to canonicalize is inside a spec: `BySelector` parts and
+`SurfaceFrom.spot_for` are emitted sorted by selector, so the same map
+spelled in a different order never forks the hash. Readers never appear
+because they are not on specs.
 
 **Every existing run id changes.** Decision: break once, now, while the
 store holds at most one run. No migration script. The manifest gains a
@@ -330,8 +362,9 @@ fingerprint is its own proposal.
 ## 6. Rule changes surfaced (design rule 3)
 
 1. **Absence convention.** `nothing` / `missing` for aggregates and
-   scalars becomes: empty result for no records; `missing` only inside
-   records and from `asof`.
+   scalars becomes: empty result for no records, from every shape;
+   `missing` only inside records (and from `only_or_missing`, a library
+   function over an empty result).
 2. **`timestamp` is visibility time.** New rule, all kinds. Effective
    dates are ordinary fields.
 3. **`OptionBar` status.** A first-class kind, documented vendor-level;
@@ -369,7 +402,7 @@ commit updates the affected module docs (design rule 1).
 
 | Step | What | Gate |
 |---|---|---|
-| 0 | Save a baseline run of `configs/strangle_spy_16d_1dte.toml` on the DevBox (`~/data/massive`; the `.local.toml` points at it). Convention check per design rule 5, recorded in section 10. | A run exists; section 10 filled. |
+| 0 | Save a baseline run of `configs/strangle_spy_16d_1dte.toml` on the DevBox (`~/data/massive`; the `.local.toml` points at it). Convention check per design rule 5, recorded in section 10. | A run exists; section 10 filled. Done: run `4647bcfa219d0cfb` (section 10.7). |
 | 1 | The new layer, complete, in its own module beside the old: kinds with the visibility rule, the three shapes, `MarketData`, `TimeCut`, `BySelector`, `Constant`, `InMemory`, parquet specs and readers (partition list, day-lazy range, `asof`), `QuotesFromBars`, `SurfaceFrom`, curve kinds, `open_data` / `close_data!` / `with_data`. Fixture tests; `at == collect(between)`; cut-through-derived test; open-failure unwind test; `@code_warntype` on `entry` and `BySelector` routing. New `docs/modules/market_data.md`. | Suite green. |
 | 2 | Consumers switch: engine with `Clock`, policies, `run_experiment` with `asof` window end, `[data.*]` loader and kind table, `to_dict`, `schema_version`, `load_run` refusal of old runs. Configs rewritten. Benchmark point versus range on one month of minute data, recorded in section 10. | Baseline reproduces under its new id. |
 | 3 | Delete `DataSource`, `ModelDataSource`, `TimeCutModelDataSource`, `clear_cache!`, `with_parquet_source`, `docs/modules/model_data.md`. Final `data.md`, `status.md`. | Suite green. |
@@ -406,7 +439,7 @@ commit updates the affected module docs (design rule 1).
 | A2-7, B2 "reorder steps" | Not taken as asked. The current code is not a consolidated base to protect; the plan ports the new layer beside the old in one step, keeps the baseline gate and the benchmark, and deletes the old layer last. |
 | A2-8, B2 "section 10 empty" | Step 0 gates step 1. |
 | A2 practical notes: no saved run on the DevBox | Step 0 saves one before any code moves. |
-| B2 "multiple providers of one kind" | Not taken. One backtest, one map; variant comparison is two runs sharing a `core_hash` family. |
+| B2 "multiple providers of one kind" | Not taken. One backtest, one map; variant comparison is two runs in the store. |
 | B2 "structural raw/model boundary" | Not taken. A policy reading bars is a coupling choice, not a correctness risk; a doc rule covers it. |
 | B2 "dataset version in identity" | Reserved `dataset` slot in the projection; a real fingerprint is its own proposal, equally owed by today's code. |
 | B2 "one reader per storage imprecise" | Wording fixed: one reader per entry. |
@@ -414,12 +447,113 @@ commit updates the affected module docs (design rule 1).
 
 ## 10. Convention check findings
 
-To be filled in at step 0. Must cover: type-marker dispatch in
-`Tables.jl` / `TimeSeries.jl` / `DataInterpolations.jl`; lazy
-partitioned iteration (`Tables.partitions`); resource lifecycle naming
-outside `Base.open` / `Base.close` (`DBInterface.jl`); and measured
-inference of tuple lookup and `BySelector` routing under a config-built
-`MarketData`. Benchmark results from step 2 are recorded here too.
+Filled at step 0 (commit 0b, 2026-09-07) per design rule 5. Sources:
+the depot copies on the DevBox (Tables.jl, DBInterface.jl, DuckDB.jl)
+and Julia 1.12 Base and manual, read directly; TimeSeries.jl,
+DataInterpolations.jl, Impute.jl, StructTypes.jl and JSON3.jl are not
+in the depot and are cited from their documented APIs. 10.5 and the
+benchmark are filled as their commits land (1.3, 2.2, 2.4).
+
+### 10.1 Tables.jl: partitions and lazy iteration
+
+- `Tables.partitions(x)` is an iterator of *tables* (default `(x,)`;
+  `Tables.partitioner(f, list)` maps a list of inputs to one table
+  each); `Tables.rows` / `Tables.columns` give row or column access on
+  one table. DuckDB.jl's `QueryResult` iterates as
+  `Tables.rows(Tables.columns(q))`, and its `Tables.partitions` yields
+  one `QueryResultChunk` per data chunk, forward-only (a second pass
+  throws "Iterating chunks more than once is not supported").
+- Recorded: `between` is an iterator of *records*, not of tables, so
+  `Tables.partitions` is not the hook to implement; the day-lazy
+  parquet iterator mirrors its contract instead (one partition
+  materialized at a time, forward-only, valid while the source is
+  open). `Tables.columntable` stays the materialization path inside
+  `_day_bars`, as it is in `_load_chain_at` today.
+
+### 10.2 DBInterface.jl and Base: lifecycle naming
+
+- DBInterface declares `connect(T, args...)`, `close!(conn)`,
+  `execute`, `prepare` as project-owned generics, bang on the mutating
+  close, and `connect(f, T, ...)` as the scoped form. DuckDB.jl
+  implements `DBInterface.connect(::Type{DB}, ...)`,
+  `DBInterface.close!(::DB)`, `close!(::Connection)`,
+  `close!(::QueryResult)`, and keeps `open` / `close` / `disconnect`
+  only in a legacy `old_interface.jl`. Base pairs `open` / `close` /
+  `isopen` with the scoped `open(f, ...)`; `mktempdir(f)` and
+  `redirect_stdout(f)` have the same do-block shape.
+- Recorded: `open_data` / `close_data!` follow the ecosystem's
+  project-owned verb pair with the bang on the mutating close; no
+  method is added to `Base.open` / `Base.close`; `with_data(f, m)`
+  follows the in-repo `with_run_store` / `with_parquet_source` and
+  Base's scoped-form precedent.
+
+### 10.3 Type-marker dispatch
+
+- Base: `read(io, ::Type{T})`, `parse(::Type{T}, s)`,
+  `rand(rng, ::Type{T})`. JSON3: `JSON3.read(s, ::Type{T})`.
+  StructTypes: `StructTypes.StructType(::Type{T})`, a trait on the
+  type. Tables: `Tables.istable(::Type{T})`, `Tables.schema` as traits;
+  no abstract supertype for tables (duck-typed).
+- Recorded: source first, `::Type{R}` after it (`at(src, R, sel, ts)`,
+  as `read(io, T)`); `selector_type(::Type{R})` and `kind(p)` are
+  StructTypes-style traits; providers have no abstract supertype
+  (duck-typed protocol, as Tables.jl).
+
+### 10.4 As-of conventions
+
+- TimeSeries.jl: `from(ta, t)`, `to(ta, t)`, `findwhen`, exact
+  `ta[dt]` indexing. DataInterpolations.jl:
+  `ConstantInterpolation(u, t; dir=:left)` for last observation carried
+  forward. pandas: `Series.asof`, `merge_asof`. Impute.jl: `locf`.
+- Recorded: Julia has no established name for "latest at or before";
+  `asof` is taken from pandas. `between(from, to)` is chosen over the
+  TimeSeries `from` / `to` pair. `Base.between` exists with exactly one
+  method, `between(b::T, lo::T, hi::T) where T<:Integer`
+  (`strings/string.jl`), unexported; `at`, `asof`, `timestamps`,
+  `kind`, `entry`, `selector` are not defined in Base or Dates. The
+  project defines its own generic `between` and must never write
+  `import Base: between`; commit 1.1 pins
+  `length(methods(Base.between)) == 1`.
+
+### 10.5 Measured inference
+
+Filled at commit 1.3 (`@inferred entry`, `BySelector` routing) and
+revisited at 2.2 on a config-built map.
+
+### 10.6 Naming and layout
+
+- Style guide: no `get_` prefix on accessors (`kind`, `entry`,
+  `selector`); bang only on mutation (`close_data!`).
+- Interfaces: `between` and `by_timestamp` results follow the iteration
+  protocol (`iterate`, `IteratorSize`, `eltype`), not `AbstractArray`.
+- Package layout: files `include`d into the one module, no submodules,
+  matching the existing modules.
+
+### 10.7 Step-0 baseline
+
+Run on the DevBox (2 cores, 3.7 GB, Julia 1.12.7) at commit `45cf6c1`
+(commit 0a), 2026-09-07, from
+`configs/strangle_spy_16d_1dte.local.toml` (roots under
+`/home/ale/data/massive`), saved to `scripts/runs/run_id=<id>/`
+(gitignored; keep until step 3.2 is done).
+
+| item | value |
+|---|---|
+| run_id (= `full_hash`, precomputed before the run) | `4647bcfa219d0cfb` |
+| `core_hash` | `cf9dde8a8774b812` |
+| window | 2016-03-28T00:00:00 to 2026-03-27T23:59:59 |
+| `n_positions` / `n_unmarked` / `n_opens` / `n_closes` | 4480 / 20 / 4480 / 0 |
+| `window_end_spot` | 633.56 |
+| `total_pnl` | 367.9571 |
+| `commit_sha` / `dirty` | `45cf6c1` / false |
+| wall / peak RSS | 1:53 / 1.67 GB (`/usr/bin/time -v`; `--save`, Plots loaded) |
+| self-check | `compare_runs.jl scripts <id> <id>` passes |
+
+The backtest itself is about one minute; the rest is package load and
+the artifact. The first attempt was OOM-killed at save time with the
+Revise REPL open; the rerun with the REPL closed succeeded.
+
+Gate runs: recorded here as steps 2.1, 2.2 and 3.2 land.
 
 ## Appendix A. Reviews of v1
 
@@ -789,12 +923,12 @@ struct VolSurface  underlying::Underlying; ...; timestamp::DateTime end        #
 # ================= Protocol: three shapes plus timestamps. `sel` is the kind's selector.
 #   at(src, ::Type{R}, sel, ts)               -> Vector{R}         timestamp == ts. Sorted. Empty = absent.
 #   between(src, ::Type{R}, sel, from, to)    -> iterable of R     from <= timestamp <= to. Sorted. Lazy allowed.
-#   asof(src, ::Type{R}, sel, ts)             -> Union{R,Missing}  largest timestamp <= ts. No default. Dupes throw.
+#   asof(src, ::Type{R}, sel, ts)             -> Vector{R}         every record at the largest timestamp <= ts. No default. Empty = absent.
 #   timestamps(src, ::Type{R}, sel, from, to) -> Vector{DateTime}
 at(src, ::Type{R}, sel, ts::DateTime) where R = collect(between(src, R, sel, ts, ts))   # default
 
 # ================= Library. Plain Julia over the protocol.
-only_or_missing(v) = isempty(v) ? missing : only(v)
+only_or_missing(v) = isempty(v) ? missing : only(v)      # singletons of `at` / `asof`
 by_timestamp(it)   = ...            # lazy run-length grouping of a sorted iterable into (ts, Vector{R})
 
 # ================= Provider specs: immutable, per storage, no resources. Config builds; identity hashes.
@@ -845,34 +979,32 @@ close_data!(r::ParquetBarsReader)  = DBInterface.close!(r.con)
 close_data!(r::ParquetSpotsReader) = DBInterface.close!(r.con)
 close_data!(::Union{SurfaceReader, Constant, InMemory, CsvEvents, QuotesFromBars}) = nothing
 
-function open_data(b::BySelector{R}) where R
-    opened = Pair[]
-    try
-        for (k, p) in b.parts; push!(opened, k => open_data(p)); end
-    catch
-        foreach(p -> close_data!(p.second), reverse(opened)); rethrow()
-    end
-    BySelector{R}(opened...)
+# Recursive tuple open: type-stable (no Any[]), and the unwind comes for free.
+_open_all() = ()
+function _open_all(s, rest...)
+    r = open_data(s)
+    tail = try _open_all(rest...) catch; _close_quietly(r); rethrow() end   # original error propagates
+    (r, tail...)
 end
-close_data!(b::BySelector) = foreach(p -> close_data!(p.second), reverse(b.parts))
-
-function open_data(m::MarketData)
-    opened = Any[]
-    try
-        for s in m.entries; push!(opened, open_data(s)); end
-    catch
-        foreach(close_data!, reverse(opened)); rethrow()
-    end
-    MarketData(Tuple(opened))
-end
-function close_data!(m::MarketData)
+_close_quietly(r) = try close_data!(r) catch e; @warn "close during unwind failed" exception=e end
+function _close_all_best_effort(readers)                    # reverse order, every close attempted, first error rethrown
     err = nothing
-    for r in reverse(m.entries)
+    for r in reverse(readers)
         try close_data!(r) catch e; err = something(err, e) end
     end
     err === nothing || throw(err)
 end
-with_data(f, m::MarketData) = (d = open_data(m); try f(d) finally close_data!(d) end)
+
+open_data(b::BySelector{R}) where R = BySelector{R}((first.(b.parts) .=> _open_all(last.(b.parts)...))...)
+close_data!(b::BySelector) = _close_all_best_effort(last.(b.parts))
+open_data(m::MarketData)   = MarketData(_open_all(m.entries...))
+close_data!(m::MarketData) = _close_all_best_effort(m.entries)
+function with_data(f, m::MarketData)
+    d = open_data(m)
+    r = try f(d) catch; _close_quietly(d); rethrow() end    # a close error never masks f's error
+    close_data!(d)
+    r
+end
 
 # ================= Shapes on the map: entry by type, pass the map down as context.
 at(m::MarketData, ::Type{R}, sel, ts) where R               = at(entry(m, R), m, R, sel, ts)
@@ -885,43 +1017,55 @@ at(r::ParquetBarsReader, ::Any, ::Type{OptionBar}, u::Underlying, ts) = _load_ch
 between(r::ParquetBarsReader, ::Any, ::Type{OptionBar}, u::Underlying, from, to) =
     Iterators.flatten(_day_bars(r, u, d, from, to) for d in Date(from):Day(1):Date(to))
 asof(r::ParquetBarsReader, ::Any, ::Type{OptionBar}, u::Underlying, ts) =
-    _latest_at_or_before(r, u, ts)                             # walks r.partitions backward; bounded by data that exists
+    _chain_at_or_before(r, u, ts)                              # walks r.partitions backward; the whole chain at the winning timestamp
 at(r::ParquetSpotsReader, ::Any, ::Type{SpotPrice}, u::Underlying, ts) = _spot_at(r, u, ts)
-asof(c::Constant{R}, ::Any, ::Type{R}, sel, ts) where R = c.record
+asof(c::Constant{R}, ::Any, ::Type{R}, sel, ts) where R =
+    selector(c.record) == sel ? [c.record] : R[]               # a constant for SPY says nothing about SPX
 between(c::Constant{R}, ::Any, ::Type{R}, sel, from, to) where R =
-    from <= c.record.timestamp <= to ? [c.record] : R[]
+    selector(c.record) == sel && from <= c.record.timestamp <= to ? [c.record] : R[]
+timestamps(c::Constant{R}, ::Any, ::Type{R}, sel, from, to) where R =
+    DateTime[r.timestamp for r in between(c, nothing, R, sel, from, to)]
 between(p::InMemory{R}, ::Any, ::Type{R}, sel, from, to) where R =
     filter(r -> selector(r) == sel && from <= r.timestamp <= to, p.rows)
 asof(p::InMemory{R}, ::Any, ::Type{R}, sel, ts) where R =
     (rows = filter(r -> selector(r) == sel, p.rows); i = searchsortedlast(rows, ts; by=r -> r.timestamp);
-     i == 0 ? missing : rows[i])
+     i == 0 ? R[] : filter(r -> r.timestamp == rows[i].timestamp, rows))   # every record at the winning timestamp
 
 # Composition routes on the selector and forwards the context untouched.
 _route(sel, (k, p)::Pair, rest...) = k == sel ? p : _route(sel, rest...)
 _route(sel) = throw(KeyError(sel))
-at(b::BySelector{R}, m, ::Type{R}, sel, ts) where R              = at(_route(sel, b.parts...), m, R, sel, ts)
-between(b::BySelector{R}, m, ::Type{R}, sel, from, to) where R   = between(_route(sel, b.parts...), m, R, sel, from, to)
-asof(b::BySelector{R}, m, ::Type{R}, sel, ts) where R            = asof(_route(sel, b.parts...), m, R, sel, ts)
+at(b::BySelector{R}, m, ::Type{R}, sel, ts) where R                  = at(_route(sel, b.parts...), m, R, sel, ts)
+between(b::BySelector{R}, m, ::Type{R}, sel, from, to) where R       = between(_route(sel, b.parts...), m, R, sel, from, to)
+asof(b::BySelector{R}, m, ::Type{R}, sel, ts) where R                = asof(_route(sel, b.parts...), m, R, sel, ts)
+timestamps(b::BySelector{R}, m, ::Type{R}, sel, from, to) where R    = timestamps(_route(sel, b.parts...), m, R, sel, from, to)
 
 # Derived providers read through the context. Whatever `m` is, cut or not, is all they can see.
+# `timestamps` forwards to the input kind under the same context and selector: the clock runs on it.
 at(p::QuotesFromBars, m, ::Type{OptionQuote}, u, ts) =
     map(b -> synthesize(p.synthesizer, b), at(m, OptionBar, u, ts))
 between(p::QuotesFromBars, m, ::Type{OptionQuote}, u, from, to) =
     Iterators.map(b -> synthesize(p.synthesizer, b), between(m, OptionBar, u, from, to))
 asof(p::QuotesFromBars, m, ::Type{OptionQuote}, u, ts) =
-    (b = asof(m, OptionBar, u, ts); ismissing(b) ? missing : synthesize(p.synthesizer, b))
+    map(b -> synthesize(p.synthesizer, b), asof(m, OptionBar, u, ts))
+timestamps(::QuotesFromBars, m, ::Type{OptionQuote}, u, from, to) = timestamps(m, OptionBar, u, from, to)
 
 function at(r::SurfaceReader, m, ::Type{VolSurface}, u::Underlying, ts)
-    get!(r.cache, (u, ts)) do
+    get!(r.cache, (u, ts)) do            # valid under any cut >= ts: every input read is at or before ts
         su    = get(r.spec.spot_for, u, u)
         chain = at(m, OptionQuote, u, ts)
         spot  = only_or_missing(at(m, SpotPrice, su, ts))
-        rate  = asof(m, RateCurve, r.spec.currency, ts)
-        div   = asof(m, DivCurve,  u, ts)
+        rate  = only_or_missing(asof(m, RateCurve, r.spec.currency, ts))
+        div   = only_or_missing(asof(m, DivCurve,  u, ts))
         (isempty(chain) || ismissing(spot) || ismissing(rate) || ismissing(div)) && return VolSurface[]
-        [build_surface(chain, spot.price, rate.curve, div.curve)]
+        s = build_surface(chain, spot.price, rate.curve, div.curve)
+        s === nothing ? VolSurface[] : [s]
     end
 end
+between(r::SurfaceReader, m, ::Type{VolSurface}, u, from, to) =
+    Iterators.flatten(at(r, m, VolSurface, u, ts) for ts in timestamps(m, OptionQuote, u, from, to))
+asof(r::SurfaceReader, m, ::Type{VolSurface}, u, ts) =
+    (q = asof(m, OptionQuote, u, ts); isempty(q) ? VolSurface[] : at(r, m, VolSurface, u, first(q).timestamp))
+timestamps(::SurfaceReader, m, ::Type{VolSurface}, u, from, to) = timestamps(m, OptionQuote, u, from, to)
 
 # ================= Time cut: wraps the map, passes ITSELF down. Filters on visibility time only.
 struct TimeCut{M}; inner::M; cutoff::DateTime end
@@ -935,11 +1079,12 @@ timestamps(c::TimeCut, ::Type{R}, sel, from, to) where R =
     from <= c.cutoff ? timestamps(entry(c.inner, R), c, R, sel, from, min(to, c.cutoff)) : DateTime[]
 
 # ================= Clock, engine, experiment.
-struct Clock{R}; sel end                                       # Clock{OptionQuote}(SPY); part of core identity
+struct Clock{R,S}; sel::S end                                  # Clock{OptionQuote}(SPY); sel isa selector_type(R); core identity
+timestamps(m, c::Clock{R}, from, to) where R = timestamps(m, R, c.sel, from, to)
 
-function run_backtest(agent, data, from, to, clock::Clock{R}) where R
+function run_backtest(agent, data, from, to, clock::Clock)
     ticks = tick_times(agent, data, from, to)
-    ticks === nothing && (ticks = timestamps(data, R, clock.sel, from, to))
+    ticks === nothing && (ticks = timestamps(data, clock, from, to))
     for t in ticks
         cut = TimeCut(data, t)
         ...
@@ -948,9 +1093,12 @@ end
 
 function run_experiment(exp)
     with_data(exp.data) do data
-        positions = run_backtest(exp.agent, data, exp.from, exp.to, exp.clock)
-        last_spot = asof(data, SpotPrice, exp.clock.sel, exp.to)         # window end: one call, no scan
-        ismissing(last_spot) && error("no spot at or before $(exp.to)")
+        positions  = run_backtest(exp.agent, data, exp.from, exp.to, exp.clock)
+        last_block = asof(data, kind_of(exp.clock), exp.clock.sel, exp.to)      # one partition walk, no scan
+        (isempty(last_block) || first(last_block).timestamp < exp.from) && error("no clock ticks in window")
+        window_end = first(last_block).timestamp                                # the last clock tick
+        spot = only_or_missing(at(data, SpotPrice, exp.clock.sel, window_end))  # spot_for remap ignored here, as today
+        ismissing(spot) && error("no spot at the last clock tick $window_end")
         ...
     end
 end
