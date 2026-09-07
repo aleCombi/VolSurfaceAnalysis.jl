@@ -187,8 +187,8 @@ entry point.
 ## Future work
 
 - **Surface-based theoretical settle for case 2.** Today, when `settle`
-  is the orchestrator's default closure and `get_spot(source, expiry)`
-  returns `missing`, the leg lands in `n_unmarked`. The correct
+  is the orchestrator's default closure and there is no spot record at
+  `expiry`, the leg lands in `n_unmarked`. The correct
   long-term answer is to mark the leg at its model-implied price using
   the surface at (or just before) expiry, so the leg's expiration PnL
   is computable even when the spot bar is not present. Lands in

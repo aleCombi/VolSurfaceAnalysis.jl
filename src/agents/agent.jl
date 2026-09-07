@@ -20,7 +20,7 @@ buffers, fitted-model registry) and implement [`current_policy`](@ref).
 abstract type Agent end
 
 """
-    current_policy(agent::Agent, t::DateTime, data::TimeCutModelDataSource,
+    current_policy(agent::Agent, t::DateTime, data::TimeCut,
                    positions::AbstractVector{Position}) -> Policy
 
 Return the [`Policy`](@ref) the agent wants the engine to use at time
@@ -35,7 +35,7 @@ inspect the current data view or ledger (e.g. "refit only on the first
 tick of a new month, using the lookback window in `data`"). Stateless,
 schedule-free agents simply ignore them.
 """
-function current_policy(::Agent, ::DateTime, ::TimeCutModelDataSource, ::AbstractVector{Position})::Policy
+function current_policy(::Agent, ::DateTime, ::TimeCut, ::AbstractVector{Position})::Policy
     error("current_policy not implemented for this Agent")
 end
 
@@ -50,10 +50,10 @@ struct StaticAgent{P<:Policy} <: Agent
     policy::P
 end
 
-current_policy(a::StaticAgent, ::DateTime, ::TimeCutModelDataSource, ::AbstractVector{Position}) = a.policy
+current_policy(a::StaticAgent, ::DateTime, ::TimeCut, ::AbstractVector{Position}) = a.policy
 
 """
-    tick_times(agent::Agent, source::ModelDataSource,
+    tick_times(agent::Agent, data::MarketData,
                from::DateTime, to::DateTime) -> Union{Nothing, Vector{DateTime}}
 
 Optional agent-level override of the engine's tick cadence. Mirrors
@@ -62,7 +62,7 @@ multi-policy / learning agents that swap policies over time can compute
 the union of their underlying policies' tick times. Default returns
 `nothing`. `StaticAgent` delegates to its single inner policy.
 """
-tick_times(::Agent, ::ModelDataSource, ::DateTime, ::DateTime) = nothing
+tick_times(::Agent, ::MarketData, ::DateTime, ::DateTime) = nothing
 
-tick_times(a::StaticAgent, source::ModelDataSource, from::DateTime, to::DateTime) =
-    tick_times(a.policy, source, from, to)
+tick_times(a::StaticAgent, data::MarketData, from::DateTime, to::DateTime) =
+    tick_times(a.policy, data, from, to)

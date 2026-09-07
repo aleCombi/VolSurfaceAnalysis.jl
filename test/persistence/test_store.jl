@@ -12,8 +12,8 @@ using DuckDB
 using DuckDB: DBInterface
 
 # A buildable parquet + noop config. Roots are nonexistent on purpose:
-# ParquetDataSource validates lazily, so the experiment builds and hashes
-# without any data on disk; only an actual get_chain/get_spot would throw.
+# provider specs are pure values, so the experiment builds and hashes
+# without any data on disk; only open_data (a run) would throw.
 function _smoke_config(; name="persist-smoke", metrics="[\"sharpe\", \"max_drawdown\"]")
     """
     name = "$name"
@@ -371,16 +371,17 @@ end
             @test loaded.experiment.name == "persist-smoke"
             @test loaded.experiment.outputs.metrics == [:sharpe, :max_drawdown]
             @test loaded.experiment.agent isa StaticAgent
-            @test loaded.experiment.source isa ModelDataSource
+            @test loaded.experiment.data isa MarketData
+            @test loaded.experiment.clock == Clock{OptionQuote}(Underlying("SPY"))
         end
         GC.gc()
     end
 end
 
-@testset "load_run: works when source data is absent (lazy root validation)" begin
+@testset "load_run: works when the data is absent (specs are pure values)" begin
     mktempdir() do tmp
-        # _SMOKE_CONFIG points at nonexistent roots: the source rebuilds and
-        # the persisted fields load, but an actual chain read throws.
+        # _SMOKE_CONFIG points at nonexistent roots: the specs rebuild and
+        # the persisted fields load, but opening the data throws.
         res = _build_smoke_result()
         store_root = joinpath(tmp, "kb")
         id = with_run_store(store_root) do store
@@ -390,8 +391,8 @@ end
             loaded = load_run(store, id)
             @test length(loaded.positions) == length(res.positions)
             @test loaded.metrics.total_pnl ≈ res.metrics.total_pnl
-            @test_throws Exception get_chain(loaded.experiment.source.chain_source,
-                                             DateTime(2024, 1, 15, 15, 30))
+            @test_throws ArgumentError open_data(loaded.experiment.data)
+            @test_throws ArgumentError run_experiment(loaded.experiment)
         end
         GC.gc()
     end

@@ -1,30 +1,33 @@
 # `backtest` module
 
 The driver that turns an [`Agent`](agents.md) (which hands out a
-[`Policy`](policies.md) per tick) plus a [`ModelDataSource`](model_data.md)
-into a ledger of filled [`Position`s](positions.md). Two concerns:
+[`Policy`](policies.md) per tick) plus a [`MarketData`](market_data.md)
+map and a `Clock` into a ledger of filled [`Position`s](positions.md).
+Two concerns:
 
-- A composition wrapper that enforces no-lookahead at the type level.
+- The no-lookahead boundary, which is the `market_data` `TimeCut`
+  passed to agents and policies in the function signature.
 - A single tick loop that asks the agent for the current policy, asks
   that policy what to do, and fills its returned trades.
 
 Reporting / PnL aggregation is intentionally not here -- the engine
-returns the bare ledger and downstream code (later) computes
-metrics off it.
+returns the bare ledger and downstream code computes metrics off it.
 
 ## Data flow
 
 ```mermaid
 flowchart LR
-    MDS[ModelDataSource]
+    Data[MarketData readers]
+    Clock[Clock]
     Agent[Agent]
     Engine([run_backtest])
-    MDS --> Engine
+    Data --> Engine
+    Clock -->|timestamps| Engine
     Agent --> Engine
 
     subgraph Loop["per tick t"]
         direction LR
-        Cut[TimeCutModelDataSource]
+        Cut[TimeCut]
         CP([current_policy])
         D([decide])
         RQ([resolve_quote])
@@ -41,150 +44,132 @@ flowchart LR
     Ledger --> Out[Vector Position]
 ```
 
-## `TimeCutModelDataSource`
+## The no-lookahead boundary
 
-```julia
-struct TimeCutModelDataSource
-    inner::ModelDataSource
-    cutoff::DateTime
-end
-```
-
-Composition wrapper around a `ModelDataSource`. Every accessor
-forwards to `inner` after a `ts <= cutoff` check; queries past the
-cutoff return the natural absent-value (`nothing` for chains and
-surfaces, `missing` for spots). Rate and div curves pass through
-unfiltered -- they are math objects, not historical observations,
-and evaluating them at any `ts` (past or future) is a legitimate
-forward query rather than lookahead.
-
-Not a Julia subtype of `ModelDataSource` (concrete structs are
-final). Policies and agents declare the cut wrapper as their data
-parameter explicitly: that gives the supported accessor interface a
-no-lookahead boundary rather than relying on each call site to
-remember the rule.
-
-Surface and chain caches live on the inner `ModelDataSource`; cuts
-do not invalidate them (surfaces at `ts <= cutoff` are immutable
-historical facts).
+`decide` and `current_policy` take a `TimeCut`, not the bare map. A
+cut masks every shape at its cutoff and passes itself down as the
+context, so reads a derived provider makes on the policy's behalf (the
+surface's quotes, spot and curves) are masked too: no-lookahead through
+derived data is structural, not a convention. Because `timestamp` is
+visibility time on every kind, the cut is the complete rule; there is
+no rate/div passthrough any more, a curve snapshot is visible or it is
+not. Caches live on the readers below the cut and are cut-independent
+(see [`market_data`](market_data.md)).
 
 ## The engine
 
 ```julia
-run_backtest(agent::Agent, source::ModelDataSource,
-             from::DateTime, to::DateTime) -> Vector{Position}
-
-run_backtest(policy::Policy, source::ModelDataSource,
-             from::DateTime, to::DateTime) -> Vector{Position}
+run_backtest(agent::Agent,  data::MarketData, from, to, clock::Clock) -> Vector{Position}
+run_backtest(policy::Policy, data::MarketData, from, to, clock::Clock) -> Vector{Position}
 ```
 
-The loop:
+`data` is the opened reader map (`run_experiment` opens and closes it
+around the call). The loop:
 
 ```julia
 positions = Position[]
-for t in available_timestamps(source, from, to)
-    cut    = TimeCutModelDataSource(source, t)
+ticks = something(tick_times(agent, data, from, to), timestamps(data, clock, from, to))
+for t in ticks
+    cut    = TimeCut(data, t)
     policy = current_policy(agent, t, cut, positions)
     orders = decide(policy, t, cut, positions)
     for trd in orders
-        qte      = resolve_quote(cut, trd, t)
-        spot_val = get_spot(cut, t)
-        push!(positions, open_position(trd, qte, Float64(spot_val)))
+        qte  = resolve_quote(cut, trd, t)
+        spot = only_or_missing(at(cut, SpotPrice, trd.underlying, t))   # error if missing
+        push!(positions, open_position(trd, qte, spot.price))
     end
 end
 return positions
 ```
 
-That is the whole engine. The bare-`Policy` overload is a one-line
-wrapper that delegates to `run_backtest(StaticAgent(policy), ...)`,
-so a single driver path handles fixed-policy backtests and
-agent-driven (refitting / learning) backtests alike. Policies (or
-agents) that need a sub-range filter the schedule themselves.
+That is the whole engine. The bare-`Policy` overload delegates to
+`run_backtest(StaticAgent(policy), ...)`, so a single driver path
+handles fixed-policy and agent-driven (refitting / learning) backtests
+alike.
+
+**Ticks come from the declared clock** -- the timestamps of one kind
+for one selector, part of the experiment's core identity -- unless the
+agent's `tick_times` override returns a schedule. The override is a
+list of *candidates*: a candidate with no data yields `Trade[]` in
+`decide`, and the experiment's window end is still the last clock
+tick, never a candidate.
 
 ### `resolve_quote`
 
 ```julia
-resolve_quote(cut::TimeCutModelDataSource, trade::Trade, t::DateTime)
-    -> OptionQuote
+resolve_quote(cut::TimeCut, trade::Trade, t::DateTime) -> OptionQuote
 ```
 
-Looks up the `OptionQuote` in `get_chain(cut, t)` whose contract
-matches `trade` exactly on `(underlying, strike, expiry, option_type)`.
-Errors on absent chain or strike-not-found -- both indicate the
-policy emitted a trade for a contract it should not have known
-about.
+Looks up the quote in `at(cut, OptionQuote, trade.underlying, t)`
+whose contract matches `trade` exactly on `(underlying, strike, expiry,
+option_type)`. Errors on an empty chain or strike-not-found -- both
+indicate the policy emitted a trade for a contract it should not have
+known about. Reads quotes rather than surfaces because surfaces retain
+only inverted IVs; the raw bid/ask the fill needs lives on the quote.
 
-Goes through `get_chain` rather than `get_surface` because surfaces
-retain only inverted IVs; the raw bid/ask the fill needs lives on
-the chain quote, not the slice.
+The fill spot is the trade's own underlying's spot. A `spot_for` remap
+on the surface provider prices the surface, not the fill or the
+settlement; that simplification is deliberate and shared with
+`run_experiment`.
 
 ## Key decisions
 
 | Decision | Why |
 |---|---|
-| **Engine driven by `Agent`, not `Policy`** | The agent layer is where policy-evolution lives (refits, swaps, learning). Making the engine ask `current_policy` per tick means a fixed-policy backtest, a monthly-refit backtest, and an online-learning backtest all use the same loop. The bare-`Policy` overload exists only for ergonomics (and to make training/evaluation code that scores a single Policy concise). |
-| **`run_backtest(policy, ...)` wraps `StaticAgent`** | One primitive, one wrapper. Keeps two entry points but a single tick-loop implementation; avoids two copies of the fill path drifting apart. |
-| **Composition over inheritance for the cut wrapper** | Julia concrete structs are final, so `TimeCutModelDataSource <: ModelDataSource` is not an option. Composition (`inner::ModelDataSource` + `cutoff::DateTime`) plus parallel accessor methods is the idiomatic alternative. Code that needs the cut states it in the signature; helpers that take a raw `ModelDataSource` are not callable with a cut, which is correct -- those helpers do not respect the cutoff. |
-| **No-lookahead at the type level** | Both `current_policy` and `decide` take `TimeCutModelDataSource`, not `ModelDataSource`. Through exported accessors, neither an agent's refit logic nor a policy's decision logic can accidentally reach future observations. The legacy codebase enforced this with a runtime wrapper passed in via an argument; the rebuild lifts it into the function signature. |
-| **`resolve_quote` reads chains, not surfaces** | The rebuild's `RawSurface` stores only inverted IVs; raw bid/ask lives on the `OptionQuote`s in the chain. Going through the chain for fills keeps the spread-respecting semantics of the legacy codebase without forcing a price-from-IV path on every tick. (A future BS-priced-quote fill mode would dispatch off a separate trait on the data source.) |
-| **Bare ledger return, no `BacktestResult`** | Reporting needs are not nailed down yet, and the legacy `BacktestResult.pnl` parallel vector breaks once close-as-counter-trade lands (a close `Position` does not have its own contribution -- it nets another fill). Returning `Vector{Position}` lets the reporting layer pick its own shape (per-tick cash flows, per-contract netting, ...) without committing now. |
-| **Walk every available timestamp** | The legacy codebase let strategies provide an `entry_schedule(strategy)` that drove the engine loop. The rebuild walks every available `ts` and lets the policy gate inside `decide` (and the agent gate inside `current_policy`). Cost on minute-data: ~7ms per backtest-year from no-op calls -- negligible. Benefit: one engine loop shape, no special case for event-driven or monitoring policies, and the no-lookahead boundary always covers the current `t`. |
-| **No `clear_cache!` between ticks** | Surface and chain caches stay warm across the whole loop. Long backtests that need to bound memory can call `clear_cache!(source)` themselves; the engine does not invent a policy. |
+| **Engine driven by `Agent`, not `Policy`** | The agent layer is where policy-evolution lives (refits, swaps, learning). Making the engine ask `current_policy` per tick means a fixed-policy backtest, a monthly-refit backtest, and an online-learning backtest all use the same loop. The bare-`Policy` overload exists only for ergonomics. |
+| **No-lookahead at the type level, through derived data** | `current_policy` and `decide` take `TimeCut`. The cut is the only map a policy and every derived provider under it can see, so neither a refit's lookback nor a surface build can reach a future observation. The legacy codebase enforced this with a runtime wrapper; the rebuild lifts it into the signature and, with the map-as-context design, into the data layer itself. |
+| **A declared clock** | The tick grid is part of the experiment, not an implicit property of one storage. Two experiments on the same data with different clocks are different experiments, and the window end is well defined (the last tick). |
+| **`resolve_quote` reads quotes, not surfaces** | `RawSurface` stores only inverted IVs; raw bid/ask lives on `OptionQuote`. Going through the chain keeps the spread-respecting semantics of the legacy codebase. |
+| **Bare ledger return, no `BacktestResult`** | Returning `Vector{Position}` lets the reporting layer pick its own shape (per-tick cash flows, per-contract netting, ...) without committing now; `PnLSeries` is that layer today. |
+| **Per-tick `tick_times` override, candidates only** | Sparse policies (once a day on minute data) skip the engine churn; the engine trusts the schedule verbatim (sorted, unique, in range) and tolerates candidates with no data. |
 
 ## Responsibility boundaries
 
-**Owns:** `TimeCutModelDataSource`, the tick loop, the
-`Trade -> OptionQuote -> Position` filling chain, the bare-`Policy`
-convenience overload.
+**Owns:** the tick loop, the `Trade -> OptionQuote -> Position`
+filling chain, the bare-`Policy` convenience overload.
 
 **Does NOT own:**
 
-- Policy logic. That is the [`policies`](policies.md) module.
-- Policy-evolution logic (refit cadence, learning, swaps). That is
-  the [`agents`](agents.md) module.
-- Data acquisition. That is the [`data`](data.md) and
-  [`model_data`](model_data.md) modules.
-- Reporting / PnL aggregation. Today the caller computes whatever
-  it needs from the returned `Vector{Position}`.
-- Concurrency. Single-threaded.
+- The time cut itself. `TimeCut` is a `market_data` type; the engine
+  only builds one per tick.
+- Policy logic ([`policies`](policies.md)) and policy evolution
+  ([`agents`](agents.md)).
+- Data acquisition ([`market_data`](market_data.md)).
+- Opening and closing the data: `run_experiment` does that around
+  the engine.
+- Reporting / PnL aggregation. Concurrency (single-threaded).
 
 ## Failure modes
 
 | Condition | Behavior |
 |---|---|
-| `current_policy` returns a Policy whose `decide` returns `Trade[]` | normal; engine continues |
-| `decide` emits trade for a contract not in the chain at `t` | `resolve_quote` errors |
+| `decide` returns `Trade[]` | normal; engine continues |
+| `decide` emits a trade for a contract not in the chain at `t` | `resolve_quote` errors |
 | Spot missing at a tick where `decide` emits an order | `run_backtest` errors |
-| Policy reads `get_surface(cut, t')` for `t' > t` | accessor returns `nothing` |
+| Policy reads any shape at `t' > t` through the cut | empty result |
+| Clock selector has no data in the window | no ticks; empty ledger |
 | Agent or policy never emits any trade | engine returns empty `Vector{Position}` |
 
 ## Future work
 
-- **Result wrapper for reporting.** A `BacktestResult` carrying the
-  ledger plus precomputed views (open-positions snapshots, per-tick
-  cash flows) once the reporting module exists.
-- **Sparse tick override.** Optional
-  `tick_times(agent_or_policy, source) -> iterable` for sparse logic
-  that precomputes its schedule and wants to skip the per-tick
-  `current_policy` / `decide` call entirely.
+- **Result wrapper for reporting**, once views beyond `PnLSeries` are
+  needed.
 - **BS-priced fills.** When a chain lacks bid/ask but a surface
   exists, an alternative `resolve_quote` mode would synthesize a
   quote from `price(surface, ...)` plus a configurable spread.
-  Dispatch off a `QuoteConvention` trait on the data source.
-- **Multi-asset backtest.** Today `get_spot(cut, t)` returns the
-  single underlying's spot. Multi-symbol policies would need
-  per-`Underlying` spot lookups during fills.
+- **Multi-asset fills** already resolve per trade underlying; a
+  multi-asset *clock* (union of grids) is the missing piece.
 
 ## Layout
 
 ```
 src/backtest/
-    time_cut.jl     # TimeCutModelDataSource
     engine.jl       # resolve_quote + run_backtest (Agent and Policy)
+    time_cut.jl     # TimeCutModelDataSource: the old wrapper, deleted at step 3 of the data-kinds plan
 
 test/backtest/
-    test_time_cut.jl
     test_engine.jl
+    test_time_cut.jl   # old wrapper's tests, deleted with it
 ```
 
 All files are `include`d into the top-level `VolSurfaceAnalysis`

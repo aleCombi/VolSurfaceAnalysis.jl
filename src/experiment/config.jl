@@ -108,21 +108,59 @@ function build_data_source(d::AbstractDict)::DataSource
     return _dispatch(_DATA_SOURCE_BUILDERS, t, "source")(d)
 end
 
-# ---- ModelDataSource ----------------------------------------------------
+# ---- Kind names ---------------------------------------------------------
+# The one string <-> type table. Kinds are keyed by type everywhere on the
+# runtime path; only config and identity use these names.
 
-function _build_model_data_source(d::AbstractDict)::ModelDataSource
-    rate_tbl = _require(d, "rate", "source")
-    div_tbl  = _require(d, "div",  "source")
-    rate = build_curve(Dict{String,Any}(rate_tbl))
-    div_ = build_curve(Dict{String,Any}(div_tbl))
-    # `build_data_source` reads its own "type"/fields from the top-level
-    # source table; strip the curve sub-tables so they don't leak into
-    # the source kwargs. (The synthesizer sub-table is consumed by the
-    # source builder itself, so it stays in.)
-    source_only = Dict{String,Any}(k => v for (k, v) in d
-                                   if k != "rate" && k != "div")
-    chain_src = build_data_source(source_only)
-    return ModelDataSource(chain_src; rate=rate, div=div_)
+const _KINDS = Dict{String,Type}(
+    "option_bar"   => OptionBar,
+    "option_quote" => OptionQuote,
+    "spot_price"   => SpotPrice,
+    "rate_curve"   => RateCurve,
+    "div_curve"    => DivCurve,
+    "vol_surface"  => VolatilitySurface,
+)
+const _KIND_NAMES = Dict{Type,String}(v => k for (k, v) in _KINDS)
+
+"""
+    kind_name(::Type) -> String
+
+The config / identity name of a kind (`OptionQuote` -> `"option_quote"`).
+"""
+kind_name(T::Type) = get(_KIND_NAMES, T) do
+    error("kind_name: no config name for kind $T (known: $(sort(collect(keys(_KINDS)))))")
+end
+
+# ---- [source] (transitional) -------------------------------------------
+# The old single-table schema, mapped onto a MarketData + Clock so the
+# existing configs stay valid until the `[data.*]` schema lands (plan
+# step 2.2). `max_days_cached` is read and ignored: cache sizes are
+# open_data kwargs, never config, never identity.
+
+function _build_market_data_from_source(d::AbstractDict)
+    t = _pop_type!(d, "source")
+    t == "parquet" || error("load_experiment: unknown source type \"$t\". Known: [\"parquet\"]")
+    underlying = Underlying(String(_require(d, "underlying", "source(parquet)")))
+    synth = build_synthesizer(Dict{String,Any}(_require(d, "synthesizer", "source(parquet)")))
+    rate  = build_curve(Dict{String,Any}(_require(d, "rate", "source")))
+    div_  = build_curve(Dict{String,Any}(_require(d, "div",  "source")))
+    opts_root, spot_root = if haskey(d, "root")
+        (joinpath(String(d["root"]), DEFAULT_OPTIONS_SUBDIR),
+         joinpath(String(d["root"]), DEFAULT_SPOTS_SUBDIR))
+    else
+        (String(_require(d, "options_root", "source(parquet) without \"root\"")),
+         String(_require(d, "spot_root",    "source(parquet) without \"root\"")))
+    end
+    usd = Currency("USD")
+    data = MarketData(
+        ParquetOptionBars(opts_root),
+        QuotesFromBars(synth),
+        ParquetSpots(spot_root),
+        Constant(RateCurve(usd, rate)),
+        Constant(DivCurve(underlying, div_)),
+        SurfaceFrom(currency=usd),
+    )
+    return (data=data, clock=Clock{OptionQuote}(underlying))
 end
 
 # ---- Policy builders ----------------------------------------------------
@@ -301,10 +339,10 @@ function _experiment_from_cfg(cfg::AbstractDict)::Experiment
         "move it under [outputs] as metrics = [...]")
     source_tbl = _require(cfg, "source", "config")
     agent_tbl  = _require(cfg, "agent",  "config")
-    source = _build_model_data_source(Dict{String,Any}(source_tbl))
+    dc     = _build_market_data_from_source(Dict{String,Any}(source_tbl))
     agent  = build_agent(Dict{String,Any}(agent_tbl))
     outputs = haskey(cfg, "outputs") ?
         build_output_spec(Dict{String,Any}(cfg["outputs"])) : OutputSpec()
-    return Experiment(; name=name, agent=agent, source=source,
+    return Experiment(; name=name, agent=agent, data=dc.data, clock=dc.clock,
                        from=from, to=to, outputs=outputs)
 end

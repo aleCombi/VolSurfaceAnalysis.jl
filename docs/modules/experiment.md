@@ -1,7 +1,7 @@
 # `experiment` module
 
-One-shot orchestrator: wires `(Agent, ModelDataSource, time window,
-requested metrics)` into a single rerunnable record. Owns one
+One-shot orchestrator: wires `(Agent, MarketData specs, Clock, time
+window, requested metrics)` into a single rerunnable record. Owns one
 struct, one result wrapper, one entry point. Train / val / test
 splits, refit cadence, and learning live inside the
 [`Agent`](agents.md); the `Experiment` only sees the evaluation
@@ -11,9 +11,9 @@ window.
 
 ```mermaid
 flowchart LR
-    Exp[Experiment] --> RB([run_backtest])
+    Exp[Experiment] -->|open_data| RB([run_backtest])
     RB -->|positions| PS([pnl_series])
-    Exp -->|spot at to| PS
+    Exp -->|spot at last clock tick| PS
     PS -->|PnLSeries| CM([compute_metrics])
     Exp -->|requested| CM
     CM -->|NamedTuple| ER[ExperimentResult]
@@ -22,11 +22,13 @@ flowchart LR
     Exp -->|provenance| ER
 ```
 
-Per call to `run_experiment`: tick the engine, resolve a settlement
-spot at the last available timestamp `<= exp.to`, aggregate the
-ledger into a `PnLSeries`, compute always-on plus requested optional
-metrics, and pack everything (including the originating `Experiment`)
-into one `ExperimentResult`.
+Per call to `run_experiment`: open the data (`with_data`), tick the
+engine on the clock, resolve the settlement spot at the **last clock
+tick** `<= exp.to`, aggregate the ledger into a `PnLSeries`, compute
+always-on plus requested optional metrics, close the data, and pack
+everything (including the originating `Experiment`) into one
+`ExperimentResult`. Everything that touches readers runs inside
+`with_data`; the `Experiment` itself holds specs only.
 
 ## The abstraction
 
@@ -41,13 +43,14 @@ OutputSpec(; metrics=<all registered>, metric_params=Dict(), artifacts=[:equity_
 struct Experiment
     name    :: String
     agent   :: Agent
-    source  :: ModelDataSource
+    data    :: MarketData      # provider specs, one per kind; opened per run
+    clock   :: Clock           # tick grid: kind + selector; core identity
     from    :: DateTime
     to      :: DateTime
     outputs :: OutputSpec
 end
 
-Experiment(; name, agent, source, from, to, outputs=OutputSpec())
+Experiment(; name, agent, data, clock, from, to, outputs=OutputSpec())
 
 struct ExperimentResult
     experiment :: Experiment
@@ -57,7 +60,7 @@ struct ExperimentResult
 end
 
 run_experiment(exp::Experiment) -> ExperimentResult
-core_hash(exp) :: String   # backtest identity (source, agent, window)
+core_hash(exp) :: String   # backtest identity (data, clock, agent, window)
 full_hash(exp) :: String   # core + outputs; the run's id in the KB
 ```
 
@@ -88,9 +91,9 @@ to remember any other state.
 sub-windowed (train on `[from, t_split]` and evaluate on
 `[t_split, to]`, walk-forward refits inside the window, lookback
 buffers warmed on data *before* `from`) is the `Agent`'s concern.
-The Agent receives a `TimeCutModelDataSource` per tick whose `inner`
-is the full `ModelDataSource` -- it can read history before `from`
-freely, and only data strictly after the current tick is blocked.
+The Agent receives a `TimeCut` per tick over the full reader map --
+it can read history before `from` freely, and only data strictly after
+the current tick is blocked.
 
 ## Key decisions
 
@@ -98,12 +101,14 @@ freely, and only data strictly after the current tick is blocked.
 |---|---|
 | **`run_experiment`, not `run`** | `Base.run` is exported and dispatches on `Cmd`; shadowing it for a domain verb is exactly the convention warning every Julia style guide gives. `run_experiment` also reads as a peer of `run_backtest`. |
 | **Result carries the full `Experiment`, not just `name`** | Rerun is the primary use case for provenance. `run_experiment(result.experiment)` is the obvious primitive; a bare `name` would force a sidecar registry to look up the rest. The cost is one cheap struct reference. |
-| **Per-leg settlement, window-end spot for open residuals** | Each round-trip leg settles at its own `trade.expiry` via `get_spot`; legs whose expiry is past the window mark at the window-end spot (`get_spot(source, last_ts_in_window)`); legs whose expiry-time spot is missing count in `n_unmarked` rather than silently substituting a wrong number. |
+| **Window end = last clock tick** | The window end is the timestamp of `asof` on the clock's kind and selector at `exp.to` (one partition walk, no scan), and the settle spot is the spot at that tick. A spot after the last tick, or a `tick_times` candidate past the data, can never move the residual mark. |
+| **Per-leg settlement, window-end spot for open residuals** | Each round-trip leg settles at its own `trade.expiry` via the clock underlying's spot at that instant; legs whose expiry is past the window mark at the window-end spot; legs whose expiry-time spot is missing count in `n_unmarked` rather than silently substituting a wrong number. A `spot_for` remap on the surface provider does not apply to settlement (nor to fills). |
+| **Specs in, readers scoped to the run** | `Experiment.data` holds pure spec values (hashable, persistable); `run_experiment` opens them with `with_data` and closes them on every exit path. Rehydrating a saved run needs no data on disk until it is actually run. |
 | **Always-on metrics not in the output spec** | They are computed unconditionally and cost nothing extra. Listing them in `outputs.metrics` would force every experiment to repeat a boilerplate list and would imply they were opt-in, which they are not. |
 | **`metrics::Vector{Symbol}`, not `Vector{Function}`** | Symbols survive serialization to disk (now exercised by the TOML config loader), read cleanly in config dumps, and let `compute_metrics` carry the per-symbol default kwargs in one place ([`compute_metrics`](metrics.md)). Function references would skip the table at the cost of looking less like a config artifact. |
 | **Per-metric kwargs on `OutputSpec.metric_params`** | Non-default conventions (e.g. Sharpe at a different `risk_free`) ride in `OutputSpec.metric_params` (`Dict{Symbol,NamedTuple}`) and flow through `compute_metrics`'s `kwargs`. They are outputs, so they are part of `full_hash` but not `core_hash` -- a parameter change is a new run over the same backtest. |
 | **Identity from the resolved experiment, not config bytes** | `full_hash` / `core_hash` are computed from `to_dict(exp)` over the *resolved* experiment (`identity.jl`), so identity is insensitive to how the config was spelled and separates outputs from the backtest. The [`persistence`](persistence.md) layer records them; it does not compute them. |
-| **`run_experiment` errors loudly on missing data** | Empty time window or a missing settlement spot both indicate the experiment is mis-specified or the data source has gaps the caller did not expect. Silent zeros would invent a "result" that doesn't exist. |
+| **`run_experiment` errors loudly on missing data** | No clock tick in the window, a missing settlement spot, or a clock whose selector is not an `Underlying` all indicate the experiment is mis-specified or the data has gaps the caller did not expect. Silent zeros would invent a "result" that doesn't exist. |
 
 ## Responsibility boundaries
 
@@ -130,8 +135,9 @@ via `identity.jl`).
 
 | Condition | Behavior |
 |---|---|
-| Empty time window (`available_timestamps(source, from, to)` empty) | `run_experiment` errors with the window and experiment name. |
-| Settlement spot missing at the last in-window timestamp | `run_experiment` errors with the timestamp and experiment name. |
+| No clock tick in `[from, to]` | `run_experiment` errors with the window and experiment name. |
+| Settlement spot missing at the last clock tick | `run_experiment` errors with the timestamp and experiment name. |
+| Data root missing on this machine | `open_data` throws `ArgumentError` at the start of the run; loading the config succeeds. |
 | `exp.outputs.metrics` contains an unknown symbol | `compute_metrics` errors with the offending symbol and the known list. |
 | Agent / Policy never trades | `result.positions` and `result.pnl_series.pnl` are empty; always-on metrics are `0.0` / `0` / `NaN` per their empty-series conventions. |
 | Spot present but no fills happened | Settlement spot is recorded on `pnl_series` even when unused -- harmless and keeps the field non-optional. |
@@ -141,9 +147,21 @@ via `identity.jl`).
 A TOML file resolves to an `Experiment` via `load_experiment(path)`.
 Schema is a flat header (`name`, `from`, `to`) plus nested tables:
 `[source]`, `[agent]`, and an optional `[outputs]`. Every sum-type
-(`DataSource`, `Curve`, `QuoteSynthesizer`, `Policy`, `Agent`) is keyed
-by a string `type` discriminator; the rest of that table is forwarded to
-the matching builder. `[outputs]` lists `metrics` / `artifacts` plus
+(`Curve`, `QuoteSynthesizer`, `Policy`, `Agent`) is keyed by a string
+`type` discriminator; the rest of that table is forwarded to the
+matching builder.
+
+*Transitional (data-kinds plan, step 2.1):* the `[source]` table is
+still the old single-source schema. The loader maps it onto a
+`MarketData` of six entries -- `parquet_option_bars` and
+`parquet_spots` under `root/options_1min` and `root/spots_1min`,
+`from_bars` with the synthesizer, constant USD rate and per-underlying
+div curves, `surface_from` -- and a `Clock{OptionQuote}(underlying)`.
+`max_days_cached` is read and ignored (cache sizes are `open_data`
+kwargs, never config, never identity). The `[data.*]` + `clock` schema
+replaces it at step 2.2. The kind-name table lives in the loader
+(`kind_name`): `option_bar`, `option_quote`, `spot_price`,
+`rate_curve`, `div_curve`, `vol_surface`. `[outputs]` lists `metrics` / `artifacts` plus
 per-metric `[outputs.metric_params.<m>]`; omitted, it defaults to all
 metrics and the default artifacts. Legacy top-level `metrics` is rejected
 with a clear error; metrics must live under `[outputs]`.
@@ -181,11 +199,12 @@ type = "noop"
 ```
 
 New concrete types register themselves by adding one entry to the
-relevant builder table (`_DATA_SOURCE_BUILDERS`, `_CURVE_BUILDERS`,
-`_SYNTHESIZER_BUILDERS`, `_POLICY_BUILDERS`, `_AGENT_BUILDERS`) -- same
-pattern as `_METRIC_TABLE` in [`metrics`](metrics.md). A new sum-type
-also needs a `to_dict` method (`identity.jl`) so it contributes to the
-run hashes.
+relevant builder table (`_CURVE_BUILDERS`, `_SYNTHESIZER_BUILDERS`,
+`_POLICY_BUILDERS`, `_AGENT_BUILDERS`) -- same pattern as
+`_METRIC_TABLE` in [`metrics`](metrics.md). A new sum-type also needs a
+`to_dict` method (`identity.jl`) so it contributes to the run hashes; a
+new provider spec needs `kind`, `inputs` (if derived), a lifecycle
+pair, and its `to_dict`.
 
 Run from the CLI:
 

@@ -6,7 +6,7 @@
 # not change identity. Two hashes are produced:
 #
 #   core_hash -- everything that determines the backtest result
-#                (positions / pnl_series): source, agent, window.
+#                (positions / pnl_series): data, clock, agent, window.
 #   full_hash -- core plus outputs (metrics + params, artifacts).
 #
 # Same core_hash, different full_hash => an output/artifact variation of a
@@ -54,41 +54,65 @@ to_dict(c::PCCurve) = Dict{String,Any}(
 to_dict(s::SpreadFromOHLCV) =
     Dict{String,Any}("type" => "ohlcv_spread", "lambda" => s.lambda)
 
-# ParquetDataSource: identity-relevant fields only. Cache knobs
-# (`max_*_cached`), the DuckDB handle, and the caches are omitted -- they
-# do not affect the backtest result. `options_root`/`spot_root` are the
-# resolved paths, so the `root` shorthand and the explicit form collapse
-# to the same identity.
-to_dict(ds::ParquetDataSource) = Dict{String,Any}(
-    "type"         => "parquet",
-    "underlying"   => ticker(ds.underlying),
-    "options_root" => ds.options_root,
-    "spot_root"    => ds.spot_root,
-    "synthesizer"  => to_dict(ds.synthesizer),
-)
+# --- market_data specs --------------------------------------------------
+# One entry per kind, keyed by the loader's kind name; each spec emits
+# only what determines the records it serves. Readers never appear (they
+# are not on specs) and cache sizes are open_data kwargs, never identity.
+# The `dataset` slot on the parquet specs is reserved for a logical
+# dataset id / version; today it carries the root path.
 
-# InMemoryDataSource is a dev/test source (not config-buildable) and is
-# not identity-stable: a faithful projection would have to digest every
-# option quote, and a shape-only projection would let chains that differ
-# in prices collide. Rather than risk an unsafe hash, reject it -- build
-# experiments from a config (ParquetDataSource) to hash or save them.
-to_dict(::InMemoryDataSource) = error(
-    "InMemoryDataSource is not identity-stable and cannot be hashed or " *
-    "saved; build the experiment from a config to use the knowledge base.")
+to_dict(s::ParquetOptionBars) = Dict{String,Any}(
+    "type" => "parquet_option_bars", "dataset" => Dict{String,Any}("root" => s.root))
+to_dict(s::ParquetSpots) = Dict{String,Any}(
+    "type" => "parquet_spots", "dataset" => Dict{String,Any}("root" => s.root))
+to_dict(s::QuotesFromBars) = Dict{String,Any}(
+    "type" => "from_bars", "synthesizer" => to_dict(s.synthesizer))
 
-# ModelDataSource: the chain source plus rate/div curves. `spot_source`
-# is only distinct from `chain_source` in split-vendor setups the config
-# loader cannot express; when they differ it is recorded so identity
-# stays faithful.
-function to_dict(m::ModelDataSource)
-    d = to_dict(m.chain_source)
-    d["rate"] = to_dict(m.rate)
-    d["div"]  = to_dict(m.div)
-    if m.spot_source !== m.chain_source
-        d["spot_source"] = to_dict(m.spot_source)
-    end
+_constant_payload(r::RateCurve) = Dict{String,Any}("curve" => to_dict(r.curve))
+_constant_payload(r::DivCurve)  = Dict{String,Any}("curve" => to_dict(r.curve))
+_constant_payload(r) = error(
+    "Constant{$(typeof(r))} has no identity projection; only curve kinds are config-buildable")
+
+# The visibility stamp only appears when it is not the "always known"
+# default, so the common flat-curve case stays minimal.
+function to_dict(c::Constant)
+    d = _constant_payload(c.record)
+    d["type"] = "constant"
+    d["selector"] = string(selector(c.record))
+    c.record.timestamp == typemin(DateTime) || (d["timestamp"] = string(c.record.timestamp))
     return d
 end
+
+# spot_for as a sorted vector of [from, to] pairs, so map order never
+# forks the hash.
+to_dict(s::SurfaceFrom) = Dict{String,Any}(
+    "type"     => "surface_from",
+    "currency" => s.currency.code,
+    "spot_for" => sort!([String[string(k), string(v)] for (k, v) in s.spot_for]),
+)
+
+# Parts sorted by selector string for the same reason.
+function to_dict(b::BySelector)
+    parts = [Dict{String,Any}("selector" => string(first(p)), "provider" => to_dict(last(p)))
+             for p in b.parts]
+    sort!(parts; by = p -> p["selector"])
+    return Dict{String,Any}("type" => "by_selector", "parts" => parts)
+end
+
+# InMemory is a dev/test provider (not config-buildable) and is not
+# identity-stable: a faithful projection would have to digest every
+# record, and a shape-only projection would let fixtures that differ in
+# prices collide. Rather than risk an unsafe hash, reject it -- build
+# experiments from a config to hash or save them.
+to_dict(::InMemory) = error(
+    "InMemory is not identity-stable and cannot be hashed or saved; " *
+    "build the experiment from a config to use the knowledge base.")
+
+to_dict(m::MarketData) = Dict{String,Any}(
+    "entries" => Dict{String,Any}(kind_name(kind(s)) => to_dict(s) for s in m.entries))
+
+to_dict(c::Clock) = Dict{String,Any}(
+    "kind" => kind_name(kind(c)), "selector" => string(c.sel))
 
 to_dict(::NoOpPolicy) = Dict{String,Any}("type" => "noop")
 
@@ -123,10 +147,11 @@ end
 
 # Core identity: everything that determines the backtest result.
 _core_dict(exp::Experiment) = Dict{String,Any}(
-    "from"   => string(exp.from),
-    "to"     => string(exp.to),
-    "source" => to_dict(exp.source),
-    "agent"  => to_dict(exp.agent),
+    "from"  => string(exp.from),
+    "to"    => string(exp.to),
+    "data"  => to_dict(exp.data),
+    "clock" => to_dict(exp.clock),
+    "agent" => to_dict(exp.agent),
 )
 
 # Full identity: core plus outputs. `name` is excluded from both -- it is

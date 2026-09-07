@@ -131,6 +131,37 @@ end
     @test_throws ErrorException build_agent(Dict{String,Any}("type" => "static"))
 end
 
+@testset "load_experiment: [source] root shorthand maps to the two trees (transitional)" begin
+    e = load_experiment_str("""
+        name = "x"
+        from = 2024-01-15T15:30:00
+        to   = 2024-01-15T15:31:00
+        [source]
+        type = "parquet"
+        underlying = "SPY"
+        root = "/nonexistent/massive"
+        max_days_cached = 3
+        [source.synthesizer]
+        type = "ohlcv_spread"
+        lambda = 0.7
+        [source.rate]
+        type = "flat"
+        value = 0.04
+        [source.div]
+        type = "flat"
+        value = 0.015
+        [agent]
+        type = "static"
+        [agent.policy]
+        type = "noop"
+        """)
+    @test entry(e.data, OptionBar).root == joinpath("/nonexistent/massive", "options_1min")
+    @test entry(e.data, SpotPrice).root == joinpath("/nonexistent/massive", "spots_1min")
+    @test entry(e.data, OptionQuote).synthesizer.lambda == 0.7
+    @test e.clock == Clock{OptionQuote}(Underlying("SPY"))
+    @test_throws ArgumentError open_data(e.data)           # data absent: fails at open, not at load
+end
+
 @testset "load_experiment: top-level metrics errors clearly" begin
     @test_throws ErrorException load_experiment_str("""
         name = "old_metrics_shape"
@@ -144,8 +175,8 @@ end
 
 # Minimal parquet fixture: one date, one timestamp, one option row + one
 # spot row. The runner's NoOpPolicy never trades; we only need the
-# loader to construct a working ModelDataSource and the engine to find
-# at least one timestamp so settlement resolves.
+# loader to construct a working MarketData + Clock and the engine to find
+# at least one clock tick so settlement resolves.
 function _write_smoke_parquet_tree(root::AbstractString)
     options_root = joinpath(root, "options_1min")
     spot_root    = joinpath(root, "spots_1min")
@@ -231,17 +262,20 @@ end
         @test exp.outputs.metrics == [:sharpe]
         @test exp.agent isa StaticAgent
         @test exp.agent.policy isa NoOpPolicy
-        @test exp.source isa ModelDataSource
+        @test exp.data isa MarketData
+        @test exp.clock == Clock{OptionQuote}(Underlying("SPY"))
+        @test Set(kind_name(kind(s)) for s in exp.data.entries) ==
+              Set(["option_bar", "option_quote", "spot_price", "rate_curve", "div_curve", "vol_surface"])
+        @test entry(exp.data, OptionBar).root == tree.options_root
+        @test entry(exp.data, SpotPrice).root == tree.spot_root
+        @test entry(exp.data, RateCurve).record.currency == Currency("USD")
+        @test entry(exp.data, DivCurve).record.underlying == Underlying("SPY")
 
-        res = run_experiment(exp)
+        res = run_experiment(exp)               # opens and closes the readers itself
         @test isempty(res.positions)
         @test res.metrics.total_pnl == 0.0
         @test res.experiment === exp
-
-        # Release the DuckDB handle so mktempdir cleanup doesn't trip on
-        # locked parquet files (Windows). Explicit close + GC.gc() drops
-        # both the connection and any lingering Tables cursors.
-        close(exp.source.chain_source)
+        @test res.pnl_series.window_end_spot == 480.0
         exp = nothing
         res = nothing
         GC.gc()
@@ -254,13 +288,15 @@ end
     trd = Trade(_EX_UND, 480.0, f.expiry, Call)
     exp = Experiment(name="show-test",
                      agent=StaticAgent(_ExOpenOnceAt(f.ts2, trd)),
-                     source=f.mds, from=f.ts1, to=f.ts3,
+                     data=f.data, clock=_EX_CLOCK, from=f.ts1, to=f.ts3,
                      outputs=OutputSpec(metrics=[:sharpe]))
     res = run_experiment(exp)
     io = IOBuffer()
     show(io, MIME"text/plain"(), res)
     s = String(take!(io))
     @test occursin("ExperimentResult: show-test", s)
+    @test occursin("option_quote", s)
+    @test occursin("clock", s)
     @test occursin("Metrics:", s)
     @test occursin("total_pnl", s)
     @test occursin("sharpe", s)
