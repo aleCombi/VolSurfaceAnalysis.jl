@@ -17,6 +17,7 @@ using Dates
     include("market_data/test_time_cut.jl")
     include("market_data/test_clock.jl")
     include("market_data/test_lifecycle.jl")
+    include("market_data/test_parquet.jl")
     include("model_data/test_curves.jl")
     include("surfaces/test_bs.jl")
     include("surfaces/test_surface.jl")

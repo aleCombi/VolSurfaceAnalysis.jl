@@ -195,8 +195,49 @@ run opens and closes it.
 - **Scoped form.** `with_data(f, m)` opens, calls `f`, closes. If `f`
   throws, the close is quiet and `f`'s error propagates; on success a
   close error propagates normally.
-- **Use after close** is the storage's own error (a closed DuckDB
-  connection throws). The parquet readers add no flag.
+- **Use after close** throws `ArgumentError` from the reader. The
+  proposal hoped to leave this to the storage, but DuckDB segfaults on
+  a query against a closed handle, so the parquet readers carry a
+  closed flag checked at every shape, including a lazy `between`
+  iterator that outlives its reader. `close_data!` is idempotent.
+
+## Parquet readers
+
+`ParquetOptionBars(root)` serves `OptionBar`, `ParquetSpots(root)`
+serves `SpotPrice`; `root` is the kind-specific tree (`.../options_1min`,
+`.../spots_1min`) in the collector's Hive layout
+`date=<D>/symbol=<T>/data.parquet`. One spec per storage tree, every
+symbol under it. Construction is pure, so a saved run rehydrates
+silently off-machine; `open_data` throws when the root is missing.
+
+The opened reader owns one DuckDB connection, the per-selector
+**partition list** (listed once, the bound for every walk), bounded
+caches of per-partition metadata (distinct timestamps, column
+presence), and for bars a small exact-instant chain cache plus the
+shared contract-identity dict. Vendor rows become `OptionBar` only;
+synthesis is `QuotesFromBars` above the reader.
+
+- **`at`** reads one instant through the chain cache.
+- **`between`** is a lazy walk over the candidate partitions, one
+  partition's rows in memory at a time, never cached; valid while the
+  reader is open.
+- **`asof`** walks the partition list backward from `Date(ts)`,
+  consulting cached timestamp lists until one has a timestamp `<= ts`,
+  then reads that instant. Bounded by the partitions that exist and
+  called once per run in practice.
+- **`timestamps`** is the cached per-partition lists intersected with
+  the range; a partition absent from the list costs no file probe.
+
+*Partition convention.* A partition `D` may hold any timestamp in
+`[D 00:00, D+1 02:00)` UTC: the collector writes a US session into its
+local date, so after-midnight UTC rows spill past `Date(ts)`. Every
+shape consults partitions `Date(ts) - 1` and `Date(ts)`, which is what
+makes `at == collect(between(ts, ts))` an identity rather than a
+coincidence. A ticker whose underlying is not the partition's throws:
+under `symbol=` partitioning that is a corrupt store.
+
+*Bar-time allowance.* Rows carry Polygon's bar-open stamp, kept as the
+visibility time (see Kinds).
 
 ## Naming
 

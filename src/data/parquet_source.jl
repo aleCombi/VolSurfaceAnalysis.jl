@@ -2,8 +2,6 @@ using DuckDB
 using Tables
 using OrderedCollections
 
-const ContractMeta = NamedTuple{(:expiry, :strike, :option_type),Tuple{DateTime,Float64,OptionType}}
-
 struct SpotDay
     timestamps::Vector{DateTime}
     prices::Vector{Float64}
@@ -178,14 +176,6 @@ function _parquet_columns(ds::ParquetDataSource, path::AbstractString)::Set{Symb
         push!(cols, Symbol(row.name))
     end
     cols
-end
-
-function _contract_meta_from_parsed(parsed_expiry, parsed_strike::Float64,
-                                    parsed_option_type::AbstractString)::ContractMeta
-    expiry_date = Date(_coerce_dt(parsed_expiry))
-    expiry = et_to_utc(expiry_date, Time(16, 0))
-    otype = parsed_option_type == "C" ? Call : Put
-    return (expiry=expiry, strike=parsed_strike, option_type=otype)
 end
 
 # DISTINCT-timestamps query per day. Column-pruned, no row materialization

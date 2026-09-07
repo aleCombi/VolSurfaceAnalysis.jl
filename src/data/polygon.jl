@@ -28,3 +28,16 @@ _sql_path(p::AbstractString) = replace(String(p), "\\" => "/")
 
 _coerce_dt(x::DateTime) = x
 _coerce_dt(x) = DateTime(x)
+
+# Contract identity as the vendor row carries it: the collector's parsed_*
+# columns when present, else the ticker. Storage-agnostic; both the old
+# ParquetDataSource and the market_data parquet reader build records from it.
+const ContractMeta = NamedTuple{(:expiry, :strike, :option_type),Tuple{DateTime,Float64,OptionType}}
+
+function _contract_meta_from_parsed(parsed_expiry, parsed_strike::Float64,
+                                    parsed_option_type::AbstractString)::ContractMeta
+    expiry_date = Date(_coerce_dt(parsed_expiry))
+    expiry = et_to_utc(expiry_date, Time(16, 0))
+    otype = parsed_option_type == "C" ? Call : Put
+    return (expiry=expiry, strike=parsed_strike, option_type=otype)
+end

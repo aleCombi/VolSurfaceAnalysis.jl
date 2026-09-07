@@ -86,10 +86,17 @@ leave the parquet store locked.
 
 ## Schema mapping
 
-Polygon option rows are normalized as `OptionBar`, then synthesized into
-`OptionQuote`. Parsed contract columns from the collector are preferred
-over ticker parsing; ticker parsing is the fallback. Spot rows map
-directly to `SpotPrice`.
+Polygon option rows are normalized as `OptionBar` (contract identity via
+`ContractMeta` in `polygon.jl`), then synthesized into `OptionQuote`.
+Parsed contract columns from the collector are preferred over ticker
+parsing; ticker parsing is the fallback. Spot rows map directly to
+`SpotPrice`.
+
+In the new [`market_data`](market_data.md) layer, landing beside this
+one, the parquet readers produce `OptionBar` only and synthesis is the
+derived provider `QuotesFromBars`; `ParquetDataSource` (which fuses the
+two) is deleted at step 3 of the data-kinds plan, and this doc shrinks
+to the records and the vendor mapping.
 
 Missing scalar fields stay `missing`. Missing aggregate objects, such as
 an absent option chain at a timestamp, return `nothing`. Malformed or

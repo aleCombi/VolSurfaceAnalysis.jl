@@ -298,10 +298,10 @@ in order and unwinds on failure, closing what it opened best-effort so
 the original error is the one that propagates; close is best-effort in
 reverse, every reader attempted, first error rethrown; `with_data(f, m)`
 is the scoped form and closes quietly when `f` throws, so a close error
-never masks `f`'s. A closed DuckDB
-connection throws on use, which is the use-after-close behaviour; a
-`closed::Ref{Bool}` on the parquet readers is the whole change if a
-nicer message is ever wanted.
+never masks `f`'s. Use after close throws `ArgumentError` from the
+reader: a `closed::Ref{Bool}` on the parquet readers, checked at every
+shape (found necessary at step 1.5: DuckDB segfaults on a query against
+a closed handle, so it cannot be left to the storage).
 
 The run opens and closes; `Experiment` holds the spec map only.
 Parallel sweeps get one reader set per task from one shared spec set.
