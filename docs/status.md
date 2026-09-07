@@ -109,9 +109,16 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
   `Clock`, `BySelector`, lifecycle with unwind, parquet readers with
   the partition convention, curve kinds, `SurfaceFrom`), all tested
   including a real-day cross-check against `ParquetDataSource`; nothing
-  downstream reads it yet. Next: step 2, consumers switch (engine,
-  policies, experiment, config, identity), gated on reproducing the
-  baseline.
+  downstream reads it yet. **Step 2 done** (2026-09-07): engine,
+  policies, agents and experiment read through `MarketData` + `Clock`;
+  config is `[data.<kind>]` tables plus a `clock`; manifest
+  `schema_version` 2 with `load_run` refusing older runs; both gate
+  runs reproduce the baseline (`compare_runs.jl`), after fixing a
+  pre-existing nondeterminism the gate exposed (PnL series order and
+  `max_drawdown` depended on the package build; now canonical, see
+  `metrics.md`). Point-vs-range benchmark recorded in proposal section
+  10. Next: step 3, delete the old `DataSource` / `ModelDataSource`
+  layer.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail
@@ -119,7 +126,8 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
   API walkthroughs) dropped. Motivation: resuming the library after a
   few-week pause, the docs should be the trustworthy entry point to read
   back in from. `data.md` is the first pass / template; the other module
-  docs follow.
+  docs follow. `market_data.md` (new) follows the template from the
+  start.
 - **Surface-based theoretical settle for case 2.** When `get_spot` at
   the leg's exact expiry is `missing` (Polygon minute bars are sparse
   at the 16:00 ET close minute), today's policy returns `missing` and

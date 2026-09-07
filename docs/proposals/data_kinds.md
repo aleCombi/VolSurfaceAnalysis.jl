@@ -627,6 +627,28 @@ had its final shape at 2.1). The folder was overwritten with
 `commit_sha 7149330`, `dirty=false`, 1:40 wall, 1.49 GB peak;
 `compare_runs.jl` against the baseline: **passes** on every table.
 
+### 10.9 Point vs range benchmark
+
+`scripts/bench_point_vs_range.jl` on the DevBox (2 cores, 3.7 GB,
+Julia 1.12.7), SPY, January 2024: 8190 timestamps over 21 partition
+days, 2,193,106 bar records; one `ParquetOptionBars` reader, chain LRU
+of 10, one warm-up day before timing.
+
+| workload | wall | alloc | maxrss delta | records |
+|---|---|---|---|---|
+| A point: `at` at every timestamp | 40.2 s (4.9 ms / timestamp) | 1952 MB | +77 MB | 2,193,106 |
+| B range: one `between` + `by_timestamp` | 6.1 s (0.7 ms / timestamp) | 2266 MB | +49 MB | 2,193,106 in 8190 groups |
+| C1 strangle: `at` at 19:30 per day | 96 ms | 5 MB | -- | 6008 |
+| C2 strangle: `between [t, t]` per day | 139 ms | 7 MB | -- | 6008 |
+
+A and B see the same records (asserted). The range read is 6.6x faster
+than point reads for a dense consumer, holding one partition at a time
+(the maxrss delta is one day's rows plus the `columntable` transient,
+well under the 25-40 MB per day estimated in Risks 4); a sparse
+consumer is better served by `at` (C1 vs C2: the `at` path skips the
+day-range query and hits the timestamp list). Peak RSS of the whole
+process was 956 MB, 1:04 wall including load.
+
 ## Appendix A. Reviews of v1
 
 Two independent reviews of this proposal against `master` at `d08b76e`,
