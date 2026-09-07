@@ -188,6 +188,22 @@ end
     @test_throws ErrorException build_market_data(_cfg_data(rate_curve = Dict{String,Any}("type" => "constant", "underlying" => "SPY", "value" => 0.04)))
 end
 
+@testset "build_market_data: surface_from lookback_ticks round-trips and is checked" begin
+    @test entry(build_market_data(_cfg_data()), VolatilitySurface).lookback_ticks == 3
+    d = _cfg_data(vol_surface = Dict{String,Any}(
+        "type" => "surface_from", "currency" => "USD", "lookback_ticks" => 7))
+    @test entry(build_market_data(d), VolatilitySurface).lookback_ticks == 7
+    # rejected at construction below 1
+    @test_throws ArgumentError build_market_data(_cfg_data(vol_surface = Dict{String,Any}(
+        "type" => "surface_from", "currency" => "USD", "lookback_ticks" => 0)))
+    @test_throws ErrorException build_market_data(_cfg_data(vol_surface = Dict{String,Any}(
+        "type" => "surface_from", "currency" => "USD", "lookback_ticks" => "three")))
+    # the one table that rejects unknown keys: a typo here would take the
+    # default silently and fork identity from intent
+    @test_throws ErrorException build_market_data(_cfg_data(vol_surface = Dict{String,Any}(
+        "type" => "surface_from", "currency" => "USD", "lookback_tick" => 5)))
+end
+
 @testset "build_market_data: a statically demanded selector nobody serves fails at load" begin
     # the surface selects its rate curve by currency; the only one built is USD
     d = _cfg_data(vol_surface = Dict{String,Any}("type" => "surface_from", "currency" => "EUR"))

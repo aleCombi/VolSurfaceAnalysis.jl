@@ -56,6 +56,17 @@ Rules:
   timestamp `<= ts` (a whole chain for grid kinds, one record for a
   snapshot kind). No shape returns `missing`, which is reserved for
   absent scalar fields inside a record.
+- Read strictly, `asof` promises the largest timestamp at which a record
+  of `R` **exists** — which for a **derived kind** is not necessarily
+  where its input exists. A derived provider whose build fails at the
+  newest input instant must keep walking back rather than stop there;
+  walking back is the contract, not a leniency. The walk is bounded by a
+  spec field, and exhausting the bound throws `DerivationExhausted`: many
+  consecutive derivation failures are a truncated dataset or a broken
+  feed, not absence. For the same reason `timestamps` and `between` over a
+  derived kind are **over-estimates** — they report the input grid, so
+  they can name instants where no derived record exists. Making them exact
+  would mean building every record in the range.
 - **Empty means temporal absence only**, and every other unanswerable
   question has a name. A consumer that cannot tell "not yet" from "not
   ever" correctly concludes it has nothing to do, and the run completes

@@ -67,10 +67,11 @@ chain source.
 
 ## `SurfaceFrom`: the derived provider
 
-`SurfaceFrom(; currency, spot_for)` is the [`market_data`](market_data.md)
-provider that serves `VolatilitySurface`. It holds only its parameters:
-the currency that selects the `RateCurve`, and an optional `spot_for`
-remap naming whose `SpotPrice` prices a surface (e.g. `SPY => SPX`).
+`SurfaceFrom(; currency, spot_for, lookback_ticks)` is the
+[`market_data`](market_data.md) provider that serves `VolatilitySurface`.
+It holds only its parameters: the currency that selects the `RateCurve`,
+an optional `spot_for` remap naming whose `SpotPrice` prices a surface
+(e.g. `SPY => SPX`), and the `asof` walk-back bound.
 Its inputs, `OptionQuote`, `SpotPrice`, `RateCurve`, `DivCurve`, are
 read through the map it is called from, so a time cut handed as the
 context bounds everything it can see. It evaluates the curves at the
@@ -92,9 +93,25 @@ surface's timestamp and calls `build_surface`.
   cutoff at or after it: the same surface object comes back through
   the bare map and through any cut, and a cut's mask never reaches the
   cache.
-- Shapes follow the quote grid: `timestamps` and `between` enumerate
-  the `OptionQuote` timestamps, `asof` builds at the latest visible
-  quote timestamp.
+- **`asof` walks back, under a bound.** It must return the newest instant
+  at which a *surface* exists, not the newest at which a chain does, and
+  the two differ exactly when the build fails: a chain of same-day
+  contracts evaluated at the expiry instant, a minute of marks implied vol
+  cannot invert, a spot missing at that timestamp. Every benign case is
+  one tick wide, so `lookback_ticks` (default 3, on the spec, in identity)
+  caps how many input timestamps are examined and exhausting it throws
+  `DerivationExhausted`. The bound is not a performance knob: it is a
+  statement about how much silent staleness is acceptable before the run
+  would rather be told. Three outcomes, one per state — no chain at all is
+  empty (temporal), a chain that builds is the surface, chains that never
+  build within the bound throw. `lookback_ticks = 1` still throws rather
+  than reproducing the old empty result; that behaviour is deliberately
+  not reachable.
+- **`timestamps` and `between` are over-estimates**, and stay so. They
+  enumerate the `OptionQuote` grid, so they report instants where no
+  surface exists; making them exact would mean building every surface in
+  the range. That is a property of derived kinds, worth writing down
+  rather than leaving to be rediscovered.
 
 `selector(surface)` is its underlying, so `VolatilitySurface` is a kind
 like any other; the loader's name for it is `"vol_surface"`.

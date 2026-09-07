@@ -59,6 +59,15 @@ end
     @test collect(demands(SurfaceFrom(currency=_MD_USD, spot_for=Dict(_MD_SPY => _MD_SPX)))) ==
           [(RateCurve, _MD_USD), (SpotPrice, _MD_SPX)]
     @test isempty(s.spot_for)
+    @test s.lookback_ticks == 3
+    @test SurfaceFrom(currency=_MD_USD, lookback_ticks=1).lookback_ticks == 1
+    @test_throws ArgumentError SurfaceFrom(currency=_MD_USD, lookback_ticks=0)
+    # lookback_ticks changes which surface a policy sees, so it is identity:
+    # == and hash are hand-written and must carry it
+    @test SurfaceFrom(currency=_MD_USD, lookback_ticks=1) != s
+    @test hash(SurfaceFrom(currency=_MD_USD, lookback_ticks=1)) != hash(s)
+    @test SurfaceFrom(currency=_MD_USD, lookback_ticks=3) == s
+    @test hash(SurfaceFrom(currency=_MD_USD, lookback_ticks=3)) == hash(s)
     @test SurfaceFrom(currency=_MD_USD, spot_for=Dict(_MD_SPY => _MD_SPX)).spot_for[_MD_SPY] === _MD_SPX
     @test selector_type(VolatilitySurface) === Underlying
     @test selector_type(RawSurface) === Underlying
@@ -170,6 +179,56 @@ end
     with_data(_sf_map(rate=stepped)) do d
         @test only_or_missing(at(d, VolatilitySurface, _MD_SPY, _SF_TS1)).rate == 0.04
         @test only_or_missing(at(d, VolatilitySurface, _MD_SPY, _SF_TS2)).rate == 0.05
+    end
+end
+
+# One chain that builds at TS1 and one that cannot at TS2 (every expiry
+# already passed there), so `asof` at TS2 must walk back to TS1.
+function _sf_walkback_map(; lookback_ticks::Int=3)
+    good = _sf_bars()                                     # both timestamps, valid expiry
+    stale = [_sf_bar(480.0, _SF_TS2, 0.20; expiry=_SF_TS2 - Day(1))]
+    MarketData(InMemory(vcat([b for b in good if b.timestamp == _SF_TS1], stale)),
+               QuotesFromBars(SpreadFromOHLCV(0.7)),
+               InMemory(_sf_spots()),
+               Constant(RateCurve(_MD_USD, FlatCurve(_SF_R))),
+               Constant(DivCurve(_MD_SPY, FlatCurve(_SF_Q))),
+               SurfaceFrom(currency=_MD_USD, lookback_ticks=lookback_ticks))
+end
+
+@testset "SurfaceFrom: asof walks back past an unbuildable chain, under a bound" begin
+    with_data(_sf_walkback_map()) do d
+        prior = at(d, VolatilitySurface, _MD_SPY, _SF_TS1)
+        @test !isempty(prior)                                  # not a vacuous comparison
+        @test at(d, VolatilitySurface, _MD_SPY, _SF_TS2) == VolatilitySurface[]
+        @test asof(d, VolatilitySurface, _MD_SPY, _SF_TS2) == prior
+        # the input grid is unchanged: timestamps over-estimates for a derived kind
+        @test timestamps(d, VolatilitySurface, _MD_SPY, _SF_TS1, _SF_TS2) == [_SF_TS1, _SF_TS2]
+    end
+
+    # lookback_ticks = 1 examines only the newest quote timestamp -- and still
+    # throws rather than reproducing the old empty result, deliberately
+    with_data(_sf_walkback_map(lookback_ticks=1)) do d
+        err = try asof(d, VolatilitySurface, _MD_SPY, _SF_TS2) catch e; e end
+        @test err isa DerivationExhausted
+        @test err.kind === VolatilitySurface && err.selector === _MD_SPY
+        @test err.requested == _SF_TS2 && err.bound == 1
+        @test occursin("VolatilitySurface", sprint(showerror, err))
+    end
+
+    # every chain within the bound is unbuildable: the bound is exhausted
+    stale = [_sf_bar(480.0, _SF_TS1, 0.20; expiry=_SF_TS1 - Day(1)),
+             _sf_bar(480.0, _SF_TS2, 0.20; expiry=_SF_TS2 - Day(1))]
+    with_data(_sf_map(bars=InMemory(stale),
+                      surface=SurfaceFrom(currency=_MD_USD, lookback_ticks=2))) do d
+        err = try asof(d, VolatilitySurface, _MD_SPY, _SF_TS2) catch e; e end
+        @test err isa DerivationExhausted
+        @test err.bound == 2 && err.requested == _SF_TS2
+        @test err.oldest == _SF_TS1 - Millisecond(1)      # the cursor after the last try
+    end
+
+    # running out of chain entirely is temporal, not exhaustion: empty
+    with_data(_sf_map(bars=InMemory(stale))) do d          # default bound of 3
+        @test asof(d, VolatilitySurface, _MD_SPY, _SF_TS2) == VolatilitySurface[]
     end
 end
 

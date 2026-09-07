@@ -207,7 +207,7 @@ The loader owns the only string-to-kind table:
 | `spot_price` | `SpotPrice` | `parquet_spots` |
 | `rate_curve` | `RateCurve` | `constant` (`currency`) |
 | `div_curve` | `DivCurve` | `constant` (`underlying`) |
-| `vol_surface` | `VolatilitySurface` | `surface_from` |
+| `vol_surface` | `VolatilitySurface` | `surface_from` (`currency`, optional `spot_for`, optional `lookback_ticks`) |
 
 `by_selector` composes any kind: every key other than `type` is a
 selector naming a sub-table (`SPY = { type = "parquet_spots", root =
@@ -231,6 +231,18 @@ probing a data root. Cache sizes are
 `open_data` kwargs, never config, never identity; the data roots *are*
 identity (the reserved `dataset` slot of the parquet specs), so the
 same config on a machine with the data elsewhere is a distinct run.
+
+A spec field that changes *which records a policy sees* is identity, and
+`lookback_ticks` on `surface_from` is one: it decides how far back `asof`
+walks for a surface, so it changes results. It is emitted by `to_dict`
+always, not omitted when it takes its default -- identity is projected
+from the resolved experiment, and the omit-when-default trick on
+`Constant`'s visibility stamp is a documented exception, not the house
+style. Consequence: rerunning an existing config that has a
+`[data.vol_surface]` table produces a new `run_id`, so it lands beside
+the old run rather than replacing it. `[data.vol_surface]` is also the
+one table that rejects unknown keys, because a typo there would take the
+default silently and fork identity from intent.
 
 New concrete types register themselves by adding one entry to the
 relevant builder table (`_PROVIDER_BUILDERS`, `_CURVE_BUILDERS`,

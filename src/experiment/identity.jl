@@ -86,9 +86,10 @@ end
 # spot_for as a sorted vector of [from, to] pairs, so map order never
 # forks the hash.
 to_dict(s::SurfaceFrom) = Dict{String,Any}(
-    "type"     => "surface_from",
-    "currency" => s.currency.code,
-    "spot_for" => sort!([String[string(k), string(v)] for (k, v) in s.spot_for]),
+    "type"           => "surface_from",
+    "currency"       => s.currency.code,
+    "spot_for"       => sort!([String[string(k), string(v)] for (k, v) in s.spot_for]),
+    "lookback_ticks" => s.lookback_ticks,
 )
 
 # Parts sorted by selector string for the same reason.

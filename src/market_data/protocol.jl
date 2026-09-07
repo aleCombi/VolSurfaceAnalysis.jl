@@ -58,6 +58,13 @@ function between end
 Every record at the largest visible timestamp `<= ts` (a whole chain for
 grid kinds, one record for snapshots), empty when nothing is visible.
 No default: each provider implements it with what its storage does well.
+
+Read strictly, that is the largest timestamp at which a record of `R`
+*exists* -- which for a derived kind is not necessarily where its input
+exists. A derived provider whose build fails at the newest input instant
+must keep walking back, under a bound; exhausting the bound throws
+[`DerivationExhausted`](@ref) rather than reporting a broken feed through
+the same channel as ordinary missing data.
 """
 function asof end
 
@@ -141,6 +148,27 @@ end
 Base.showerror(io::IO, e::UnservedSelector) = print(io,
     "UnservedSelector: nothing serves $(e.kind) for $(e.selector). ",
     "The entry: $(e.served)")
+
+"""
+    DerivationExhausted(kind, selector, requested, oldest, bound)
+
+A derived provider walked back `bound` input timestamps from `requested`,
+as far as `oldest`, and never produced a record of `kind`. The input is
+present and the derivation keeps failing, which is a truncated dataset or
+a broken feed rather than absence.
+"""
+struct DerivationExhausted <: Exception
+    kind      :: Type
+    selector  :: Any
+    requested :: DateTime
+    oldest    :: DateTime
+    bound     :: Int
+end
+
+Base.showerror(io::IO, e::DerivationExhausted) = print(io,
+    "DerivationExhausted: no $(e.kind) for $(e.selector) at or before $(e.requested) ",
+    "within $(e.bound) input timestamp(s); the oldest tried was $(e.oldest). ",
+    "The input is present and the derivation kept failing.")
 
 """
     ConflictingRecords(kind, selector, timestamp, a, b)

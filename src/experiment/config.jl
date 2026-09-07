@@ -143,7 +143,17 @@ function _build_constant(d::AbstractDict, ::Type{R}) where {R}
     return Constant(_constant_record(R, sel, _curve_from(d, "data(constant)")))
 end
 
+# The only builder that rejects unknown keys. `[data.<kind>]` tables
+# otherwise drop them silently (a recorded cleanup item), which is
+# tolerable until a key changes identity: a typo'd `lookback_ticks` would
+# take the default and silently change identity-vs-intent.
+const _SURFACE_FROM_KEYS = Set(["type", "currency", "spot_for", "lookback_ticks"])
+
 function _build_surface_from(d::AbstractDict, ::Type)
+    unknown = sort!(collect(setdiff(keys(d), _SURFACE_FROM_KEYS)))
+    isempty(unknown) || error(
+        "load_experiment: data(surface_from) has unknown key(s) $(unknown). " *
+        "Known: $(sort(collect(_SURFACE_FROM_KEYS)))")
     currency = Currency(String(_require(d, "currency", "data(surface_from)")))
     spot_for = Dict{Underlying,Underlying}()
     if haskey(d, "spot_for")
@@ -151,7 +161,12 @@ function _build_surface_from(d::AbstractDict, ::Type)
             spot_for[Underlying(String(k))] = Underlying(String(v))
         end
     end
-    return SurfaceFrom(currency=currency, spot_for=spot_for)
+    lookback = get(d, "lookback_ticks", 3)
+    lookback isa Integer || error(
+        "load_experiment: data(surface_from) lookback_ticks must be an integer, " *
+        "got $(typeof(lookback))")
+    return SurfaceFrom(currency=currency, spot_for=spot_for,
+                       lookback_ticks=Int(lookback))
 end
 
 # Every key other than `type` is `selector = { sub-table }`.

@@ -210,6 +210,18 @@ end
     @test core_hash(ea) == core_hash(eb)
     @test VolSurfaceAnalysis.to_dict(a)["entries"]["spot_price"]["parts"][1]["selector"] == "SPX"
     @test VolSurfaceAnalysis.to_dict(a)["entries"]["vol_surface"]["spot_for"] == [["SPX", "SPY"], ["SPY", "SPX"]]
+    # lookback_ticks changes which surface a policy sees, so it is core identity
+    lb = MarketData(
+        ParquetOptionBars("/x/opts"), QuotesFromBars(SpreadFromOHLCV(0.7)),
+        BySelector{SpotPrice}(spy => ParquetSpots("/x/spot"), spx => ParquetSpots("/y/spot")),
+        Constant(RateCurve(Currency("USD"), FlatCurve(0.04))),
+        Constant(DivCurve(spy, FlatCurve(0.015))),
+        SurfaceFrom(currency=Currency("USD"), spot_for=Dict(spy => spx, spx => spy),
+                    lookback_ticks=5))
+    elb = Experiment(name="lb", agent=base.agent, data=lb, clock=base.clock,
+                     from=base.from, to=base.to)
+    @test core_hash(elb) != core_hash(ea)
+    @test VolSurfaceAnalysis.to_dict(a)["entries"]["vol_surface"]["lookback_ticks"] == 3
     c = mk_data(Dict(spy => spx), (spy => ParquetSpots("/x/spot"), spx => ParquetSpots("/z/spot")))
     ec = Experiment(name="c", agent=base.agent, data=c, clock=base.clock, from=base.from, to=base.to)
     @test core_hash(ec) != core_hash(ea)
