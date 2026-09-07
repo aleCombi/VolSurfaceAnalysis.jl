@@ -273,6 +273,15 @@ run opens and closes it.
 - **Scoped form.** `with_data(f, m)` opens, calls `f`, closes. If `f`
   throws, the close is quiet and `f`'s error propagates; on success a
   close error propagates normally.
+- **Cache bounds are not settable from a run.** They are `open_data`
+  keyword arguments on an individual spec (`max_days`, `max_chains`,
+  `max_surfaces`), and `open_data(::MarketData)` takes none, so nothing
+  reaches them through `with_data`. A `max_days_cached` key in a
+  `[data.<kind>]` table is silently ignored, like any unknown key there
+  (`[data.vol_surface]` is the exception — it rejects them, because one
+  of its keys is identity). This is honest rather than desirable: cache
+  bounds are machine knobs and must stay out of identity, so exposing
+  them needs a route that is not the config table.
 - **Use after close** throws `ArgumentError` from the reader. The
   proposal hoped to leave this to the storage, but DuckDB segfaults on
   a query against a closed handle, so the parquet readers carry a

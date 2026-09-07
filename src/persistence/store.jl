@@ -18,7 +18,6 @@
 # (the backtest-only identity, shared by output variations of one backtest)
 # and code provenance (`commit_sha` / `dirty`).
 
-using SHA
 using DuckDB
 using DuckDB: DBInterface
 
