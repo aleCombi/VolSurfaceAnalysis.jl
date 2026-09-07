@@ -90,10 +90,10 @@ end
     @test isnan(res.metrics.hit_rate)
 end
 
-@testset "run_experiment: single-fill leg past window-end -> case 1 mark at window-end spot" begin
-    # The leg's expiry (Feb 16) is past the window end (ts3 = Jan 15).
-    # _build_settle case 1 returns window_end_spot = f.spot. Timestamp is
-    # stamped at the leg's expiry, not at the window end.
+@testset "run_experiment: leg past the window end marks at the window end" begin
+    # The leg's expiry (Feb 16) is past the window end (ts3 = Jan 15), so
+    # settlement resolves the spot for this leg's own underlying at the
+    # window end. The entry is still stamped at the leg's expiry.
     f = _ex_fixture()
     trd = Trade(_EX_UND, 480.0, f.expiry, Call)
     exp = Experiment(name="case1-mark",
@@ -110,9 +110,9 @@ end
     @test res.pnl_series.n_unmarked == 0
 end
 
-@testset "run_experiment: held-to-expiry leg inside window settles at expiry spot (case 2)" begin
-    # A map with a real spot at the leg's expiry, so the spot lookup at
-    # `expiry` returns a record and case 2 succeeds.
+@testset "run_experiment: held-to-expiry leg inside window settles at its expiry spot" begin
+    # A map with a real spot at the leg's expiry, so the lookup at
+    # min(expiry, window_end) == expiry returns a record.
     ts1 = DateTime(2024, 1, 15, 15, 30)
     ts2 = DateTime(2024, 1, 15, 15, 31)
     ts3 = DateTime(2024, 1, 15, 15, 32)
@@ -123,7 +123,7 @@ end
     data = _ex_map([mk_q(ts1, 480.0), mk_q(ts2, 480.0), mk_q(ts3, 480.0)],
                    [SpotPrice(_EX_UND, spot, ts) for ts in (ts1, ts2, ts3)])
     trd = Trade(_EX_UND, 480.0, expiry, Call)
-    exp = Experiment(name="case2-held",
+    exp = Experiment(name="held-to-expiry",
                      agent=StaticAgent(_ExOpenOnceAt(ts2, trd)),
                      data=data, clock=_EX_CLOCK, from=ts1, to=ts3)
     res = run_experiment(exp)
@@ -132,6 +132,33 @@ end
     @test res.pnl_series.timestamps[1] == expiry
     @test res.pnl_series.pnl[1] ≈ -5.10                # ATM 480 payoff = 0; cost = 5.10
     @test res.pnl_series.n_unmarked == 0
+end
+
+@testset "run_experiment: settlement follows the trade, not the clock" begin
+    # A QQQ leg under a SPY clock. The engine has priced fills per trade
+    # since the data-kinds rewrite; settlement now agrees with it. QQQ is
+    # served but has no spot at the window end, so the lot is unmarked --
+    # a state the old past-the-window branch could not reach, because it
+    # returned a scalar computed once from the clock underlying.
+    ts1 = DateTime(2024, 1, 15, 15, 30)
+    ts3 = DateTime(2024, 1, 15, 15, 32)
+    qqq = Underlying("QQQ")
+    far = DateTime(2024, 2, 16, 21, 0)                 # past the window end
+    spy_q(ts) = OptionQuote("SPY", _EX_UND, far, 480.0, Call,
+                            5.00, 5.10, 5.05, missing, missing, missing, ts)
+    qqq_q = OptionQuote("QQQ", qqq, far, 400.0, Call,
+                        1.00, 1.10, 1.05, missing, missing, missing, ts1)
+    data = _ex_map([spy_q(ts1), spy_q(ts3), qqq_q],
+                   [SpotPrice(_EX_UND, 480.0, ts1), SpotPrice(_EX_UND, 480.0, ts3),
+                    SpotPrice(qqq, 400.0, ts1)])      # QQQ served, absent at ts3
+    exp = Experiment(name="foreign-leg",
+                     agent=StaticAgent(_ExOpenOnceAt(ts1, Trade(qqq, 400.0, far, Call))),
+                     data=data, clock=_EX_CLOCK, from=ts1, to=ts3)
+    res = run_experiment(exp)
+    @test length(res.positions) == 1
+    @test res.pnl_series.n_unmarked == 1               # QQQ has no spot at the window end
+    @test isempty(res.pnl_series.pnl)
+    @test res.pnl_series.window_end_spot == 480.0      # the clock underlying, provenance only
 end
 
 @testset "run_experiment: expiry inside the window without a spot -> unmarked" begin

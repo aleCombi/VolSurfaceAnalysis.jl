@@ -11,6 +11,12 @@ function _ag_fixture()
     (data=data, ts1=ts1)
 end
 
+@testset "declared_underlyings: StaticAgent delegates to its policy" begin
+    @test declared_underlyings(StaticAgent(NoOpPolicy())) == ()
+    p = DailyShortStrangle(_AG_UND, Time(15, 45), Day(1), 0.20, 0.20, 1.0)
+    @test declared_underlyings(StaticAgent(p)) == (_AG_UND,)
+end
+
 @testset "StaticAgent: returns its wrapped policy on every call" begin
     f = _ag_fixture()
     cut = TimeCut(f.data, f.ts1)

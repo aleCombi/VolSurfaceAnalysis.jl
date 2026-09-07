@@ -54,6 +54,21 @@ struct NoOpPolicy <: Policy end
 decide(::NoOpPolicy, ::DateTime, ::TimeCut, ::AbstractVector{Position}) = Trade[]
 
 """
+    declared_underlyings(policy::Policy) -> Tuple of Underlying
+
+The underlyings a policy fixes in its own configuration, known without
+running it. Empty when it declares none, which means it cannot be checked
+at load -- a policy that chooses its underlying per tick is the case the
+default covers.
+
+`load_experiment` uses it to enforce the real invariant of this codebase:
+one experiment, one underlying. The clock selector answers *when* to step,
+not *whose price*, and settlement resolves per trade; asserting the two
+agree is what makes that safe by construction rather than by assumption.
+"""
+declared_underlyings(::Policy) = ()
+
+"""
     tick_times(policy::Policy, data::MarketData,
                from::DateTime, to::DateTime) -> Union{Nothing, Vector{DateTime}}
 

@@ -27,6 +27,12 @@ on the runtime path knows a name. Every kind carries:
   both; `Currency` is a distinct value type, not a string, so the
   contract is enforceable by dispatch.
 
+One non-kind type also implements `selector`: `Trade`, in
+[`positions`](positions.md), whose selector is its underlying. It has no
+`timestamp` and no provider serves it, so `selector_type` stays a trait on
+kinds only — but the engine and the settlement closure both ask "the spot
+for this leg", and this is the vocabulary for that question.
+
 *Bar-time allowance.* Polygon minute bars are stamped at the bar open
 while their close, high and low are knowable only at bar end. The open
 stamp is kept as the visibility time, so a decision at `t` sees the

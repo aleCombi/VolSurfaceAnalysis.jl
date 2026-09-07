@@ -109,8 +109,8 @@ only inverted IVs; the raw bid/ask the fill needs lives on the quote.
 
 The fill spot is the trade's own underlying's spot. A `spot_for` remap
 on the surface provider prices the surface, not the fill or the
-settlement; that simplification is deliberate and shared with
-`run_experiment`.
+settlement, and `run_experiment` resolves settlement the same way -- per
+trade, for that leg's own selector.
 
 ## Key decisions
 

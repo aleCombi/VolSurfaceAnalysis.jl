@@ -268,6 +268,26 @@ type = "static"
 type = "noop"
 """
 
+@testset "load_experiment: the clock and the policy must name one underlying" begin
+    strangle(u) = """
+        [agent.policy]
+        type        = "daily_short_strangle"
+        underlying  = "$u"
+        entry_time  = 15:45:00
+        expiry_days = 1
+        put_delta   = 0.20
+        call_delta  = 0.20
+        """
+    with_policy(u) = replace(_CFG_HEAD, "[agent.policy]\ntype = \"noop\"\n" => strangle(u))
+    # the clock steps on SPY: a SPY policy loads, a QQQ policy does not
+    @test load_experiment_str(with_policy("SPY")) isa Experiment
+    err = try load_experiment_str(with_policy("QQQ")); nothing catch e; e end
+    @test err isa ErrorException
+    @test occursin("QQQ", err.msg) && occursin("SPY", err.msg)
+    # a policy that declares nothing statically cannot be checked, and is not
+    @test load_experiment_str(_CFG_HEAD) isa Experiment
+end
+
 @testset "load_experiment: [data.*] + clock, data absent fails only at open" begin
     e = load_experiment_str(_CFG_HEAD)
     @test e.data isa MarketData

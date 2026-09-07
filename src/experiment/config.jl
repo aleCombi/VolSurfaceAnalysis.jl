@@ -458,6 +458,15 @@ function _experiment_from_cfg(cfg::AbstractDict)::Experiment
     any(kind(s) === kind(clock) for s in data.entries) || error(
         "load_experiment: clock kind \"$(kind_name(kind(clock)))\" has no [data.*] table")
     agent = build_agent(Dict{String,Any}(agent_tbl))
+    # One experiment, one underlying. The clock selector says *when* to
+    # step; settlement and fills both resolve prices per trade. Asserting
+    # the two agree is what makes that safe by construction -- a policy
+    # that declares nothing statically cannot be checked here, and is not.
+    declared = declared_underlyings(agent)
+    isempty(declared) || clock.sel in declared || error(
+        "load_experiment: the agent declares $(join(string.(declared), ", ")) " *
+        "but the clock steps on $(clock.sel); an experiment ticks and trades " *
+        "on one underlying")
     outputs = haskey(cfg, "outputs") ?
         build_output_spec(Dict{String,Any}(cfg["outputs"])) : OutputSpec()
     return Experiment(; name=name, agent=agent, data=data, clock=clock,

@@ -23,8 +23,9 @@ flowchart LR
 ```
 
 Per call to `run_experiment`: open the data (`with_data`), tick the
-engine on the clock, resolve the settlement spot at the **last clock
-tick** `<= exp.to`, aggregate the ledger into a `PnLSeries`, compute
+engine on the clock, resolve the **last clock tick** `<= exp.to` and the
+clock underlying's spot there, aggregate the ledger into a `PnLSeries`
+(each residual lot settled from its own trade), compute
 always-on plus requested optional metrics, close the data, and pack
 everything (including the originating `Experiment`) into one
 `ExperimentResult`. Everything that touches readers runs inside
@@ -101,8 +102,9 @@ the current tick is blocked.
 |---|---|
 | **`run_experiment`, not `run`** | `Base.run` is exported and dispatches on `Cmd`; shadowing it for a domain verb is exactly the convention warning every Julia style guide gives. `run_experiment` also reads as a peer of `run_backtest`. |
 | **Result carries the full `Experiment`, not just `name`** | Rerun is the primary use case for provenance. `run_experiment(result.experiment)` is the obvious primitive; a bare `name` would force a sidecar registry to look up the rest. The cost is one cheap struct reference. |
-| **Window end = last clock tick** | The window end is the timestamp of `asof` on the clock's kind and selector at `exp.to` (one partition walk, no scan), and the settle spot is the spot at that tick. A spot after the last tick, or a `tick_times` candidate past the data, can never move the residual mark. |
-| **Per-leg settlement, window-end spot for open residuals** | Each round-trip leg settles at its own `trade.expiry` via the clock underlying's spot at that instant; legs whose expiry is past the window mark at the window-end spot; legs whose expiry-time spot is missing count in `n_unmarked` rather than silently substituting a wrong number. A `spot_for` remap on the surface provider does not apply to settlement (nor to fills). |
+| **Window end = last clock tick** | The window end is the timestamp of `asof` on the clock's kind and selector at `exp.to` (one partition walk, no scan). A spot after the last tick, or a `tick_times` candidate past the data, can never move the residual mark. |
+| **Settlement follows the trade, not the clock** | Each residual lot settles at the spot of **its own trade's underlying**, at `min(trade.expiry, window_end)`: held-to-expiry legs use their expiration spot, legs still open past the window mark at the window end, and both resolve for the leg's own selector -- the same one the engine priced its fill against. A clock is a tick grid; its selector answers *when* to step, not *whose price*. A leg whose spot is missing at that instant counts in `n_unmarked` rather than silently substituting a wrong number. A `spot_for` remap on the surface provider prices the surface, not fills or settlement. |
+| **The clock underlying and a declared policy underlying must agree** | One experiment, one underlying is the real invariant here, and `load_experiment` asserts it rather than assuming it: it errors when `declared_underlyings(agent)` is non-empty and does not contain the clock selector. That is what makes settling past the window end safe by construction. A policy that chooses its underlying per tick declares nothing and is not checked at load; comparing at fill time is a follow-up. |
 | **Specs in, readers scoped to the run** | `Experiment.data` holds pure spec values (hashable, persistable); `run_experiment` opens them with `with_data` and closes them on every exit path. Rehydrating a saved run needs no data on disk until it is actually run. |
 | **Always-on metrics not in the output spec** | They are computed unconditionally and cost nothing extra. Listing them in `outputs.metrics` would force every experiment to repeat a boilerplate list and would imply they were opt-in, which they are not. |
 | **`metrics::Vector{Symbol}`, not `Vector{Function}`** | Symbols survive serialization to disk (now exercised by the TOML config loader), read cleanly in config dumps, and let `compute_metrics` carry the per-symbol default kwargs in one place ([`compute_metrics`](metrics.md)). Function references would skip the table at the cost of looking less like a config artifact. |
@@ -136,11 +138,14 @@ via `identity.jl`).
 | Condition | Behavior |
 |---|---|
 | No clock tick in `[from, to]` | `run_experiment` errors with the window and experiment name. |
-| Settlement spot missing at the last clock tick | `run_experiment` errors with the timestamp and experiment name. |
+| Clock underlying's spot missing at the last clock tick | `run_experiment` errors with the timestamp and experiment name. |
+| A residual lot's underlying is served but has no spot at `min(expiry, window_end)` | The lot counts in `pnl_series.n_unmarked` and is excluded from realized PnL. |
+| A residual lot's underlying is served by nothing | `at` throws `UnservedSelector`, naming `SpotPrice` and that underlying. |
+| A declared policy underlying differs from the clock selector | `load_experiment` errors naming both. |
 | Data root missing on this machine | `open_data` throws `ArgumentError` at the start of the run; loading the config succeeds. |
 | `exp.outputs.metrics` contains an unknown symbol | `compute_metrics` errors with the offending symbol and the known list. |
 | Agent / Policy never trades | `result.positions` and `result.pnl_series.pnl` are empty; always-on metrics are `0.0` / `0` / `NaN` per their empty-series conventions. |
-| Spot present but no fills happened | Settlement spot is recorded on `pnl_series` even when unused -- harmless and keeps the field non-optional. |
+| Spot present but no fills happened | `window_end_spot` is recorded on `pnl_series` even when unused -- it is provenance, and the field stays non-optional. |
 
 ## Config loading
 

@@ -42,6 +42,8 @@ decide(p::Policy, t::DateTime, data::TimeCut,
        positions::AbstractVector{Position}) -> Vector{Trade}
 
 tick_times(p::Policy, data::MarketData, from, to) -> Union{Nothing, Vector{DateTime}}
+
+declared_underlyings(p::Policy) -> Tuple of Underlying
 ```
 
 One decision method, four arguments, one return value. Concrete
@@ -50,6 +52,14 @@ policies subtype `Policy` and implement `decide`. The empty return
 Policies read data by kind and selector (`at(data, OptionQuote, u, t)`,
 `only_or_missing(at(data, VolatilitySurface, u, t))`), never by
 storage; "empty means absent" is the convention for every shape.
+
+`declared_underlyings` reports the underlyings a policy fixes in its own
+configuration, known without running it; the default is empty, meaning
+"cannot be checked at load". `load_experiment` uses it to enforce that an
+experiment ticks and trades on one underlying: the clock selector answers
+*when* to step, settlement and fills resolve prices per trade, and
+asserting the two agree is what keeps that safe. A policy that chooses
+its underlying per tick declares nothing and is simply not checked.
 
 `tick_times` is the optional sparse-schedule override: return the
 candidate timestamps in `[from, to]` (sorted, unique) and the engine
@@ -82,7 +92,7 @@ a base case in property tests.
 ## Responsibility boundaries
 
 **Owns:** the `Policy` abstract type, the `decide` contract, the
-`NoOpPolicy` base case.
+`declared_underlyings` trait, the `NoOpPolicy` base case.
 
 **Does NOT own:**
 

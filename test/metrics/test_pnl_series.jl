@@ -11,10 +11,10 @@ function _ps_pos(strike, otype, direction, qty, entry_price, ts)
     Position(trd, Float64(entry_price), 480.0, missing, missing, ts)
 end
 
-# Settle closure that returns a fixed spot for every expiry (test-only
+# Settle closure that returns a fixed spot for every leg (test-only
 # helper: matches the old single-spot-settle behaviour while exercising
-# the new per-leg API).
-_const_settle(spot::Real) = (_::DateTime) -> Float64(spot)
+# the per-leg API, which is handed the lot's own `Trade`).
+_const_settle(spot::Real) = (_::Trade) -> Float64(spot)
 
 # Wrapper around the new kwarg-only API to keep test sites terse.
 _ps(positions, spot::Real) = pnl_series(positions;
@@ -34,7 +34,7 @@ end
 @testset "pnl_series: single open, no close -> residual marked at expiry" begin
     ts1 = DateTime(2024, 1, 15, 15, 30)
     open = _ps_pos(480.0, Call, +1, 1.0, 5.0, ts1)   # long call @ 5.0
-    s = _ps([open], 490.0)                            # settle returns 490 at any expiry
+    s = _ps([open], 490.0)                            # settle returns 490 for any leg
     @test length(s.pnl) == 1
     # payoff = max(490 - 480, 0) * +1 = 10; entry_cost = 5 * +1 = 5; pnl = 5
     @test s.pnl[1] ≈ 5.0

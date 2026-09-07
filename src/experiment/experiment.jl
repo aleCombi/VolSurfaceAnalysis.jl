@@ -109,25 +109,28 @@ end
 # Build the per-leg settle closure for `run_experiment`, over the opened
 # reader map `d`.
 #
-# Policy:
-# - Case 1: `expiry > window_end`. The leg is genuinely still open past
-#   the test window. Conventional open-residual mark using `window_end_spot`.
-# - Case 2: `expiry <= window_end`. Looks up the spot at `expiry`. If
-#   present, that's the leg's expiration spot -- held-to-expiry settles
-#   honestly. If absent, returns `missing` so `pnl_series` counts the lot
-#   in `n_unmarked` rather than silently substituting the wrong number.
+# The spot is resolved for the LOT'S OWN trade, at `min(expiry,
+# window_end)`: a leg held to expiry inside the window settles at its
+# expiration spot, a leg still open past the window is marked at the
+# window end. One lookup covers both. When the spot is absent there the
+# closure returns `missing`, so `pnl_series` counts the lot in
+# `n_unmarked` rather than silently substituting a number nobody checked.
 #
-# The spot is the clock selector's, i.e. the experiment's one underlying;
-# a `spot_for` remap on the surface provider does not apply to
-# settlement, the same simplification as at fill time.
+# A clock is a tick grid -- a kind plus a selector, meaning "step wherever
+# records of this kind exist for this selector". Its selector answers
+# *when*, not *whose price*. Reading it as an answer to the second is what
+# let a QQQ leg under a SPY clock fill against QQQ and settle against SPY;
+# the engine has priced fills per trade since the data-kinds rewrite.
+# `load_experiment` asserts the clock selector and the agent's declared
+# underlyings agree, which is what makes the past-the-window branch safe
+# by construction rather than by assumption.
 #
-# TODO: case 2 should fall back to a surface-based theoretical mark when
-# the spot at exact expiry is unavailable but a surface near it is.
-function _build_settle(d::MarketData, u::Underlying, window_end::DateTime,
-                       window_end_spot::Float64)
-    function settle(expiry::DateTime)::Union{Float64,Missing}
-        expiry > window_end && return window_end_spot
-        s = only_or_missing(at(d, SpotPrice, u, expiry))
+# TODO: fall back to a surface-based theoretical mark when the spot at the
+# settlement instant is unavailable but a surface near it is.
+function _build_settle(d::MarketData, window_end::DateTime)
+    function settle(trd::Trade)::Union{Float64,Missing}
+        ts = min(trd.expiry, window_end)
+        s = only_or_missing(at(d, SpotPrice, selector(trd), ts))
         return ismissing(s) ? missing : s.price
     end
     return settle
@@ -137,19 +140,26 @@ end
     run_experiment(exp::Experiment) -> ExperimentResult
 
 Open `exp.data`, run the backtest on `exp.clock`, build the canonical
-[`PnLSeries`](@ref) with per-leg settlement (each residual lot marked at
-its own `trade.expiry` via the spot at that instant; legs whose expiry
-is past the window are marked at the window-end spot; legs whose
-expiry-time spot is unavailable inside the window are counted as
-`n_unmarked` and skipped from the realized PnL), compute always-on
-metrics plus any metrics requested by symbol, close the data, and
-return the result.
+[`PnLSeries`](@ref) with per-leg settlement, compute always-on metrics
+plus any metrics requested by symbol, close the data, and return the
+result.
+
+**Each residual lot settles at its own trade's underlying**, at
+`min(trade.expiry, window_end)`: a leg held to expiry inside the window
+uses its expiration spot, a leg still open past the window is marked at
+the window end, and both are looked up for that leg's own selector -- the
+same selector the engine priced its fill against. A lot whose underlying
+is served but has no spot at that instant is counted in `n_unmarked` and
+skipped from the realized PnL; one on an underlying nothing serves throws
+`UnservedSelector`.
 
 The **window end is the last clock tick** at or before `exp.to`: the
 timestamp of `asof` on the clock's kind and selector, one partition
-walk and no scan. The settle spot is the spot at that tick. Errors
-loudly if there is no clock tick in the window, the window-end spot is
-missing, or any requested metric symbol is unknown.
+walk and no scan. The spot at that tick is resolved for the clock
+underlying and recorded on the series as `window_end_spot`, for
+provenance; no computation reads it. Errors loudly if there is no clock
+tick in the window, that spot is missing, or any requested metric symbol
+is unknown.
 """
 function run_experiment(exp::Experiment)::ExperimentResult
     u = exp.clock.sel
@@ -166,7 +176,7 @@ function run_experiment(exp::Experiment)::ExperimentResult
         spot = only_or_missing(at(d, SpotPrice, u, window_end))
         ismissing(spot) && error(
             "run_experiment: window-end spot missing at $(window_end) for experiment $(exp.name)")
-        settle = _build_settle(d, u, window_end, spot.price)
+        settle = _build_settle(d, window_end)
         series = pnl_series(positions; settle=settle, window_end_spot=spot.price)
         metrics = compute_metrics(series, exp.outputs.metrics; kwargs=exp.outputs.metric_params)
         ExperimentResult(exp, positions, series, metrics)

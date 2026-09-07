@@ -121,6 +121,8 @@ coverage produce `Trade[]` inside `decide` (no surface at that
 instant), so non-trading days (weekends / holidays) are tolerated
 without consulting the data's timestamps first.
 """
+declared_underlyings(p::DailyShortStrangle) = (p.underlying,)
+
 function tick_times(p::DailyShortStrangle, ::MarketData,
                     from::DateTime, to::DateTime)::Vector{DateTime}
     out = DateTime[]

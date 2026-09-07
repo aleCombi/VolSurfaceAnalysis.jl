@@ -47,6 +47,8 @@ current_policy(a::Agent, t::DateTime, data::TimeCut,
                positions::AbstractVector{Position}) -> Policy
 
 tick_times(a::Agent, data::MarketData, from, to) -> Union{Nothing, Vector{DateTime}}
+
+declared_underlyings(a::Agent) -> Tuple of Underlying
 ```
 
 One method, four arguments, one Policy returned; plus the optional
@@ -55,6 +57,12 @@ its policy's), where a multi-policy agent unions its policies'
 schedules. Concrete agents
 subtype `Agent` and implement `current_policy`. The returned Policy
 must be valid for at least the current tick.
+
+`declared_underlyings` mirrors the [policy-level trait](policies.md) at
+this layer: default empty, `StaticAgent` delegates to its one policy, and
+an agent that swaps policies over time reports their union or nothing
+when it cannot say ahead of time. `load_experiment` reads it to check the
+clock and the strategy name one underlying.
 
 ### `StaticAgent`
 
@@ -83,7 +91,8 @@ one-line wrapper around the Agent overload.
 ## Responsibility boundaries
 
 **Owns:** the `Agent` abstract type, the `current_policy` contract,
-the `StaticAgent` base case.
+the agent-level `declared_underlyings` delegation, the `StaticAgent`
+base case.
 
 **Does NOT own:**
 

@@ -53,6 +53,18 @@ end
 current_policy(a::StaticAgent, ::DateTime, ::TimeCut, ::AbstractVector{Position}) = a.policy
 
 """
+    declared_underlyings(agent::Agent) -> Tuple of Underlying
+
+Agent-level view of [`declared_underlyings(::Policy)`](@ref). Default
+empty; `StaticAgent` delegates to its one policy. A learning agent that
+swaps policies over time reports the union of what those policies
+declare, or nothing when it cannot say ahead of time.
+"""
+declared_underlyings(::Agent) = ()
+
+declared_underlyings(a::StaticAgent) = declared_underlyings(a.policy)
+
+"""
     tick_times(agent::Agent, data::MarketData,
                from::DateTime, to::DateTime) -> Union{Nothing, Vector{DateTime}}
 

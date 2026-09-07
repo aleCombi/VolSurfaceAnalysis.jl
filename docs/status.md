@@ -91,13 +91,15 @@ fixed quantity, expiry by interval). TOML builder + smoke config under
 for sanity checks against real SPY surfaces.
 
 Step 5 / 6 then gained per-leg expiry settlement: `pnl_series` takes a
-caller-supplied `settle(expiry) -> Union{Float64, Missing}` closure
-instead of a single scalar; held-to-expiry legs are stamped at their
-own `trade.expiry` using the spot at that instant; legs whose expiry
-is past the experiment window mark at the window-end spot (case 1);
-legs whose expiry-time spot is unavailable inside the window count in
-`PnLSeries.n_unmarked` and are excluded from realized PnL (case 2 --
-no silent fallback). `scripts/run_experiment.jl --out-dir <dir>` renders
+caller-supplied `settle(trade) -> Union{Float64, Missing}` closure
+instead of a single scalar. Each residual lot settles at the spot of
+**its own trade's underlying** at `min(trade.expiry, window_end)`, the
+same selector the engine priced its fill against, and is stamped at the
+leg's own expiry; a lot whose spot is missing there counts in
+`PnLSeries.n_unmarked` and is excluded from realized PnL (no silent
+fallback). `window_end_spot` is provenance only. The clock selector says
+*when* to step, not whose price, so `load_experiment` asserts a declared
+policy underlying matches it -- one experiment, one underlying. `scripts/run_experiment.jl --out-dir <dir>` renders
 the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
 + `viz/pnl.jl`).
 

@@ -25,6 +25,12 @@ function _pl_fixture()
     (d=d, ts1=ts1)
 end
 
+@testset "declared_underlyings: what a policy fixes in its own configuration" begin
+    @test declared_underlyings(NoOpPolicy()) == ()
+    p = DailyShortStrangle(_PL_UND, Time(15, 45), Day(1), 0.20, 0.20, 1.0)
+    @test declared_underlyings(p) == (_PL_UND,)
+end
+
 @testset "NoOpPolicy: decide returns empty" begin
     f = _pl_fixture()
     cut = TimeCut(f.d, f.ts1)
