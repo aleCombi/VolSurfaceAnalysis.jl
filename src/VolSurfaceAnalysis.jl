@@ -7,6 +7,9 @@ include("data/polygon.jl")
 include("data/synth.jl")
 include("data/source.jl")
 include("data/parquet_source.jl")
+include("market_data/kinds.jl")
+include("market_data/protocol.jl")
+include("market_data/library.jl")
 include("model_data/curves.jl")
 include("surfaces/bs.jl")
 include("surfaces/surface.jl")
@@ -40,6 +43,9 @@ export OptionType, Call, Put,
        SpotDay, option_path, spot_path, with_parquet_source,
        parse_polygon_ticker, et_to_utc,
        available_timestamps, get_chain, get_spot, get_spots, clear_cache!,
+       Currency, selector, selector_type,
+       at, between, asof, timestamps, kind,
+       only_or_missing, by_timestamp,
        Curve, FlatCurve, PCCurve,
        VolatilitySurface, RawSurface, ExpirySlice,
        expiries, get_slice, iv, price, delta, gamma, vega, forward,
