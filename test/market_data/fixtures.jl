@@ -42,8 +42,7 @@ function _md_spots()
 end
 
 # ---------- parquet fixture writers ----------
-# Ported from test/data/test_parquet_source.jl; the old suite keeps its own
-# copies until the old layer is deleted at step 3.
+# Small Hive-layout parquet trees written through DuckDB.
 
 using DuckDB
 using DuckDB: DBInterface

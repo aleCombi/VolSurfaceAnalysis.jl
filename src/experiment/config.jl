@@ -74,40 +74,6 @@ function build_synthesizer(d::AbstractDict)::QuoteSynthesizer
     return _dispatch(_SYNTHESIZER_BUILDERS, t, "synthesizer")(d)
 end
 
-# ---- DataSource builders ------------------------------------------------
-
-function _build_parquet_source(d::AbstractDict)::DataSource
-    underlying = _require(d, "underlying", "source(parquet)")
-    synth_tbl  = _require(d, "synthesizer", "source(parquet)")
-    synth = build_synthesizer(Dict{String,Any}(synth_tbl))
-    max_days = haskey(d, "max_days_cached") ? Int(d["max_days_cached"]) : 3
-    if haskey(d, "root")
-        return ParquetDataSource(
-            String(underlying), String(d["root"]);
-            synthesizer     = synth,
-            max_days_cached = max_days,
-        )
-    end
-    options_root = _require(d, "options_root", "source(parquet) without \"root\"")
-    spot_root    = _require(d, "spot_root",    "source(parquet) without \"root\"")
-    return ParquetDataSource(
-        String(underlying);
-        options_root    = String(options_root),
-        spot_root       = String(spot_root),
-        synthesizer     = synth,
-        max_days_cached = max_days,
-    )
-end
-
-const _DATA_SOURCE_BUILDERS = Dict{String, Function}(
-    "parquet" => _build_parquet_source,
-)
-
-function build_data_source(d::AbstractDict)::DataSource
-    t = _pop_type!(d, "source")
-    return _dispatch(_DATA_SOURCE_BUILDERS, t, "source")(d)
-end
-
 # ---- Kind names ---------------------------------------------------------
 # The one string <-> type table. Kinds are keyed by type everywhere on the
 # runtime path; only config and identity use these names.

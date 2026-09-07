@@ -1,7 +1,6 @@
-# Parquet specs and readers on the new protocol. Every assertion of the old
-# test_parquet_source.jl re-expressed, plus the protocol identities
-# (at == collect(between), asof walks, the after-midnight spill) and a
-# cross-check against the old ParquetDataSource while it still exists.
+# Parquet specs and readers: hit/miss, fields, the protocol identities
+# (at == collect(between), asof walks, the after-midnight spill), LRU
+# bounds, use after close, and an opt-in real-data smoke.
 
 const _MD_PQ_SYNTH = SpreadFromOHLCV(0.7)
 
@@ -94,7 +93,7 @@ mktempdir() do root
         end
     end
 
-    @testset "parquet bars: timestamps == old available_timestamps" begin
+    @testset "parquet bars: timestamps from the partition lists" begin
         with_data(_md_pq_map(fx)) do d
             @test timestamps(d, OptionBar, _MD_SPY, fx.t1a, fx.t2a) == [fx.t1a, fx.t1b, fx.t2a]
             @test timestamps(d, OptionQuote, _MD_SPY, fx.t1a, fx.t2a) == [fx.t1a, fx.t1b, fx.t2a]
@@ -104,10 +103,6 @@ mktempdir() do root
             @test timestamps(d, OptionBar, Underlying("QQQ"), fx.t1a, fx.t2a) == DateTime[]
             # only the partition list was consulted; no chain was loaded
             @test length(entry(d, OptionBar).chains) == 0
-            old = ParquetDataSource("SPY"; options_root=fx.opts_root, spot_root=fx.spot_root,
-                                    synthesizer=_MD_PQ_SYNTH)
-            @test timestamps(d, OptionBar, _MD_SPY, fx.t1a, fx.t2a) == available_timestamps(old, fx.t1a, fx.t2a)
-            close(old)
         end
     end
 
@@ -167,19 +162,6 @@ mktempdir() do root
         @test close_data!(d) === nothing                                     # idempotent
     end
 
-    @testset "parquet: cross-check against the old ParquetDataSource" begin
-        old = ParquetDataSource("SPY"; options_root=fx.opts_root, spot_root=fx.spot_root,
-                                synthesizer=_MD_PQ_SYNTH)
-        with_data(_md_pq_map(fx)) do d
-            for ts in (fx.t1a, fx.t1b, fx.t2a)
-                @test at(d, OptionQuote, _MD_SPY, ts) == get_chain(old, ts)
-                @test only_or_missing(at(d, SpotPrice, _MD_SPY, ts)).price == get_spot(old, ts)
-            end
-            @test [s.price for s in between(d, SpotPrice, _MD_SPY, fx.t1a, fx.t2a)] ==
-                  [s.price for s in get_spots(old, fx.t1a, fx.t2a)]
-        end
-        close(old)
-    end
 end
 
 # ---------- volume / OHLC absent, ticker mismatch, parsed_* authoritative ----------
@@ -244,36 +226,30 @@ mktempdir() do root
     end
 end
 
-# ---------- opt-in real-data smoke and old-vs-new cross-check ----------
+# ---------- opt-in real-data smoke ----------
 
 if haskey(ENV, "VSA_POLYGON_ROOT")
-    @testset "parquet real data (VSA_POLYGON_ROOT): smoke + cross-check" begin
+    @testset "parquet real data (VSA_POLYGON_ROOT): smoke" begin
         root = ENV["VSA_POLYGON_ROOT"]
         m = MarketData(ParquetOptionBars(joinpath(root, "options_1min")), QuotesFromBars(_MD_PQ_SYNTH),
                        ParquetSpots(joinpath(root, "spots_1min")))
-        old = ParquetDataSource("SPY", root; synthesizer=_MD_PQ_SYNTH)
         day = Date(2024, 1, 16)
-        # from 03:00, past any after-midnight spill of the previous partition,
-        # which the old layer cannot see and the new one can
         w0, w1 = DateTime(day, Time(3, 0)), DateTime(day, Time(23, 59))
         with_data(m) do d
             ts = timestamps(d, OptionBar, _MD_SPY, w0, w1)
-            @info "real-data cross-check" day n_timestamps = length(ts)
+            @info "real-data smoke" day n_timestamps = length(ts)
             @test !isempty(ts)
-            @test ts == available_timestamps(old, w0, w1)
             for t in (first(ts), ts[end ÷ 2], last(ts))
-                new_q = at(d, OptionQuote, _MD_SPY, t)
-                @test new_q == get_chain(old, t)
+                @test !isempty(at(d, OptionQuote, _MD_SPY, t))
                 @test at(d, OptionBar, _MD_SPY, t) == collect(between(d, OptionBar, _MD_SPY, t, t))
-                @test only_or_missing(at(d, SpotPrice, _MD_SPY, t)).price == get_spot(old, t)
+                @test !ismissing(only_or_missing(at(d, SpotPrice, _MD_SPY, t)))
             end
-            @test asof(d, OptionQuote, _MD_SPY, w1) == get_chain(old, last(ts))
+            @test asof(d, OptionQuote, _MD_SPY, w1) == at(d, OptionQuote, _MD_SPY, last(ts))
             spots = between(d, SpotPrice, _MD_SPY, DateTime(day), DateTime(day + Day(1), Time(2, 0)))
             @test !isempty(spots) && issorted(spots; by = s -> s.timestamp)
             @test any(s -> Date(s.timestamp) == day + Day(1), spots)      # the after-midnight spill exists
         end
-        close(old)
     end
 else
-    @info "skipping parquet real-data cross-check (set VSA_POLYGON_ROOT to enable)"
+    @info "skipping parquet real-data smoke (set VSA_POLYGON_ROOT to enable)"
 end

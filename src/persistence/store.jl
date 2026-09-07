@@ -82,7 +82,7 @@ end
     with_run_store(f, root)
 
 Open a `RunStore`, call `f(store)`, then close the store in a `finally`
-block. Mirrors `with_parquet_source` for resource-scoped use.
+block. Mirrors `with_data` for resource-scoped use.
 """
 function with_run_store(f::Function, root::AbstractString)
     s = RunStore(root)

@@ -165,11 +165,9 @@ filling chain, the bare-`Policy` convenience overload.
 ```
 src/backtest/
     engine.jl       # resolve_quote + run_backtest (Agent and Policy)
-    time_cut.jl     # TimeCutModelDataSource: the old wrapper, deleted at step 3 of the data-kinds plan
 
 test/backtest/
     test_engine.jl
-    test_time_cut.jl   # old wrapper's tests, deleted with it
 ```
 
 All files are `include`d into the top-level `VolSurfaceAnalysis`

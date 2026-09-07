@@ -15,22 +15,31 @@ const DELTA_TARGETS = [0.10, 0.20, 0.30]
 const RATE = 0.045
 const DIV  = 0.013
 
-function pick_midday_ts(ds::ParquetDataSource, date::Date)
-    from = DateTime(date)
-    to   = DateTime(date, Time(23, 59, 59))
-    ts = available_timestamps(ds, from, to)
-    isempty(ts) && error("no chain timestamps on $date for $(ticker(ds.underlying))")
+# The same map a config would build: bars and spots from the parquet
+# trees, quotes synthesized from bars, flat curves, the surface provider.
+const DATA = build_market_data(Dict{String,Any}(
+    "option_bar"   => Dict{String,Any}("type" => "parquet_option_bars", "root" => joinpath(ROOT, "options_1min")),
+    "option_quote" => Dict{String,Any}("type" => "from_bars",
+                                       "synthesizer" => Dict{String,Any}("type" => "ohlcv_spread", "lambda" => 0.7)),
+    "spot_price"   => Dict{String,Any}("type" => "parquet_spots", "root" => joinpath(ROOT, "spots_1min")),
+    "rate_curve"   => Dict{String,Any}("type" => "constant", "currency" => "USD", "value" => RATE),
+    "div_curve"    => Dict{String,Any}("type" => "constant", "underlying" => SYMBOL, "value" => DIV),
+    "vol_surface"  => Dict{String,Any}("type" => "surface_from", "currency" => "USD"),
+))
+
+function pick_midday_ts(d, u::Underlying, date::Date)
+    ts = timestamps(d, OptionQuote, u, DateTime(date), DateTime(date, Time(23, 59, 59)))
+    isempty(ts) && error("no chain timestamps on $date for $u")
     target = DateTime(date, Time(16, 30))  # ~12:30 ET
     _, i = findmin(t -> abs(Dates.value(t - target)), ts)
     return ts[i]
 end
 
-with_parquet_source(SYMBOL, ROOT; synthesizer=SpreadFromOHLCV(0.7)) do raw
-    mds = ModelDataSource(raw; rate=FlatCurve(RATE), div=FlatCurve(DIV))
-
-    ts = pick_midday_ts(raw, DEMO_DATE)
-    surf = get_surface(mds, ts)
-    surf === nothing && error("no surface built at $ts")
+with_data(DATA) do d
+    u = Underlying(SYMBOL)
+    ts = pick_midday_ts(d, u, DEMO_DATE)
+    surf = only_or_missing(at(d, VolatilitySurface, u, ts))
+    ismissing(surf) && error("no surface built at $ts")
 
     spot = surf.spot
     all_exps = expiries(surf)

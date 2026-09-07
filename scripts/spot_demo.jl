@@ -11,14 +11,15 @@ const ROOT = get(ENV, "VSA_POLYGON_ROOT", "C:/repos/options-collector/data/massi
 const SYMBOL = get(ENV, "VSA_DEMO_SYMBOL", "AAPL")
 const DEMO_DATE = Date(get(ENV, "VSA_DEMO_DATE", "2016-03-28"))
 
-# ---- real series from ParquetDataSource ----
+# ---- real series from the parquet spots tree ----
 
 function load_real_spots(symbol, root, date)
-    isdir(root) || (@warn "skipping parquet load - $root not found"; return SpotPrice[])
-    spots = with_parquet_source(symbol, root) do ds
-        get_spots(ds, DateTime(date), DateTime(date, Time(23, 59, 59)))
+    spots_root = joinpath(root, "spots_1min")
+    isdir(spots_root) || (@warn "skipping parquet load - $spots_root not found"; return SpotPrice[])
+    spots = with_data(MarketData(ParquetSpots(spots_root))) do d
+        collect(between(d, SpotPrice, Underlying(symbol), DateTime(date), DateTime(date, Time(23, 59, 59))))
     end
-    isempty(spots) && @warn "no spot rows for $symbol on $date under $root"
+    isempty(spots) && @warn "no spot rows for $symbol on $date under $spots_root"
     return spots
 end
 

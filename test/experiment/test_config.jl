@@ -46,16 +46,6 @@ end
         Dict{String,Any}("type" => "bogus", "lambda" => 0.7))
 end
 
-@testset "build_data_source: parquet requires [source.synthesizer]" begin
-    # `_require` errors before any filesystem touch, so no parquet tree needed.
-    @test_throws ErrorException build_data_source(Dict{String,Any}(
-        "type"         => "parquet",
-        "underlying"   => "SPY",
-        "options_root" => "/nonexistent/opts",
-        "spot_root"    => "/nonexistent/spot",
-    ))
-end
-
 @testset "build_policy: noop" begin
     @test build_policy(Dict{String,Any}("type" => "noop")) isa NoOpPolicy
 end

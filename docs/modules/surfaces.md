@@ -61,7 +61,7 @@ build_surface(chain::Vector{OptionQuote}, spot::Float64,
    "no surface at this timestamp."
 
 Today this is the only builder method and handles only the
-mark-price convention (`ParquetDataSource`'s output). The seam for
+mark-price convention (what `QuotesFromBars` produces). The seam for
 multi-vendor support is a future `QuoteConvention` trait on the
 chain source.
 

@@ -3,11 +3,11 @@
 # is no bid/ask feed. To let downstream code that requires a fillable quote
 # (positions, backtest) run against this store, we declare a small
 # `QuoteSynthesizer` strategy that turns an `OptionBar` -- a faithful mirror
-# of Polygon's parquet row schema -- into an `OptionQuote`. The data source
-# CARRIES a synthesizer and consults it at row-load time; it does not
-# hardcode one. When a real bid/ask feed lands, a different synthesizer
-# (or a different `DataSource` entirely) takes its place without touching
-# anything downstream.
+# of Polygon's parquet row schema -- into an `OptionQuote`. The
+# `QuotesFromBars` provider CARRIES a synthesizer and applies it to every
+# bar it reads; the parquet reader does not hardcode one. When a real
+# bid/ask feed lands, a different synthesizer (or a provider that serves
+# quotes directly) takes its place without touching anything downstream.
 
 """
     OptionBar

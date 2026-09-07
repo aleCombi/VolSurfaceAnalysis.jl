@@ -11,7 +11,7 @@ inputs came from.
 
 ```mermaid
 flowchart LR
-    DS[(DataSource /<br/>ModelDataSource)]:::ext
+    DS[(MarketData<br/>time cut)]:::ext
     DS -. OptionQuote .-> OP
     DS -. entry spot .-> OP
     DS -. settlement spot .-> PAY
@@ -29,8 +29,8 @@ flowchart LR
 ```
 
 A `Trade` is whatever the caller (strategy, ad-hoc script, trading
-engine) decides. The data layer -- today a `DataSource`, soon a
-`ModelDataSource` composed on top -- supplies the `OptionQuote` at fill
+engine) decides. The data layer (the `market_data` map behind a
+`TimeCut`) supplies the `OptionQuote` at fill
 time and the spot observations used at both entry and expiry. The two
 `spot` arrows are different observations, not the same scalar: one is
 the underlying at fill, the other at settlement. Everything inside the

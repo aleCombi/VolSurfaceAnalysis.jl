@@ -1,6 +1,6 @@
 # Build a VolatilitySurface from a raw option chain.
 #
-# v1 handles the mark-price convention only (the only one ParquetDataSource
+# v1 handles the mark-price convention only (the only one QuotesFromBars
 # produces). Per-strike IV is inverted from the OTM-side mark (call if
 # K >= spot, put otherwise), falling back to the ITM side if the OTM side
 # is missing.
@@ -67,7 +67,7 @@ dropped. Expiries with no usable strikes are dropped.
 
 Throws on an empty chain. Returns `nothing` if every expiry is dropped
 (e.g. all already expired, or no usable marks anywhere) -- callers
-(notably `ModelDataSource.get_surface`) treat this as "no surface at
+(notably `SurfaceFrom`) treat this as "no surface at
 this timestamp" and cache it.
 """
 function build_surface(chain::Vector{OptionQuote}, spot::Float64,

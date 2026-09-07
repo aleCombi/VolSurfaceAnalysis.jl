@@ -8,10 +8,6 @@ mapping. Design and rationale are in
 [proposals/data_kinds.md](../proposals/data_kinds.md); this doc states
 the rules the code keeps.
 
-Status: the engine, policies, agents and experiment read through this
-module (plan step 2). The old `DataSource` / `ModelDataSource` layer
-still exists beside it, off the run path, until step 3 deletes it.
-
 ## Kinds and the visibility rule
 
 A kind is a plain immutable record type (`OptionBar`, `OptionQuote`,
