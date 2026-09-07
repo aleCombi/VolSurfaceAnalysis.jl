@@ -407,6 +407,34 @@ end
     end
 end
 
+@testset "manifest schema_version: written, and load_run refuses other versions" begin
+    mktempdir() do tmp
+        res = _build_smoke_result()
+        with_run_store(joinpath(tmp, "kb")) do store
+            id = save_run(store, res, _SMOKE_CONFIG)
+            path = replace(joinpath(run_dir(store, id), "manifest.parquet"), "\\" => "/")
+            r = first(collect(DBInterface.execute(store.con, "SELECT schema_version FROM '$path'")))
+            @test r.schema_version == VolSurfaceAnalysis.RUN_SCHEMA_VERSION == 2
+            @test load_run(store, id) isa ExperimentResult
+
+            # a manifest written before the column existed
+            DBInterface.execute(store.con, "CREATE OR REPLACE TABLE m AS SELECT * EXCLUDE (schema_version) FROM '$path'")
+            DBInterface.execute(store.con, "COPY m TO '$path' (FORMAT PARQUET)")
+            err = try load_run(store, id); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("schema_version 0", err.msg) && occursin("rerun the config", err.msg)
+
+            # an explicit older version
+            DBInterface.execute(store.con, "CREATE OR REPLACE TABLE m AS SELECT *, 1::INTEGER AS schema_version FROM '$path'")
+            DBInterface.execute(store.con, "COPY m TO '$path' (FORMAT PARQUET)")
+            err = try load_run(store, id); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("schema_version 1", err.msg)
+        end
+        GC.gc()
+    end
+end
+
 @testset "load_run: unknown id throws clearly" begin
     mktempdir() do tmp
         with_run_store(joinpath(tmp, "kb")) do store

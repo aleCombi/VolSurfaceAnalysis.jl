@@ -108,11 +108,19 @@ DBInterface.execute(store.con, """
 ```
 
 Both hashes come from `to_dict`, an identity projection (in the
-experiment module) that omits non-result-affecting fields (cache sizes,
-the `root` shorthand-vs-explicit distinction). The verbatim
-`config.toml` is still stored -- for reading and for rebuilding the
-experiment on load -- but it is no longer what identity is computed
-from.
+experiment module) that emits one entry per data kind, the clock, the
+agent and the window, omitting non-result-affecting fields (cache
+sizes, readers, part order). The parquet specs' root sits in a
+reserved `dataset` slot of that projection, the place a logical
+dataset id and version would go. The verbatim `config.toml` is still
+stored -- for reading and for rebuilding the experiment on load -- but
+it is not what identity is computed from.
+
+**One-time id break.** The data-kinds migration changed the
+projection, so every run id written before it is stale. The manifest
+carries a `schema_version` outside the hash; `load_run` refuses a run
+whose version is absent or differs, with a message that says to rerun
+its config. No migration script: the store held one run at the time.
 
 ## Responsibility boundaries
 
@@ -152,6 +160,7 @@ from.
 | `commit_sha` | VARCHAR | git commit of the code that produced the run |
 | `dirty` | BOOLEAN | working tree had uncommitted changes |
 | `written_at` | TIMESTAMP | UTC time of the save |
+| `schema_version` | INTEGER | manifest schema version (`RUN_SCHEMA_VERSION`, currently 2); outside the hash |
 
 ### `metrics.parquet`
 

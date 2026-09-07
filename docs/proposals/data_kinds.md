@@ -618,6 +618,15 @@ and is reported, not compared). Verdict after the fix (commit
 `pnl_series`, all ten metrics (stored `max_drawdown` now 59.001 on both
 sides) and manifest identical. **Gate run #1 passes.**
 
+**Gate run #2** (step 2.2, `[data.*]` + `clock` schema, commit
+`7149330`): the rewritten `.local.toml` resolves to the same experiment
+as the transitional `[source]` mapping did, so the run id is again
+`5700d3f242f8132e` (identity is the resolved experiment, not the
+config bytes; the plan expected a third id, but the projection already
+had its final shape at 2.1). The folder was overwritten with
+`commit_sha 7149330`, `dirty=false`, 1:40 wall, 1.49 GB peak;
+`compare_runs.jl` against the baseline: **passes** on every table.
+
 ## Appendix A. Reviews of v1
 
 Two independent reviews of this proposal against `master` at `d08b76e`,

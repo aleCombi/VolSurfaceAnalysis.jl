@@ -22,6 +22,12 @@ using SHA
 using DuckDB
 using DuckDB: DBInterface
 
+# Manifest schema version, outside the run hash. Bumped once by the
+# data-kinds migration (every run id changed with the identity
+# projection); `load_run` refuses a run written under another version
+# rather than rebuilding an experiment its config cannot describe.
+const RUN_SCHEMA_VERSION = 2
+
 """
     RunStore
 
@@ -221,7 +227,8 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         window_end_spot DOUBLE,
         commit_sha VARCHAR,
         dirty BOOLEAN,
-        written_at TIMESTAMP
+        written_at TIMESTAMP,
+        schema_version INTEGER
     )"""
     insert = "INSERT INTO _writebuf VALUES (" * join([
         _str_sql(id),
@@ -237,6 +244,7 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         _str_sql(commit_sha),
         dirty ? "TRUE" : "FALSE",
         _dt_sql(Dates.now(UTC)),
+        string(RUN_SCHEMA_VERSION),
     ], ", ") * ")"
     _write_parquet(store, joinpath(dir, "manifest.parquet"), schema, [insert])
 end
@@ -339,19 +347,26 @@ the rebuilt experiment only fails at `open_data` (i.e. at
 fields (`positions`, `pnl_series`, `metrics`) needs no data at all.
 
 Throws `ArgumentError` if the run folder or any of the expected files
-is missing.
+is missing, or if the manifest's `schema_version` is absent or differs
+from `RUN_SCHEMA_VERSION` (a run written before the data-kinds
+migration): rerun its config to regenerate it.
 """
 function load_run(store::RunStore, run_id::AbstractString)::ExperimentResult
     _assert_open(store)
     dir = run_dir(store, run_id)
     isdir(dir) || throw(ArgumentError("load_run: no run folder for id $run_id at $dir"))
 
+    manifest = _load_manifest(store, dir)
+    manifest.schema_version == RUN_SCHEMA_VERSION || throw(ArgumentError(
+        "load_run: run $run_id was written with manifest schema_version " *
+        "$(manifest.schema_version) (pre data-kinds); this store reads version " *
+        "$RUN_SCHEMA_VERSION only -- rerun the config to regenerate it"))
+
     cfg_path = joinpath(dir, "config.toml")
     isfile(cfg_path) || throw(ArgumentError("load_run: missing config.toml in $dir"))
     config_toml = read(cfg_path, String)
     exp = load_experiment_str(config_toml)
 
-    manifest = _load_manifest(store, dir)
     positions = _load_positions(store, dir)
     series = _load_pnl_series(store, dir, manifest)
     metrics = _load_metrics(store, dir, exp.outputs.metrics)
@@ -364,17 +379,21 @@ function _select_rows(store::RunStore, path::AbstractString, sql::AbstractString
     return collect(DBInterface.execute(store.con, sql))
 end
 
+# `SELECT *` so a manifest written without `schema_version` (an old run)
+# still reads; the missing column reports as version 0.
 function _load_manifest(store::RunStore, dir::AbstractString)
     path = joinpath(dir, "manifest.parquet")
-    rows = _select_rows(store, path,
-        "SELECT window_end_spot, n_opens, n_closes, n_unmarked FROM '$(_sql_pq_path(path))'")
+    rows = _select_rows(store, path, "SELECT * FROM '$(_sql_pq_path(path))'")
     length(rows) == 1 ||
         throw(ArgumentError("load_run: manifest.parquet must have exactly 1 row, got $(length(rows))"))
     r = first(rows)
+    version = :schema_version in propertynames(r) && r.schema_version !== missing ?
+        Int(r.schema_version) : 0
     return (window_end_spot=Float64(r.window_end_spot),
             n_opens=Int(r.n_opens),
             n_closes=Int(r.n_closes),
-            n_unmarked=Int(r.n_unmarked))
+            n_unmarked=Int(r.n_unmarked),
+            schema_version=version)
 end
 
 function _load_positions(store::RunStore, dir::AbstractString)::Vector{Position}
