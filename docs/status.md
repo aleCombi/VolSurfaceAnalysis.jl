@@ -103,6 +103,19 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
 
 ## In flight
 
+- **PR #9 correctness fixes.** The review of the data-kinds branch
+  confirmed six correctness defects, all one stance: absence that cannot
+  be answered was reported as an ordinary empty result. They are decided
+  in [proposals/pr9_correctness_fixes.md](proposals/pr9_correctness_fixes.md)
+  (settlement follows the trade, not the clock; structural absence is a
+  named error; `Constant.asof` honours its visibility stamp; spot reads
+  collapse or reject duplicate instants; the surface `asof` walks back
+  under a bound) and sequenced into ten commits in
+  [proposals/pr9_implementation_plan.md](proposals/pr9_implementation_plan.md);
+  the lower-confidence findings and cleanup are parked in
+  [proposals/pr9_remaining_findings.md](proposals/pr9_remaining_findings.md).
+  Red specifications live in `test/regressions/test_review_findings.jl`,
+  excluded from the gate until the last commit of the plan.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail

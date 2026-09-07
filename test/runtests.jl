@@ -35,4 +35,6 @@ using Dates
     include("persistence/test_store.jl")
     include("viz/test_spot.jl")
     include("viz/test_pnl.jl")
+    # Known-red regression tests for PR #9; run directly with `julia --project=. test/regressions/test_review_findings.jl`.
+    # include("regressions/test_review_findings.jl")
 end
