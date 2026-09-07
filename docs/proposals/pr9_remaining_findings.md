@@ -1,8 +1,13 @@
 # PR #9 remaining review findings
 
-Status: **not decided.** Companion to
+Status: **triaged**, in the "Remaining findings: triage" table of
+[pr9_implementation_plan.md](pr9_implementation_plan.md). A, C, D, the dead
+duplicate lifecycle check and the doc half of the cache-knob item are
+implemented; B (quotes re-synthesized per call) is deferred pending the
+measurement that plan's Q6 specifies, and the two duplication items and the
+`InMemory` refutation are deferred as their own questions. Companion to
 [pr9_correctness_fixes.md](pr9_correctness_fixes.md), which covers the six
-confirmed correctness defects and is decided.
+confirmed correctness defects and is implemented.
 
 This file records everything else the review of `data-kinds` (PR #9) produced:
 four lower-confidence findings and a set of cleanup items. Nothing here has an

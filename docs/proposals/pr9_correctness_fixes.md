@@ -1,12 +1,15 @@
 # PR #9 correctness fixes
 
-Status: decided, not yet implemented. One section per confirmed correctness
+Status: **implemented** on `data-kinds`, in the ten-commit sequence of
+[pr9_implementation_plan.md](pr9_implementation_plan.md) (its Contradictions
+section records the six places this document disagreed with itself or with the
+source, and how each was resolved). One section per confirmed correctness
 finding from the review of `data-kinds` (PR #9). Cleanup and efficiency findings
 are out of scope.
 
-Red specifications live in `test/regressions/test_review_findings.jl`, excluded
-from the gate (the include in `test/runtests.jl` is commented out). Each fix
-should move its testset from red to green.
+Red specifications live in `test/regressions/test_review_findings.jl`. They were
+excluded from the gate while they were red; all six are green and the file is in
+`test/runtests.jl`.
 
 All six findings are decided. See the implementation order and the test gaps at
 the end.

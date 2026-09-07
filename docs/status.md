@@ -99,25 +99,42 @@ leg's own expiry; a lot whose spot is missing there counts in
 `PnLSeries.n_unmarked` and is excluded from realized PnL (no silent
 fallback). `window_end_spot` is provenance only. The clock selector says
 *when* to step, not whose price, so `load_experiment` asserts a declared
-policy underlying matches it -- one experiment, one underlying. `scripts/run_experiment.jl --out-dir <dir>` renders
-the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
-+ `viz/pnl.jl`).
+policy underlying matches it -- one experiment, one underlying.
+`scripts/run_experiment.jl --out-dir <dir>` renders the equity-curve
+artifact from any config (via `scripts/lib/artifacts.jl` + `viz/pnl.jl`).
+
+The review of the data-kinds branch (PR #9) then found six correctness
+defects that were all one stance: a question that could not be answered
+was reported as an ordinary empty result, and every consumer downstream
+correctly concluded it had nothing to do. **Empty is now reserved for
+"served, and nothing at this instant"; every other unanswerable question
+has a name.** `serves(m, R, sel)` answers the structural question and the
+map-level shapes check it, so an unserved selector throws
+`UnservedSelector` instead of vanishing; two spot rows at one instant
+collapse if identical and throw `ConflictingRecords` if they disagree;
+the surface `asof` walks back past an unbuildable chain under a
+`lookback_ticks` bound and throws `DerivationExhausted` past it; a
+`Constant` honours its own visibility stamp in `asof` as it already did
+in the other three shapes; and settlement follows each lot's own trade
+rather than the clock, with `load_experiment` asserting that a declared
+policy underlying matches the clock selector. The partition convention is
+tightened to time-ordered, and SQL range bounds keep millisecond
+precision. Decisions in
+[proposals/pr9_correctness_fixes.md](proposals/pr9_correctness_fixes.md),
+commit sequence and open design choices in
+[proposals/pr9_implementation_plan.md](proposals/pr9_implementation_plan.md),
+deferred items in
+[proposals/pr9_remaining_findings.md](proposals/pr9_remaining_findings.md).
+One regression testset per finding lives in
+`test/regressions/test_review_findings.jl` and is part of the gate.
+
+**Gate run** (PR #9 step 10, this commit's tree): `Pkg.test()` on the
+DevBox (2 cores, 3.7 GB, Julia 1.12.7) — **1181 passed, 0 failed**, 1m02
+wall, including the six regression testsets. The per-commit runs were
+subsets; this is the only full-suite run of the sequence.
 
 ## In flight
 
-- **PR #9 correctness fixes.** The review of the data-kinds branch
-  confirmed six correctness defects, all one stance: absence that cannot
-  be answered was reported as an ordinary empty result. They are decided
-  in [proposals/pr9_correctness_fixes.md](proposals/pr9_correctness_fixes.md)
-  (settlement follows the trade, not the clock; structural absence is a
-  named error; `Constant.asof` honours its visibility stamp; spot reads
-  collapse or reject duplicate instants; the surface `asof` walks back
-  under a bound) and sequenced into ten commits in
-  [proposals/pr9_implementation_plan.md](proposals/pr9_implementation_plan.md);
-  the lower-confidence findings and cleanup are parked in
-  [proposals/pr9_remaining_findings.md](proposals/pr9_remaining_findings.md).
-  Red specifications live in `test/regressions/test_review_findings.jl`,
-  excluded from the gate until the last commit of the plan.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail
@@ -127,8 +144,8 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
   back in from. `data.md` is the first pass / template; the other module
   docs follow. `market_data.md` (new) follows the template from the
   start.
-- **Surface-based theoretical settle for case 2.** When the spot at
-  the leg's exact expiry is absent (Polygon minute bars are sparse
+- **Surface-based theoretical settle.** When the spot at a leg's
+  settlement instant is absent (Polygon minute bars are sparse
   at the 16:00 ET close minute), today's policy returns `missing` and
   the lot is unmarked. The fix is to compute the leg's theoretical
   mark from the surface at (or just before) the expiry. Lands in

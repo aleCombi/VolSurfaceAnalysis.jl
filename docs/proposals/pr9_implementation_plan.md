@@ -1,7 +1,10 @@
 # PR #9 implementation plan
 
-Status: proposed. Companion to [pr9_correctness_fixes.md](pr9_correctness_fixes.md)
-(decided) and [pr9_remaining_findings.md](pr9_remaining_findings.md) (not decided).
+Status: **implemented.** All ten commits landed on `data-kinds`; the gate run
+is recorded in [status.md](../status.md). Companion to
+[pr9_correctness_fixes.md](pr9_correctness_fixes.md)
+(the six decisions) and [pr9_remaining_findings.md](pr9_remaining_findings.md)
+(the lower-confidence findings, triaged below).
 This file turns the six correctness decisions into a commit sequence, triages the
 four lower-confidence findings, and records the design choices the decisions left
 open. Nothing here changes a decision in the correctness document; where a
