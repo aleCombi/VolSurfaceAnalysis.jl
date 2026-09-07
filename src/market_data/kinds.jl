@@ -28,6 +28,8 @@ struct Currency
 end
 
 Base.show(io::IO, c::Currency) = print(io, c.code)
+Base.hash(c::Currency, h::UInt) = hash(c.code, hash(:Currency, h))   # content hash, as Underlying
+Base.:(==)(a::Currency, b::Currency) = a.code == b.code
 
 """
     selector(r) -> selector value

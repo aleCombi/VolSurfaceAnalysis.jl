@@ -17,8 +17,16 @@ using DuckDB: DBInterface
 # What is compared (`run_id` and `written_at` are ignored everywhere):
 # - positions.parquet   joined on `leg_idx`; strings / timestamps / integers
 #                       exactly, doubles within TOL (NULL == NULL).
-# - pnl_series.parquet  joined on `idx`; `timestamp` exactly, `pnl` within TOL.
-# - metrics.parquet     joined on `metric_name`; `value` within TOL, NaN == NaN.
+# - pnl_series.parquet  in canonical order (rank over `timestamp, pnl`), not
+#                       on the stored `idx`: runs written before the
+#                       canonical order landed (metrics.md) ordered samples
+#                       at one timestamp by Dict iteration, which depended
+#                       on the package build. `timestamp` exactly, `pnl`
+#                       within TOL.
+# - metrics.parquet     joined on `metric_name`; `value` within TOL, NaN == NaN,
+#                       except `max_drawdown`, which is path-dependent: it is
+#                       recomputed from each run's canonical series and those
+#                       are compared (stored values are printed).
 # - manifest.parquet    `n_opens`, `n_closes`, `n_unmarked` exactly,
 #                       `window_end_spot` within TOL.
 # A row present on one side only is a difference.
@@ -62,11 +70,14 @@ _approx_diff(c) = "(NOT coalesce((a.$c IS NULL AND b.$c IS NULL) OR " *
 
 # Full outer join on `key`, report every row where any listed column differs
 # or the row is missing on one side. Returns the number of differing rows.
-function compare_table(name, key, exact, approx)
-    pa = _pq(joinpath(dir_a, name * ".parquet"))
-    pb = _pq(joinpath(dir_b, name * ".parquet"))
-    n_a = first(_rows("SELECT count(*) AS n FROM $pa")).n
-    n_b = first(_rows("SELECT count(*) AS n FROM $pb")).n
+# `source(path)` turns a parquet path into the SELECT to compare.
+_select_all(path) = "SELECT * FROM " * _pq(path)
+
+function compare_table(name, key, exact, approx; source = _select_all)
+    pa = "(" * source(joinpath(dir_a, name * ".parquet")) * ")"
+    pb = "(" * source(joinpath(dir_b, name * ".parquet")) * ")"
+    n_a = first(_rows("SELECT count(*) AS n FROM $pa AS a")).n
+    n_b = first(_rows("SELECT count(*) AS n FROM $pb AS b")).n
     cols = vcat(exact, approx)
     preds = vcat(["a.$key IS NULL", "b.$key IS NULL"],
                  [_exact_diff(c) for c in exact],
@@ -87,6 +98,40 @@ function compare_table(name, key, exact, approx)
         length(diffs) > MAX_SHOWN && println("  ... $(length(diffs) - MAX_SHOWN) more")
     end
     return length(diffs)
+end
+
+# The series in canonical order: rank over (timestamp, pnl).
+_canonical_series(path) =
+    "SELECT row_number() OVER (ORDER BY timestamp, pnl) AS rk, timestamp, pnl FROM " * _pq(path)
+
+# metrics.parquet without the path-dependent metric.
+_metrics_no_dd(path) = "SELECT * FROM " * _pq(path) * " WHERE metric_name <> 'max_drawdown'"
+
+# max_drawdown as metrics/optional.jl defines it, over the canonical series.
+function _drawdown(dir)
+    rows = _rows("SELECT pnl FROM (" * _canonical_series(joinpath(dir, "pnl_series.parquet")) * ") ORDER BY rk")
+    isempty(rows) && return 0.0
+    eq = cumsum(Float64[r.pnl for r in rows])
+    peak, max_dd = eq[1], 0.0
+    for v in eq
+        peak = max(peak, v)
+        max_dd = max(max_dd, peak - v)
+    end
+    max_dd
+end
+
+function _stored_drawdown(dir)
+    rows = _rows("SELECT value FROM " * _pq(joinpath(dir, "metrics.parquet")) * " WHERE metric_name = 'max_drawdown'")
+    isempty(rows) ? missing : Float64(first(rows).value)
+end
+
+function compare_drawdown()
+    da, db = _drawdown(dir_a), _drawdown(dir_b)
+    sa, sb = _stored_drawdown(dir_a), _stored_drawdown(dir_b)
+    ok = abs(da - db) <= TOL
+    println("max_drawdown (recomputed on the canonical series): ", ok ? "OK" : "DIFFERS",
+            " (a = $da, b = $db; stored a = $sa, b = $sb)")
+    ok ? 0 : 1
 end
 
 function compare_manifest()
@@ -120,8 +165,9 @@ n_bad = 0
 n_bad += compare_table("positions", "leg_idx",
     ["underlying", "expiry", "option_type", "direction", "entry_timestamp"],
     ["strike", "quantity", "entry_price", "entry_spot", "entry_bid", "entry_ask"])
-n_bad += compare_table("pnl_series", "idx", ["timestamp"], ["pnl"])
-n_bad += compare_table("metrics", "metric_name", String[], ["value"])
+n_bad += compare_table("pnl_series", "rk", ["timestamp"], ["pnl"]; source = _canonical_series)
+n_bad += compare_table("metrics", "metric_name", String[], ["value"]; source = _metrics_no_dd)
+n_bad += compare_drawdown()
 n_bad += compare_manifest()
 
 DBInterface.close!(con)

@@ -82,6 +82,7 @@ leave the parquet store locked.
 | **Bounded timestamp discovery** | Unbounded discovery would silently scan the whole dataset. `ParquetDataSource` requires `(from, to)` until a collector-written timestamp index exists. |
 | **Hive layout: `options_1min/` + `spots_1min/`, keyed by `symbol=<T>`** | Matches the `options-collector` output. Single-root construction derives both subdirs; explicit roots remain for non-standard layouts. |
 | **Source declares its `QuoteSynthesizer`** | Polygon has only OHLCV, so bid/ask construction is part of source provenance. A future live-feed source can pass quotes through or use a different adapter. |
+| **`Underlying` hashes by content** | The default struct hash falls back to `objectid`, which for a type in a precompiled package changes with every build, so a `Dict` keyed on `Underlying` iterated in a build-dependent order (surfaced as a nondeterministic PnL series order). Explicit `hash` / `==` on the ticker make such dictionaries deterministic; `Currency` in `market_data` does the same. |
 | **Ticker-underlying mismatch throws** | Path partitioning makes a foreign ticker a data-corruption signal. Silent skipping would hide bugs. |
 
 ## Schema mapping

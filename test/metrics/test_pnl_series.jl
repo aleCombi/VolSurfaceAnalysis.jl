@@ -141,3 +141,20 @@ end
     s = _ps([open, close], 500.0)
     @test equity_curve(s) ≈ cumsum(s.pnl)
 end
+
+@testset "pnl_series: samples at one timestamp are ordered by pnl, whatever the ledger order" begin
+    ts1 = DateTime(2024, 1, 15, 15, 30)
+    # three residual legs settling at the same expiry with distinct pnls
+    a = _ps_pos(470.0, Put,  +1, 1.0, 2.0, ts1)     # payoff 0 at 490 -> pnl -2
+    b = _ps_pos(480.0, Call, +1, 1.0, 5.0, ts1)     # payoff 10        -> pnl +5
+    c = _ps_pos(485.0, Call, +1, 1.0, 1.0, ts1)     # payoff 5         -> pnl +4
+    s1 = _ps([a, b, c], 490.0)
+    s2 = _ps([c, a, b], 490.0)
+    s3 = _ps([b, c, a], 490.0)
+    @test s1.pnl == s2.pnl == s3.pnl == [-2.0, 5.0, 4.0][sortperm([-2.0, 5.0, 4.0])]
+    @test s1.pnl == [-2.0, 4.0, 5.0]
+    @test all(==(_PS_EXPIRY), s1.timestamps)
+    # losses first: equity [-2, 2, 7] never falls below its start -> 0.0;
+    # gains first ([5, 3, 7]) would have read 2.0. Deterministic either way.
+    @test max_drawdown(s1) == max_drawdown(s2) == max_drawdown(s3) == 0.0
+end

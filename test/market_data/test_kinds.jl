@@ -8,6 +8,8 @@
     d = Dict(Currency("usd") => 1)
     @test d[Currency("USD")] == 1
     @test Currency("USD") != Underlying("USD")
+    @test hash(Currency("usd")) == hash(Currency("USD"))
+    @test hash(Currency("USD")) != hash(Underlying("USD"))
 end
 
 @testset "selector / selector_type per kind" begin

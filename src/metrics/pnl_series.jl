@@ -165,9 +165,14 @@ function pnl_series(positions::AbstractVector{Position};
         end
     end
 
-    # Sort the combined series by timestamp so equity_curve is monotonic
-    # in time across contracts.
-    order = sortperm(timestamps)
+    # Canonical order: by timestamp, and within one timestamp by pnl
+    # ascending (losses book first). Samples that settle at the same
+    # instant have no natural order -- the per-contract loop above walks a
+    # Dict, whose order depends on key hashes and so on the build -- and
+    # path metrics (max_drawdown) read the equity curve sample by sample,
+    # so the order must be deterministic and reconstructible from the
+    # persisted series. Losses-first is the conservative choice.
+    order = sortperm(eachindex(timestamps); by = i -> (timestamps[i], pnl[i]))
     return PnLSeries(timestamps[order], pnl[order],
                      Float64(window_end_spot),
                      n_opens, n_closes, n_unmarked)

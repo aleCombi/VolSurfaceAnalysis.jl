@@ -574,7 +574,27 @@ The backtest itself is about one minute; the rest is package load and
 the artifact. The first attempt was OOM-killed at save time with the
 Revise REPL open; the rerun with the REPL closed succeeded.
 
-Gate runs: recorded here as steps 2.1, 2.2 and 3.2 land.
+### 10.8 Gate runs
+
+**Gate run #1** (step 2.1, consumers on `MarketData` + `Clock`,
+config unchanged; commit `4ab045a`): run `5700d3f242f8132e`, 1:38
+wall, 1.54 GB peak. `compare_runs.jl` against the baseline: positions
+identical (4480 rows), manifest identical, every metric identical
+except `max_drawdown` (59.001 vs 59.278), and `pnl_series` a
+permutation *within* equal timestamps (2722 rows moved, same multiset
+per timestamp). Root cause, established by rerunning the new code
+(self-reproduces exactly) and by hashing an `Underlying` across a
+forced recompile (different hash): `pnl_series` walked a `Dict` keyed
+on the contract, `Underlying` hashed by `objectid`, and the object id
+of a value of a precompiled type includes the build. So the old
+series order and `max_drawdown` were never reproducible across
+commits, independent of this port. Fix (same step, own commit):
+content hashes on `Underlying` / `Currency`, a canonical sample order
+in `pnl_series` (timestamp, then pnl ascending) stated as a rule
+change in `metrics.md`, and `compare_runs.jl` comparing the series in
+that canonical order with `max_drawdown` recomputed from it for both
+runs (the baseline's stored value is from the build-dependent order
+and is reported, not compared). Verdict after the fix: recorded below.
 
 ## Appendix A. Reviews of v1
 
