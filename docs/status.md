@@ -7,11 +7,21 @@ deliberate piece at a time.
 
 Progress toward vision:
 
-1. **Data** -- done. Includes the `OptionBar` + `QuoteSynthesizer`
-   adapter that closes the Polygon OHLCV → bid/ask gap; data sources
-   declare their synthesizer (e.g. `SpreadFromOHLCV(0.7)`) at construction.
-2. **Modelling** (vol surface) -- done. `Curve` types, `surfaces` module,
-   and `ModelDataSource` composition are in place.
+1. **Data** -- done, redesigned 2026-09-07 around *kinds*
+   (`docs/modules/market_data.md`): record types keyed by type with
+   `timestamp` as visibility time and a selector per kind; four shapes
+   (`at`, `between`, `asof`, `timestamps`) over a `MarketData` map of
+   one provider per kind; per-storage specs (`ParquetOptionBars`,
+   `ParquetSpots`, `Constant`, `InMemory`, `BySelector`) opened into
+   run-scoped readers by `open_data` / `close_data!` / `with_data`;
+   derived providers (`QuotesFromBars` with its `QuoteSynthesizer`,
+   `SurfaceFrom`) that read through the map they are called from, so a
+   `TimeCut` is a structural no-lookahead through derived data. The
+   `data` module keeps the canonical records and the Polygon row
+   mapping.
+2. **Modelling** (vol surface) -- done. `Curve` types, `RateCurve` /
+   `DivCurve` kinds, the `surfaces` module, and the `SurfaceFrom`
+   provider with a bounded, cut-independent surface cache.
 3. **Positions** -- done. `Trade` / `Position` records and the pure
    `payoff` / `open_position` / `entry_cost` / `realized_pnl` primitives.
 4. **Policy + Agent + backtesting** -- minimal slice landed.
@@ -19,8 +29,9 @@ Progress toward vision:
    -> Vector{Trade}`; `Agent` abstract type with `current_policy(a, t,
    cut, positions) -> Policy` (the layer that owns refit / learning /
    policy evolution); `StaticAgent` wraps a fixed Policy.
-   `TimeCutModelDataSource` gives no-lookahead a supported-interface
-   guarantee; `run_backtest(agent, ...)` drives the tick loop and
+   `TimeCut` gives no-lookahead a supported-interface guarantee;
+   `run_backtest(agent, data, from, to, clock)` drives the tick loop on
+   the experiment's declared `Clock` and
    `run_backtest(policy, ...)` is a `StaticAgent` wrapper for
    training / evaluation. Returns a bare `Vector{Position}` ledger.
    Reporting, result wrappers, and concrete policy / agent types
@@ -38,14 +49,16 @@ Progress toward vision:
    default kwargs. Per-experiment overrides flow through
    `OutputSpec.metric_params`.
 6. **Experiment orchestration** -- end-to-end runnable.
-   `Experiment` wires `(Agent, ModelDataSource, [from, to], OutputSpec)`
-   into a single rerunnable record; `run_experiment(exp)` returns an
+   `Experiment` wires `(Agent, MarketData specs, Clock, [from, to],
+   OutputSpec)` into a single rerunnable record; `run_experiment(exp)`
+   opens the data for the run and returns an
    `ExperimentResult` with positions, the `PnLSeries` (per-leg
    settled), and the computed metrics. Outputs are declared in config:
    an `[outputs]` table (`metrics`, per-metric params, `artifacts`)
    resolves to an `OutputSpec`, defaulting to all registered metrics and
-   the default artifact set when omitted. TOML configs resolve via
-   `load_experiment` (stdlib `TOML` + per-sum-type builder registries);
+   the default artifact set when omitted. TOML configs (`[data.<kind>]`
+   tables plus a `clock`) resolve via `load_experiment` (stdlib `TOML`
+   + per-sum-type builder registries);
    `scripts/run_experiment.jl <config.toml> [--save] [--out-dir <dir>]`
    prints the result, and optionally persists it / renders artifacts.
    Parallel sweeps are future work.
@@ -53,14 +66,17 @@ Progress toward vision:
    Hive-partitioned parquet tree at `<root>/runs/run_id=<full_hash>/`
    (config.toml verbatim, manifest / metrics / positions / pnl_series
    parquet, and an `artifacts/` subdir). Identity is canonical and
-   layered: `full_hash(experiment)` is the run id; `core_hash` (source +
-   agent + window) is shared by output variations of one backtest. Both
+   layered: `full_hash(experiment)` is the run id; `core_hash` (data +
+   clock + agent + window) is shared by output variations of one
+   backtest. Both
    come from a `to_dict` projection (`experiment/identity.jl`) over the
    *resolved* experiment, so whitespace / key order / `name` / cache
    knobs don't fork ids. Every run records code provenance
    (`commit_sha` / `dirty` from `code_provenance`). `save_run` writes,
-   `load_run` reads back into an `ExperimentResult` (source validates
-   lazily, so loading works off-machine). Cross-run queries are DuckDB
+   `load_run` reads back into an `ExperimentResult` (specs are pure
+   values, so loading works off-machine; a manifest `schema_version`
+   guards the one-time id break of the data-kinds migration). Cross-run
+   queries are DuckDB
    SQL against the parquet glob. Compute reuse (skip the backtest on a
    `core_hash` hit) and a curation gate are the next slices.
 
@@ -77,7 +93,7 @@ for sanity checks against real SPY surfaces.
 Step 5 / 6 then gained per-leg expiry settlement: `pnl_series` takes a
 caller-supplied `settle(expiry) -> Union{Float64, Missing}` closure
 instead of a single scalar; held-to-expiry legs are stamped at their
-own `trade.expiry` using `get_spot(source, expiry)`; legs whose expiry
+own `trade.expiry` using the spot at that instant; legs whose expiry
 is past the experiment window mark at the window-end spot (case 1);
 legs whose expiry-time spot is unavailable inside the window count in
 `PnLSeries.n_unmarked` and are excluded from realized PnL (case 2 --
@@ -87,38 +103,6 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
 
 ## In flight
 
-- **Data layer redesign (proposal v3).**
-  [proposals/data_kinds.md](proposals/data_kinds.md) replaces the
-  hardcoded `DataSource` / `ModelDataSource` slots with kinds (record
-  types keyed by type, `timestamp` = visibility time), a three-shape
-  protocol (`at`, `between`, `asof`), per-storage provider specs,
-  run-scoped readers behind a project-owned `open_data` /
-  `close_data!`, `BySelector` composition, derived providers that read
-  through the map they are called from (structural time cut), and a
-  declared engine `Clock`. Two review rounds (appendices A, C) are
-  answered in section 9; a third round (appendix D) found the
-  architecture settled and asked for four text fixes, folded in as
-  v3.1. Execution follows
-  [proposals/data_kinds_plan.md](proposals/data_kinds_plan.md) on the
-  DevBox, where the data is. **Step 0 done** (2026-09-07): baseline run
-  `4647bcfa219d0cfb` saved under `scripts/runs/` on the DevBox with
-  `dirty=false`, `scripts/compare_runs.jl` as the reproduction gate,
-  convention check recorded in proposal section 10. **Step 1 done**
-  (2026-09-07): the `market_data` layer is complete beside the old one
-  (kinds and selectors, the four shapes, `MarketData`, `TimeCut`,
-  `Clock`, `BySelector`, lifecycle with unwind, parquet readers with
-  the partition convention, curve kinds, `SurfaceFrom`), all tested
-  including a real-day cross-check against `ParquetDataSource`; nothing
-  downstream reads it yet. **Step 2 done** (2026-09-07): engine,
-  policies, agents and experiment read through `MarketData` + `Clock`;
-  config is `[data.<kind>]` tables plus a `clock`; manifest
-  `schema_version` 2 with `load_run` refusing older runs; both gate
-  runs reproduce the baseline (`compare_runs.jl`), after fixing a
-  pre-existing nondeterminism the gate exposed (PnL series order and
-  `max_drawdown` depended on the package build; now canonical, see
-  `metrics.md`). Point-vs-range benchmark recorded in proposal section
-  10. Next: step 3, delete the old `DataSource` / `ModelDataSource`
-  layer.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail
@@ -128,8 +112,8 @@ the equity-curve artifact from any config (via `scripts/lib/artifacts.jl`
   back in from. `data.md` is the first pass / template; the other module
   docs follow. `market_data.md` (new) follows the template from the
   start.
-- **Surface-based theoretical settle for case 2.** When `get_spot` at
-  the leg's exact expiry is `missing` (Polygon minute bars are sparse
+- **Surface-based theoretical settle for case 2.** When the spot at
+  the leg's exact expiry is absent (Polygon minute bars are sparse
   at the 16:00 ET close minute), today's policy returns `missing` and
   the lot is unmarked. The fix is to compute the leg's theoretical
   mark from the surface at (or just before) the expiry. Lands in
@@ -154,3 +138,21 @@ intended direction, but not currently in flight.
   `dirty` when a rerun reproduces it, and *flags* divergences rather than
   overwriting. Run identity is config-derived (one result per `run_id`), so
   this is what guards that invariant against code drift. Not started.
+- **Dataset fingerprint in identity.** The parquet specs carry their
+  root in a reserved `dataset` slot of the identity projection; a real
+  logical dataset id and version (so the same tree at two paths, or a
+  re-collected tree at one path, hash right) is its own proposal.
+  Declined in data-kinds v3.
+- **Capability-restricted views.** A structural raw/model boundary (a
+  policy view that cannot address `OptionBar`) was declined in
+  data-kinds v3 in favour of a doc rule; revisit if a policy ever
+  couples to vendor bars.
+- **Bar-end timestamp convention as a spec option.** Polygon minute
+  bars keep their bar-open stamp as the visibility time, a documented
+  one-minute allowance. A `stamp = :bar_end` option on
+  `ParquetOptionBars`, in identity, would make the choice explicit per
+  experiment.
+- **Path metrics over simultaneous samples.** `pnl_series` orders
+  samples at one timestamp by pnl (losses first) so `max_drawdown` is
+  deterministic; aggregating simultaneous samples for path metrics is
+  the fuller answer.

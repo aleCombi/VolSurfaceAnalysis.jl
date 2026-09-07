@@ -1,6 +1,9 @@
 # Proposal: kinds, providers, readers -- a scalable data layer (v3)
 
-Status: v3.1, accepted; implementation in progress. v1 drew two reviews
+Status: v3.1, **implemented** on the DevBox, 2026-09-07, over 16
+commits ending at `484f573` (code) and the closure commit that follows
+it (docs); the final gate run reproduces the step-0 baseline (section
+10.8). v1 drew two reviews
 (Appendix A), v2 answered them and drew a second round (Appendix C), v3
 settled the protocol contracts that round raised and drew a third
 (Appendix D); v3.1 folds in Review A3's text fixes. Section 9 maps every
@@ -626,6 +629,15 @@ config bytes; the plan expected a third id, but the projection already
 had its final shape at 2.1). The folder was overwritten with
 `commit_sha 7149330`, `dirty=false`, 1:40 wall, 1.49 GB peak;
 `compare_runs.jl` against the baseline: **passes** on every table.
+
+**Gate run #3** (step 3.1, old layer deleted, commit `484f573`): same
+resolved experiment, run id `5700d3f242f8132e` overwritten with
+`commit_sha 484f573`, `dirty=false`, manifest `schema_version 2`, 1:38
+wall, 1.39 GB peak; `compare_runs.jl` against the step-0 baseline
+`4647bcfa219d0cfb`: **passes** on every table, stored `max_drawdown`
+identical. Final ids: baseline `4647bcfa219d0cfb` (`core_hash`
+`cf9dde8a8774b812`, code `45cf6c1`), final `5700d3f242f8132e`
+(`core_hash` `5a2d17c64948e1ba`).
 
 ### 10.9 Point vs range benchmark
 
