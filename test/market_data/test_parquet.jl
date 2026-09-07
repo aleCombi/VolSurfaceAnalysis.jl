@@ -164,6 +164,58 @@ mktempdir() do root
 
 end
 
+# ---------- time-ordered partitions; sub-second range bounds ----------
+# Its own tree in the spill layout, so the shared fixture's assertions are
+# untouched.
+
+mktempdir() do root
+    opts = joinpath(root, "options_1min")
+    t1 = DateTime(2024, 1, 15, 15, 30)          # the 01-15 session
+    spill = DateTime(2024, 1, 16, 0, 30)        # ... spilling past midnight UTC
+    t2 = DateTime(2024, 1, 16, 15, 30)          # the 01-16 session
+    _md_write_options_parquet(joinpath(opts, "date=2024-01-15", "symbol=SPY", "data.parquet"),
+                              [(ticker="O:SPY240129C00406000", close=1.05, volume=1.0,
+                                open=1.0, high=1.1, low=1.0, timestamp=t1),
+                               (ticker="O:SPY240129C00406000", close=1.06, volume=1.0,
+                                open=1.0, high=1.1, low=1.0, timestamp=spill)])
+    _md_write_options_parquet(joinpath(opts, "date=2024-01-16", "symbol=SPY", "data.parquet"),
+                              [(ticker="O:SPY240129C00406000", close=1.20, volume=1.0,
+                                open=1.2, high=1.3, low=1.1, timestamp=t2)])
+
+    @testset "parquet bars: partitions are time-ordered, so the shapes agree" begin
+        with_data(MarketData(ParquetOptionBars(opts))) do d
+            r = entry(d, OptionBar)
+            p15 = VolSurfaceAnalysis._meta(r, _MD_SPY, Date(2024, 1, 15)).timestamps
+            p16 = VolSurfaceAnalysis._meta(r, _MD_SPY, Date(2024, 1, 16)).timestamps
+            # the convention: every row in D-1 precedes every row in D, spill included
+            @test last(p15) < first(p16)
+
+            # under it, asof agrees with the newest instant the grid reports
+            for ts in (t1, spill, spill + Minute(1), t2, t2 + Hour(1))
+                grid = timestamps(d, OptionBar, _MD_SPY, DateTime(2024, 1, 15), ts)
+                @test !isempty(grid)
+                @test asof(d, OptionBar, _MD_SPY, ts) == at(d, OptionBar, _MD_SPY, last(grid))
+            end
+
+            # ... and the lazy cross-partition walk stays sorted, so by_timestamp holds
+            rng = between(d, OptionBar, _MD_SPY, t1, t2)
+            @test issorted([b.timestamp for b in rng])
+            @test first.(collect(by_timestamp(rng))) == [t1, spill, t2]
+        end
+    end
+
+    @testset "parquet bars: a sub-second lower bound excludes the row at its floor" begin
+        with_data(MarketData(ParquetOptionBars(opts))) do d
+            lo = t1 + Millisecond(500)
+            @test [b.timestamp for b in between(d, OptionBar, _MD_SPY, lo, spill)] == [spill]
+            @test timestamps(d, OptionBar, _MD_SPY, lo, spill) == [spill]
+            # the exact-instant predicate is unaffected
+            @test [b.timestamp for b in at(d, OptionBar, _MD_SPY, t1)] == [t1]
+            @test at(d, OptionBar, _MD_SPY, lo) == OptionBar[]
+        end
+    end
+end
+
 # ---------- spot duplicates: collapse identical, throw on conflict ----------
 # Its own small tree rather than the shared fixture, so the assertions above
 # keep describing a store with no duplicates.

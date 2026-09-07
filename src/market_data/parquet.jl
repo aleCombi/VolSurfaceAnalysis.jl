@@ -14,6 +14,21 @@
 # Date(ts) (bounded by the partition list), which is what makes
 # `at == collect(between(ts, ts))` an identity rather than a coincidence.
 #
+# The convention is TIME-ORDERED: every row in partition D-1 precedes
+# every row in partition D. That is what a local-date collector produces
+# -- one contiguous session per partition, the after-midnight spill
+# belonging to the earlier session -- and the four shapes only agree with
+# each other under it. `asof` returns at the newest candidate partition
+# holding a row <= ts while `at` and `timestamps` merge both candidates,
+# so an interleaved layout would let `asof` disagree with
+# `at(last(timestamps(...)))`; and the lazy `PartitionBars` iterator
+# concatenates D-1 then D without a cross-partition sort, so it would
+# yield out-of-order records and make `by_timestamp` throw. Under the
+# ordering both disagreements vanish by construction. A feed that
+# genuinely interleaves partitions needs a maximum over both candidates
+# in `asof` and a lazy two-way merge in `between`; no collector writes
+# one today.
+#
 # Vendor rows carry the bar-open timestamp; it is kept as the visibility
 # time (documented one-minute allowance, see data.md / market_data.md).
 
@@ -72,7 +87,13 @@ function _candidate_partitions(parts::Vector{Date}, from::DateTime, to::DateTime
     view(parts, lo:hi)
 end
 
-_ts_sql(ts::DateTime) = "TIMESTAMP '" * Dates.format(ts, "yyyy-mm-dd HH:MM:SS") * "'"
+# Millisecond precision, not whole seconds: `between` is public and its
+# bounds are passed through untouched (a TOML datetime with a fractional
+# second, a TimeCut cutoff), and truncating the lower bound would admit
+# the row at its floor while `at` and `timestamps` compare at full
+# precision. DuckDB parses the fractional part; `at`'s exact
+# `timestamp = ...` predicate stays exact.
+_ts_sql(ts::DateTime) = "TIMESTAMP '" * Dates.format(ts, "yyyy-mm-dd HH:MM:SS.sss") * "'"
 
 function _query_distinct_timestamps(con::DuckDB.DB, path::AbstractString)::Vector{DateTime}
     sql = "SELECT DISTINCT timestamp FROM '$(_sql_path(path))' ORDER BY timestamp"

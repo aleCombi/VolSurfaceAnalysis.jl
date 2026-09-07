@@ -261,6 +261,19 @@ makes `at == collect(between(ts, ts))` an identity rather than a
 coincidence. A ticker whose underlying is not the partition's throws:
 under `symbol=` partitioning that is a corrupt store.
 
+The convention is **time-ordered**: every row in partition `D - 1`
+precedes every row in partition `D`. One contiguous session per
+partition, the after-midnight spill belonging to the earlier session, is
+what a local-date collector produces — and the four shapes agree with
+each other only under it. `asof` returns at the newest candidate
+partition holding a row at or before `ts` while `at` and `timestamps`
+merge both candidates, so an interleaved layout would break
+`asof == at(last(timestamps(...)))`; and the lazy bar `between`
+concatenates `D - 1` then `D` without a cross-partition sort, so it would
+yield out-of-order records. The ordering makes both correct by
+construction, which is why it is a convention on the store rather than a
+merge in four shapes.
+
 *Spot de-duplication.* Consulting two partitions means the same row can
 be read twice — the convention permits an after-midnight row in both
 the earlier partition's spill and the later partition's body — and a
