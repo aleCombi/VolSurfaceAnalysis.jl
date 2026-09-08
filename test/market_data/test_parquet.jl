@@ -235,7 +235,8 @@ mktempdir() do root
     spill = DateTime(2024, 1, 16, 0, 30)
     t2 = DateTime(2024, 1, 16, 15, 30)
     # t1 delivered twice inside one partition; the spill row present in both
-    # the 01-15 partition (per the convention) and the 01-16 body.
+    # the 01-15 partition and the 01-16 body -- a layout the time-ordered
+    # convention forbids and nothing enforces.
     _md_write_spot_parquet(joinpath(spots, "date=2024-01-15", "symbol=SPY", "data.parquet"),
                            [t1, t1, spill], [480.0, 480.0, 480.7])
     _md_write_spot_parquet(joinpath(spots, "date=2024-01-16", "symbol=SPY", "data.parquet"),
@@ -249,6 +250,42 @@ mktempdir() do root
             @test [s.timestamp for s in out] == [t1, spill, t2]
             @test [s.price for s in out] == [480.0, 480.7, 481.0]
             @test timestamps(d, SpotPrice, _MD_SPY, t1, t2) == [t1, spill, t2]
+
+            # asof obeys the rule too: it reads its winning instant through
+            # `between`, so the repeat inside one partition and the copy
+            # across the overlap both collapse.
+            @test only_or_missing(asof(d, SpotPrice, _MD_SPY, t1)).price == 480.0
+            @test only_or_missing(asof(d, SpotPrice, _MD_SPY, spill + Minute(1))).price == 480.7
+
+            # ... and the identity the shapes owe each other still holds here
+            for ts in (t1, spill, spill + Minute(1), t2, t2 + Hour(1))
+                grid = timestamps(d, SpotPrice, _MD_SPY, t1, ts)
+                @test !isempty(grid)
+                @test asof(d, SpotPrice, _MD_SPY, ts) == at(d, SpotPrice, _MD_SPY, last(grid))
+            end
+        end
+    end
+end
+
+# The same overlap, disagreeing. `asof` reading the winning block directly
+# would return the later partition's price with no diagnostic while `at`
+# threw -- the silent choice between two answers the rule exists to remove.
+mktempdir() do root
+    spots = joinpath(root, "spots_1min")
+    t1 = DateTime(2024, 1, 15, 15, 30)
+    spill = DateTime(2024, 1, 16, 0, 30)
+    _md_write_spot_parquet(joinpath(spots, "date=2024-01-15", "symbol=SPY", "data.parquet"),
+                           [t1, spill], [480.0, 480.7])
+    _md_write_spot_parquet(joinpath(spots, "date=2024-01-16", "symbol=SPY", "data.parquet"),
+                           [spill], [499.9])
+
+    @testset "parquet spots: a conflict across the overlap throws in asof too" begin
+        with_data(MarketData(ParquetSpots(spots))) do d
+            @test_throws ConflictingRecords asof(d, SpotPrice, _MD_SPY, spill)
+            @test_throws ConflictingRecords asof(d, SpotPrice, _MD_SPY, spill + Hour(1))
+            @test_throws ConflictingRecords at(d, SpotPrice, _MD_SPY, spill)
+            # the instant before it is untouched
+            @test only_or_missing(asof(d, SpotPrice, _MD_SPY, t1)).price == 480.0
         end
     end
 end
@@ -263,6 +300,7 @@ mktempdir() do root
         with_data(MarketData(ParquetSpots(spots))) do d
             @test_throws ConflictingRecords at(d, SpotPrice, _MD_SPY, t)
             @test_throws ConflictingRecords between(d, SpotPrice, _MD_SPY, t, t)
+            @test_throws ConflictingRecords asof(d, SpotPrice, _MD_SPY, t)
             err = try
                 at(d, SpotPrice, _MD_SPY, t)
             catch e

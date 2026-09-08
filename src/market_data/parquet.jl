@@ -428,12 +428,13 @@ function _append_spots!(out::Vector{SpotPrice}, u::Underlying, b::SpotBlock, fro
 end
 
 # Spots are a snapshot kind, read through `only_or_missing`, so two rows
-# at one instant abort the read. Two ways to get there without anyone
-# writing bad code: a vendor re-delivers a minute into one partition, or
-# the same after-midnight row lands in both a partition's spill and the
-# next partition's body. Equal price collapses -- there is no information
-# to lose; a disagreement throws, because taking the first is a silent
-# choice between two answers.
+# at one instant abort the read. A vendor re-delivering a minute into one
+# partition gets there without anyone writing bad code; so does the same
+# row written into a partition's spill and the next partition's body,
+# which the time-ordered convention above forbids but nothing enforces --
+# the store is a directory tree, not a validated schema. Equal price
+# collapses -- there is no information to lose; a disagreement throws,
+# because taking the first is a silent choice between two answers.
 function _collapse_duplicates!(out::Vector{SpotPrice}, u::Underlying)
     isempty(out) && return out
     w = 1
@@ -461,15 +462,20 @@ function between(r::ParquetSpotsReader, ::Any, ::Type{SpotPrice}, u::Underlying,
     _collapse_duplicates!(out, u)
 end
 
-function asof(r::ParquetSpotsReader, ::Any, ::Type{SpotPrice}, u::Underlying, ts::DateTime)
+# The backward walk finds the winning instant; `between` reads it, so
+# every spot read obeys the de-duplication rule by construction rather
+# than by three call sites remembering to apply it. Reading the block in
+# hand directly would be cheaper by two searchsorted pairs on vectors
+# already in memory, and would miss a duplicate of `win` living in the
+# other candidate partition.
+function asof(r::ParquetSpotsReader, ctx, ::Type{SpotPrice}, u::Underlying, ts::DateTime)
     _assert_open(r)
     parts = _partitions(r, u)
     for j in searchsortedlast(parts, Date(ts)):-1:1
         b = _block(r, u, parts[j])
         k = searchsortedlast(b.timestamps, ts)
         k == 0 && continue
-        win = b.timestamps[k]
-        return _append_spots!(SpotPrice[], u, b, win, win)
+        return between(r, ctx, SpotPrice, u, b.timestamps[k], b.timestamps[k])
     end
     SpotPrice[]
 end

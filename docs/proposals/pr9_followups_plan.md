@@ -1,8 +1,8 @@
 # PR #9 follow-ups: implementation plan
 
-Status: proposed. Turns the two items in
-[pr9_followups.md](pr9_followups.md) into work: the spot `asof` gap (open,
-small, decidable now) and finding B from
+Status: commit 1 **implemented**; the rest proposed. Turns the two items in
+[pr9_followups.md](pr9_followups.md) into work: the spot `asof` gap (small,
+decidable now, and now done -- commit 1, marked ✓ below) and finding B from
 [pr9_remaining_findings.md](pr9_remaining_findings.md) (quotes re-synthesized
 per call — deferred pending measurement, and this plan is mostly about getting
 that measurement).
@@ -17,7 +17,7 @@ trait that does not exist, which is its own design question.
 
 | # | Subject | Item | Src | Docs | Tests |
 |---|---|---|---|---|---|
-| 1 | `market_data: spot asof obeys the de-duplication rule (follow-up 2)` | asof gap | parquet | market_data | 3 new cases |
+| 1 ✓ | `market_data: spot asof obeys the de-duplication rule (follow-up 2)` | asof gap | parquet | market_data | 3 new cases |
 | 2 | `backtest: fetch the chain once per tick, not once per order (finding B, part 1)` | B | engine | backtest | engine suite |
 | 3 | `Benchmark quote synthesis; finding B measured (finding B, part 2)` | B | — (script) | followups | — |
 | 4 | *conditional* `market_data: QuotesFromBars gains a reader with a bounded chain cache (finding B, part 3)` | B | providers, lifecycle | market_data, experiment | new lifecycle + cache cases |
@@ -30,18 +30,21 @@ its impact is not established.
 
 ---
 
-## 1. Spot `asof` obeys the de-duplication rule
+## 1. Spot `asof` obeys the de-duplication rule — landed
 
 ### The gap
 
 Decision 5 applies collapse-or-throw in `between` (with the provider-level
 default `at` inheriting it) plus a uniqueness pass on `timestamps`. That is what
-landed. `asof(::ParquetSpotsReader, ...)` reaches neither: it walks the partition
-list backward and, on the first block holding a timestamp `<= ts`, returns
+landed. `asof(::ParquetSpotsReader, ...)` reached neither: it walked the partition
+list backward and, on the first block holding a timestamp `<= ts`, returned
 `_append_spots!(SpotPrice[], u, b, win, win)` — a direct read of one block. A
-vendor row delivered twice at the winning instant still comes back as two
-records, and `only_or_missing` still throws the bare `ArgumentError` that
-decision 5 exists to replace.
+vendor row delivered twice at the winning instant came back as two records, and
+`only_or_missing` threw the bare `ArgumentError` that decision 5 exists to
+replace. Worse, reading one block means reading one *partition*, so a
+conflict across the spill overlap made `asof` return the later partition's price
+silently while `at` threw — see the measured symptom in
+[pr9_followups.md](pr9_followups.md).
 
 ### Decision: route `asof` through `between`, not through a second call to the helper
 
@@ -78,11 +81,12 @@ the surface reader's curve reads). If it ever shows up, the fallback is the
 one-liner.
 
 **Two behaviour changes to state, neither a regression.** `asof` can now throw
-`ConflictingRecords` — which is the point. And it now merges the two candidate
+`ConflictingRecords` — which is the point, and it is the only way the conflict
+across the overlap gets reported at all. And it now merges the two candidate
 partitions at the winning instant rather than reading one: under the
 time-ordered convention commit 5 of the previous sequence established, that
-returns the same record, and where the spill overlap duplicates a row it
-collapses it instead of returning the first copy. Both follow from the rule
+returns the same record, and where the overlap duplicates a row it collapses it
+instead of returning the later partition's copy. Both follow from the rule
 already documented in `market_data.md`.
 
 ### Files
@@ -94,11 +98,14 @@ already documented in `market_data.md`.
 - **Docs (rule 1):** `docs/modules/market_data.md`, the *Spot de-duplication*
   paragraph, which currently names `between` and `timestamps`. It becomes: every
   spot read obeys the rule, and `asof` obeys it by going through `between`.
-- **Tests:** three cases in the existing duplicate-tree block of
-  `test/market_data/test_parquet.jl` (it already writes its own small tree):
-  identical duplicates at the winning instant collapse under `asof`; conflicting
-  prices there throw `ConflictingRecords`; and
-  `asof == at(last(timestamps(...)))` still holds over the duplicated tree.
+- **Tests:** `test/market_data/test_parquet.jl`. Three cases in the existing
+  duplicate-tree block (it already writes its own small tree): identical
+  duplicates at the winning instant collapse under `asof`, in one partition and
+  across the overlap; and `asof == at(last(timestamps(...)))` still holds over
+  the duplicated tree. `asof` joins `at` and `between` in the same-instant
+  conflict block. Plus one tree the original write-up did not foresee: the two
+  candidate partitions carrying one instant at *different* prices, where the
+  direct read returned the later price silently — `asof` throws there now.
 
 Revertible alone: yes.
 

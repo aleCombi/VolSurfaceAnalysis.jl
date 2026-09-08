@@ -127,11 +127,15 @@ deferred items in
 [proposals/pr9_remaining_findings.md](proposals/pr9_remaining_findings.md).
 One regression testset per finding lives in
 `test/regressions/test_review_findings.jl` and is part of the gate. Two
-items came out of implementing it and are parked in
-[proposals/pr9_followups.md](proposals/pr9_followups.md): making
-`InMemory` reject conflicting rows the way the parquet reader now does
-(decided, needs a per-kind "one record per instant" trait first), and a
-spot `asof` path that bypasses the collapse-or-throw rule (open).
+items came out of implementing it, in
+[proposals/pr9_followups.md](proposals/pr9_followups.md). The spot `asof`
+path that bypassed the collapse-or-throw rule is **closed**: it now takes
+its winning instant from the backward walk and reads it through
+`between`, so every spot read obeys the rule by construction (gate after
+it: 1198 passed, 0 failed). Making
+`InMemory` reject conflicting rows the way the parquet reader does stays
+open — decided, but it needs a per-kind "one record per instant" trait
+first.
 
 **Gate run** (PR #9 step 10, this commit's tree): `Pkg.test()` on the
 DevBox (2 cores, 3.7 GB, Julia 1.12.7) — **1181 passed, 0 failed**, 1m02

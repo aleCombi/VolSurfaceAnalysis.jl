@@ -331,26 +331,31 @@ The convention is **time-ordered**: every row in partition `D - 1`
 precedes every row in partition `D`. One contiguous session per
 partition, the after-midnight spill belonging to the earlier session, is
 what a local-date collector produces — and the four shapes agree with
-each other only under it. `asof` returns at the newest candidate
-partition holding a row at or before `ts` while `at` and `timestamps`
-merge both candidates, so an interleaved layout would break
+each other only under it. `asof` takes its winning instant from the
+newest candidate partition holding a row at or before `ts` while `at` and
+`timestamps` merge both candidates, so an interleaved layout would break
 `asof == at(last(timestamps(...)))`; and the lazy bar `between`
 concatenates `D - 1` then `D` without a cross-partition sort, so it would
 yield out-of-order records. The ordering makes both correct by
 construction, which is why it is a convention on the store rather than a
 merge in four shapes.
 
-*Spot de-duplication.* Consulting two partitions means the same row can
-be read twice — the convention permits an after-midnight row in both
-the earlier partition's spill and the later partition's body — and a
-vendor can re-deliver a minute into one partition. Spots are a snapshot
-kind read through `only_or_missing`, so either one would abort the read.
-The spot reader therefore applies one rule after its sort: **equal
-timestamp and equal price collapse silently; equal timestamp and
+*Spot de-duplication.* A vendor can re-deliver a minute into one
+partition, and consulting two partitions means the same row can be read
+twice — the time-ordered convention forbids one instant appearing in
+both, but the store is a directory tree and nothing enforces it. Spots
+are a snapshot kind read through `only_or_missing`, so either would abort
+the read. The spot reader therefore applies one rule after its sort:
+**equal timestamp and equal price collapse silently; equal timestamp and
 different price throws `ConflictingRecords`**, naming the instant and
 both values. Taking the first would be a silent choice between two
-answers, on a number nobody verified. `timestamps` on the same reader is
-made distinct for the same reason.
+answers, on a number nobody verified.
+
+**Every spot read obeys the rule**, and by construction rather than by
+each shape remembering it: `between` applies it, the provider-level `at`
+default is `between` over one instant, and `asof` walks the partition
+list back to the winning instant and then reads it through `between` too.
+`timestamps` on the same reader is made distinct for the same reason.
 
 Bars are left alone deliberately. A chain has many rows per timestamp by
 design, so its de-duplication key is the contract, not the instant, and
