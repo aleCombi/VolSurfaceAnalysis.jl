@@ -123,8 +123,7 @@ failed.** What the review deferred is in the backlog below.
 
 ## In flight
 
-Nothing. The next slice is being scoped on the `quote-synthesis-cost`
-branch (see *Quote synthesis cost* in the backlog).
+Nothing.
 
 ## Backlog
 
@@ -182,23 +181,17 @@ intended direction, but not currently in flight.
   samples at one timestamp by pnl (losses first) so `max_drawdown` is
   deterministic; aggregating simultaneous samples for path metrics is
   the fuller answer.
-- **Quote synthesis cost (PR #9 finding B).** `at(::QuotesFromBars, ...)`
-  rebuilds the whole `OptionQuote` chain from the cached `OptionBar` chain
-  on every call, and one tick that fires performs `n + 2` such passes
-  (surface reader, `decide`, one per order). Two steps, in order. First,
-  the engine fetches the chain once per underlying per tick and
-  `resolve_quote` gains an arity that takes the chain; no measurement
-  needed. Second, a benchmark modelled on `scripts/bench_point_vs_range.jl`
-  over one month of SPY: synthesis once, three times and `n + 2` times per
-  timestamp, and against a `QuotesFromBars` reader with a bounded
-  `(underlying, timestamp)` chain cache, plus the whole-run wall time and
-  peak RSS of the strangle config over one month. The cache lands only if
-  it moves the whole-run number by roughly 20%, because it is a lifecycle
-  change (a spec/reader pair, `serves`, a cut-independence argument like
-  `SurfaceReader`'s); only `at` would be cached, the bound an `open_data`
-  kwarg outside identity. The only real config narrows the grid with
-  `tick_times`, so the expected answer is "matters for a policy that does
-  not exist yet".
+- **Quote synthesis cost (PR #9 finding B). Closed 2026-09-08, measured,
+  not worth a cache.** `at(::QuotesFromBars, ...)` re-synthesizes the
+  chain on every call and one firing tick performs `n + 2` passes. On the
+  DevBox against the SPY tree (2024-01-16) a one-minute chain holds
+  300-500 bars, one synthesis pass costs 0.01-0.05 ms, and the parquet
+  read under it costs 5-45 ms cold: the repeated work is two to three
+  orders of magnitude below the read it sits on, so the 20% whole-run
+  threshold is unreachable. No chain cache, no engine change; the
+  per-order chain fetch in `run_backtest` stays as it is. Reopen only
+  with a policy on the full minute grid and a whole-run measurement that
+  says otherwise.
 - **`InMemory` rejects conflicting rows like the parquet reader.**
   Decided: the fixture provider must not represent a state the real
   reader throws on. Blocked on a per-kind "one record per selector per
