@@ -49,6 +49,21 @@ in the config loader.
 """
 function selector_type end
 
+"""
+    snapshot(::Type{R}) -> Bool
+
+Whether kind `R` carries ONE record per selector per instant. A trait on
+the kind. `true` for kinds read through `only_or_missing` (a spot, a
+curve, a surface): two rows for one selector at one instant are then
+either the same row twice, which collapses, or two answers, which is a
+`ConflictingRecords`. `false` for grid kinds (bars, quotes), where many
+rows per instant is the shape. Readers that can be handed a duplicate
+apply the rule where the rows enter -- the parquet spot reader after its
+sort, `InMemory` at construction -- so a fixture cannot represent a state
+the real reader throws on.
+"""
+function snapshot end
+
 selector(r::OptionBar)   = r.underlying
 selector(r::OptionQuote) = r.underlying
 selector(r::SpotPrice)   = r.underlying
@@ -56,3 +71,7 @@ selector(r::SpotPrice)   = r.underlying
 selector_type(::Type{OptionBar})   = Underlying
 selector_type(::Type{OptionQuote}) = Underlying
 selector_type(::Type{SpotPrice})   = Underlying
+
+snapshot(::Type{OptionBar})   = false
+snapshot(::Type{OptionQuote}) = false
+snapshot(::Type{SpotPrice})   = true

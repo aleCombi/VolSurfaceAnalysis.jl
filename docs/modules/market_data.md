@@ -25,6 +25,11 @@ on the runtime path knows a name. Every kind carries:
   for rate curves) and the trait `selector_type(R)`. Every kind defines
   both; `Currency` is a distinct value type, not a string, so the
   contract is enforceable by dispatch.
+- **A shape** — the trait `snapshot(R)`: `true` when a kind carries one
+  record per selector per instant (spot, curves, surface — the kinds
+  read through `only_or_missing`), `false` for grid kinds (bars,
+  quotes). Every kind defines it. It is what lets a reader apply the
+  duplicate rule below without knowing the kind.
 
 One non-kind type also implements `selector`: `Trade`, in
 [`positions`](positions.md), whose selector is its underlying. It has no
@@ -167,7 +172,10 @@ every series in its storage.
 
 - `InMemory{R}(rows)` — fixtures; rows kept stably sorted by timestamp.
   Its rows are the whole world, so it serves exactly the selectors they
-  carry and an empty one serves nothing.
+  carry and an empty one serves nothing. For a `snapshot` kind it
+  applies the duplicate rule at construction (equal rows collapse, a
+  disagreement throws `ConflictingRecords`), so a fixture cannot hold a
+  state the parquet reader aborts on.
 - `Constant{R}(record)` — one record visible **from its own
   timestamp**, the flat-curve case. `asof` returns it only for its own
   selector (a constant for SPY says nothing about SPX) and only at or
@@ -408,7 +416,7 @@ DataInterpolations.jl, Impute.jl, StructTypes.jl and JSON3.jl.
   and the scoped form matches Base and the repo's `with_run_store`.
 - **Kind as a type marker after the source; providers duck-typed.**
   `at(src, R, sel, ts)` follows `read(io, T)` and `parse(T, s)`;
-  `kind(p)` and `selector_type(R)` are StructTypes-style traits; there
+  `kind(p)`, `selector_type(R)` and `snapshot(R)` are StructTypes-style traits; there
   is no abstract provider supertype, as Tables.jl has none for tables.
 - **`between` yields records, not tables.** `Tables.partitions` is an
   iterator of tables and DuckDB's is forward-only, so the lazy parquet

@@ -123,6 +123,13 @@ failed.** What the review deferred is in the backlog below.
 
 ## In flight
 
+Nothing.
+
+## Backlog
+
+Backlog items are concrete parked work: visible enough to preserve the
+intended direction, but not currently in flight.
+
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail
@@ -131,25 +138,39 @@ failed.** What the review deferred is in the backlog below.
   few-week pause, the docs should be the trustworthy entry point to read
   back in from. `data.md` is the first pass / template; the other module
   docs follow. `market_data.md` (new) follows the template from the
-  start.
-- **Surface-based theoretical settle.** When the spot at a leg's
-  settlement instant is absent (Polygon minute bars are sparse
-  at the 16:00 ET close minute), today's policy returns `missing` and
-  the lot is unmarked. The fix is to compute the leg's theoretical
-  mark from the surface at (or just before) the expiry. Lands in
-  `experiment._build_settle`; transparent to the metrics contract.
-- **Second concrete policy** -- on deck once case-2 settlement is
+  start. Parked after PR #9 (2026-09-08); no slice in progress.
+- **Settlement rule (replaces "surface-based theoretical settle").**
+  A contract's `expiry` is stamped at parse time as the listed date at
+  16:00 ET; settlement reads that instant as the last price the market
+  put on the contract, which it is not. On the ten-year strangle run
+  (`5700d3f242f8132e`) 1691 of 1700 expiry instants have a spot; the
+  nine misses are calendar, not sparse data: six early-close sessions
+  (the official close was 13:00 ET), two unscheduled closures
+  (2018-12-05, 2025-01-09, where the OCC settled against the previous
+  session's close), and the final pair past the end of the data. Real
+  mechanics for SPY: exercise by exception, intrinsic against the
+  official close of the last session on or before the listed expiry
+  date. The component: a settlement rule owned by the experiment,
+  answering (1) the settlement session (last session on or before the
+  listed date), (2) its close instant and reference price (the last
+  regular-session spot print stands in for the auction), (3) the payoff
+  (intrinsic), and separately (4) the mark for a leg still open past the
+  window end (the contract's own quote mark at the window end, surface
+  price as fallback; today it is intrinsic at the window-end spot, and
+  the sample is stamped at the expiry rather than the mark's instant, so
+  the equity curve runs past `exp.to`). Sessions derived from the spot
+  tree (a date is a session if the underlying printed in regular hours;
+  its close is the last print at or before 16:00 ET) rather than a static
+  calendar, with an override hook. In core identity, so one more id
+  break. Not a surface problem at all. Parked 2026-09-08: 18 of 4480 legs
+  plus the final pair, all with a known correct answer; revisit with the
+  first policy that holds past a session close by design.
+- **Second concrete policy** -- on deck once settlement is
   honest. Candidate: a daily iron condor (same scheduled-gate /
   `invert_delta` shape, four legs instead of two). Once the duplication
   is visible, decide whether to extract a `Structure` abstraction
   (`policies.md` Future work) or keep policies as 4-leg inline
-  `decide` bodies.
-
-## Backlog
-
-Backlog items are concrete parked work: visible enough to preserve the
-intended direction, but not currently in flight.
-
+  `decide` bodies. Parked 2026-09-08 behind the settle item.
 - **Reproducibility harness for stored runs.** Opt-in, data-gated tests
   that rerun each saved run (`load_run` -> `run_experiment`) and assert its
   `metrics` / `pnl_series` still match, auto-skipping where the source data
@@ -176,30 +197,17 @@ intended direction, but not currently in flight.
   samples at one timestamp by pnl (losses first) so `max_drawdown` is
   deterministic; aggregating simultaneous samples for path metrics is
   the fuller answer.
-- **Quote synthesis cost (PR #9 finding B).** `at(::QuotesFromBars, ...)`
-  rebuilds the whole `OptionQuote` chain from the cached `OptionBar` chain
-  on every call, and one tick that fires performs `n + 2` such passes
-  (surface reader, `decide`, one per order). Two steps, in order. First,
-  the engine fetches the chain once per underlying per tick and
-  `resolve_quote` gains an arity that takes the chain; no measurement
-  needed. Second, a benchmark modelled on `scripts/bench_point_vs_range.jl`
-  over one month of SPY: synthesis once, three times and `n + 2` times per
-  timestamp, and against a `QuotesFromBars` reader with a bounded
-  `(underlying, timestamp)` chain cache, plus the whole-run wall time and
-  peak RSS of the strangle config over one month. The cache lands only if
-  it moves the whole-run number by roughly 20%, because it is a lifecycle
-  change (a spec/reader pair, `serves`, a cut-independence argument like
-  `SurfaceReader`'s); only `at` would be cached, the bound an `open_data`
-  kwarg outside identity. The only real config narrows the grid with
-  `tick_times`, so the expected answer is "matters for a policy that does
-  not exist yet".
-- **`InMemory` rejects conflicting rows like the parquet reader.**
-  Decided: the fixture provider must not represent a state the real
-  reader throws on. Blocked on a per-kind "one record per selector per
-  instant" trait, because `InMemory` is generic over the kind and a grid
-  kind has many rows per instant by design; the check then goes in the
-  inner constructor, once per fixture. Measure which fixtures carry two
-  rows for one selector and instant before writing it.
+- **Quote synthesis cost (PR #9 finding B). Closed 2026-09-08, measured,
+  not worth a cache.** `at(::QuotesFromBars, ...)` re-synthesizes the
+  chain on every call and one firing tick performs `n + 2` passes. On the
+  DevBox against the SPY tree (2024-01-16) a one-minute chain holds
+  300-500 bars, one synthesis pass costs 0.01-0.05 ms, and the parquet
+  read under it costs 5-45 ms cold: the repeated work is two to three
+  orders of magnitude below the read it sits on, so the 20% whole-run
+  threshold is unreachable. No chain cache, no engine change; the
+  per-order chain fetch in `run_backtest` stays as it is. Reopen only
+  with a policy on the full minute grid and a whole-run measurement that
+  says otherwise.
 - **Reader and SQL duplication in `market_data/parquet.jl`.**
   `ParquetBarsReader` and `ParquetSpotsReader` repeat open, close,
   partition listing, the backward walk and the grid, differing only in
