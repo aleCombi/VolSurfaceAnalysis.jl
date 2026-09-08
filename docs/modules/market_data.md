@@ -1,12 +1,11 @@
 # `market_data` module
 
 How market data is *obtained*: the protocol every consumer reads
-through, the specs that describe where records come from, and (as the
-layer lands) the readers, map, time cut and lifecycle behind it. What a
-datum *is* stays in [`data`](data.md): record types and vendor row
-mapping. Design and rationale are in
-[proposals/data_kinds.md](../proposals/data_kinds.md); this doc states
-the rules the code keeps.
+through, the specs that describe where records come from, and the
+readers, map, time cut and lifecycle behind it. What a datum *is*
+stays in [`data`](data.md): record types and vendor row mapping. This
+doc states the rules the code keeps, and closes with the conventions
+consulted before fixing them (design rule 5).
 
 ## Kinds and the visibility rule
 
@@ -225,9 +224,12 @@ selector and forwards the context untouched, so a cut or a derived
 provider above it sees no difference. Its routes are the whole world for
 that entry, so a selector with no route is structural absence and throws
 `UnservedSelector` naming the routes there are; a route that exists
-delegates the question to the part it routes to. Routing on a runtime selector yields a small union of part
-types whose shapes all return the same record type, which keeps call
-sites inferable (union-split routing; measured in proposal section 10).
+delegates the question to the part it routes to.
+Routing on a runtime selector yields a small union of part types whose
+shapes all return the same record type, so call sites stay inferable:
+`entry` and the four shapes infer to one concrete result type through
+a heterogeneous `BySelector`, which `test/market_data/test_by_selector.jl`
+pins with `Base.return_types`.
 
 ## Time cut
 
@@ -283,7 +285,7 @@ run opens and closes it.
   bounds are machine knobs and must stay out of identity, so exposing
   them needs a route that is not the config table.
 - **Use after close** throws `ArgumentError` from the reader. The
-  proposal hoped to leave this to the storage, but DuckDB segfaults on
+  design hoped to leave this to the storage, but DuckDB segfaults on
   a query against a closed handle, so the parquet readers carry a
   closed flag checked at every shape, including a lazy `between`
   iterator that outlives its reader. `close_data!` is idempotent.
@@ -381,5 +383,38 @@ and version would go.
 exists, unexported and `Integer`-only; it is never imported or
 extended (a test pins its method count). `at`, `asof`, `timestamps`,
 `kind`, `entry`, `selector` collide with nothing in Base or Dates.
-Conventions consulted before fixing these names are recorded in
-proposal section 10.
+
+### Conventions consulted
+
+Checked before the names and shapes above were fixed (design rule 5);
+sources were the depot copies of Tables.jl, DBInterface.jl and DuckDB.jl,
+Julia 1.12 Base and manual, and the documented APIs of TimeSeries.jl,
+DataInterpolations.jl, Impute.jl, StructTypes.jl and JSON3.jl.
+
+- **`between` as the range verb.** TimeSeries.jl uses a `from` / `to`
+  pair and pandas has no range verb. `Base.between` exists with one
+  unexported `Integer`-only method; the project defines its own generic
+  and never imports it, and a test pins the Base method count.
+- **`asof` as "latest at or before".** Julia has no settled name for it
+  (TimeSeries.jl `findwhen`, DataInterpolations.jl left-constant
+  interpolation, Impute.jl `locf`); the name is pandas' `Series.asof` /
+  `merge_asof`. `at`, `asof`, `timestamps`, `kind`, `entry`, `selector`
+  collide with nothing in Base or Dates.
+- **`open_data` / `close_data!` / `with_data` as a project-owned pair.**
+  DBInterface.jl declares `connect` / `close!` as its own generics, bang
+  on the mutating close, `connect(f, ...)` as the scoped form, and
+  DuckDB.jl follows it; Base keeps `open` / `close` / `isopen` with the
+  scoped `open(f, ...)`. So nothing is added to `Base.open` / `Base.close`,
+  and the scoped form matches Base and the repo's `with_run_store`.
+- **Kind as a type marker after the source; providers duck-typed.**
+  `at(src, R, sel, ts)` follows `read(io, T)` and `parse(T, s)`;
+  `kind(p)` and `selector_type(R)` are StructTypes-style traits; there
+  is no abstract provider supertype, as Tables.jl has none for tables.
+- **`between` yields records, not tables.** `Tables.partitions` is an
+  iterator of tables and DuckDB's is forward-only, so the lazy parquet
+  iterator mirrors that contract (one partition in memory, forward-only,
+  valid while the reader is open) instead of implementing the Tables
+  hook. Lazy results follow the iteration protocol, not `AbstractArray`.
+- **Style.** No `get_` prefix on accessors, bang only on mutation, files
+  `include`d into the one module with no submodules, as the other
+  modules do.
