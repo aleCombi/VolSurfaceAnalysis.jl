@@ -72,10 +72,11 @@ a call to `between`. So a vendor row delivered twice at the winning instant came
 back as two records, and `only_or_missing` threw the bare `ArgumentError` that
 decision 5 exists to replace with a named, informative one.
 
-**The second symptom, found while reviewing the sequence and worse than the
-first.** Reading one block also means reading one *partition*, so where the two
-candidate partitions carry the same instant at different prices, `asof` and `at`
-disagreed -- and `asof` took the silent side. Measured on a two-partition tree
+**The second symptom, found while reviewing the sequence
+([pr9_fix_review.md](pr9_fix_review.md) finding 1) and worse than the first.**
+Reading one block also means reading one *partition*, so where the two candidate
+partitions carry the same instant at different prices, `asof` and `at` disagreed
+-- and `asof` took the silent side. Measured on a two-partition tree
 with the spill row at 480.7 in the earlier partition and 499.9 in the later:
 
 ```

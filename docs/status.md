@@ -128,14 +128,24 @@ deferred items in
 One regression testset per finding lives in
 `test/regressions/test_review_findings.jl` and is part of the gate. Two
 items came out of implementing it, in
-[proposals/pr9_followups.md](proposals/pr9_followups.md). The spot `asof`
-path that bypassed the collapse-or-throw rule is **closed**: it now takes
-its winning instant from the backward walk and reads it through
-`between`, so every spot read obeys the rule by construction (gate after
-it: 1198 passed, 0 failed). Making
+[proposals/pr9_followups.md](proposals/pr9_followups.md); making
 `InMemory` reject conflicting rows the way the parquet reader does stays
 open — decided, but it needs a per-kind "one record per instant" trait
 first.
+
+That fix sequence was then itself reviewed, in
+[proposals/pr9_fix_review.md](proposals/pr9_fix_review.md): the six
+findings are fixed at the level their decisions asked for, and three
+things came out of it, all landed. The spot `asof` path that bypassed
+the collapse-or-throw rule is **closed** — it takes its winning instant
+from the backward walk and reads it through `between`, so every spot read
+obeys the rule by construction. The review also measured why the cheap
+version of that fix would not have done: reading one block means reading
+one partition, so a conflict across the overlap came back as a number
+nobody verified. Two smaller items with it: decision 5's justification
+still cited a partition-overlap permission the next commit had withdrawn,
+and `DerivationExhausted` named an instant one millisecond before any it
+had tried. **Gate after them: 1198 passed, 0 failed.**
 
 **Gate run** (PR #9 step 10, this commit's tree): `Pkg.test()` on the
 DevBox (2 cores, 3.7 GB, Julia 1.12.7) — **1181 passed, 0 failed**, 1m02

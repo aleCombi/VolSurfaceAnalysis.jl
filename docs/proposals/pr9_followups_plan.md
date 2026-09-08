@@ -44,7 +44,8 @@ vendor row delivered twice at the winning instant came back as two records, and
 replace. Worse, reading one block means reading one *partition*, so a
 conflict across the spill overlap made `asof` return the later partition's price
 silently while `at` threw — see the measured symptom in
-[pr9_followups.md](pr9_followups.md).
+[pr9_followups.md](pr9_followups.md), and the round that found it in
+[pr9_fix_review.md](pr9_fix_review.md).
 
 ### Decision: route `asof` through `between`, not through a second call to the helper
 
