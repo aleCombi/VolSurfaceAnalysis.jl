@@ -290,6 +290,40 @@ mktempdir() do root
     end
 end
 
+# The convention's allowance is one day: a partition for date D may hold
+# rows spilling into the early hours of D + 1, and every shape reads the
+# two candidate partitions D - 1 and D. A row stamped further past its
+# partition is outside the convention, and the shapes agree it is not
+# there -- `asof` included, now that it reads its winning instant through
+# `between` rather than the block its walk found it in. Note what `asof`
+# does *not* do: it does not fall back to the in-allowance row either;
+# its walk stops at the stray row and `between` finds nothing there.
+# Pinned so the allowance is widened deliberately or not at all.
+mktempdir() do root
+    spots = joinpath(root, "spots_1min")
+    body   = DateTime(2024, 1, 12, 15, 30)
+    inside = DateTime(2024, 1, 13, 0, 30)      # D + 1, within the allowance
+    beyond = DateTime(2024, 1, 14, 0, 30)      # D + 2, outside it
+    _md_write_spot_parquet(joinpath(spots, "date=2024-01-12", "symbol=SPY", "data.parquet"),
+                           [body, inside, beyond], [480.0, 480.5, 480.9])
+
+    @testset "parquet spots: a row more than one day past its partition is invisible to every shape" begin
+        with_data(MarketData(ParquetSpots(spots))) do d
+            # within the allowance, every shape sees it
+            @test only_or_missing(at(d, SpotPrice, _MD_SPY, inside)).price == 480.5
+            @test only_or_missing(asof(d, SpotPrice, _MD_SPY, inside + Hour(1))).timestamp == inside
+            @test timestamps(d, SpotPrice, _MD_SPY, body, inside) == [body, inside]
+            # beyond it, none does -- asof included, and it reports nothing
+            # rather than the in-allowance row
+            @test at(d, SpotPrice, _MD_SPY, beyond) == SpotPrice[]
+            @test between(d, SpotPrice, _MD_SPY, beyond, beyond) == SpotPrice[]
+            @test timestamps(d, SpotPrice, _MD_SPY, beyond, beyond) == DateTime[]
+            @test asof(d, SpotPrice, _MD_SPY, beyond) == SpotPrice[]
+            @test asof(d, SpotPrice, _MD_SPY, beyond + Hour(1)) == SpotPrice[]
+        end
+    end
+end
+
 mktempdir() do root
     spots = joinpath(root, "spots_1min")
     t = DateTime(2024, 1, 15, 15, 30)
