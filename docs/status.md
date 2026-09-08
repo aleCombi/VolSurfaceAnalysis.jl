@@ -139,17 +139,33 @@ intended direction, but not currently in flight.
   back in from. `data.md` is the first pass / template; the other module
   docs follow. `market_data.md` (new) follows the template from the
   start. Parked after PR #9 (2026-09-08); no slice in progress.
-- **Surface-based theoretical settle.** When the spot at a leg's
-  settlement instant is absent (Polygon minute bars are sparse
-  at the 16:00 ET close minute), today's policy returns `missing` and
-  the lot is unmarked. The fix is to compute the leg's theoretical
-  mark from the surface at (or just before) the expiry. Lands in
-  `experiment._build_settle`; transparent to the metrics contract.
-  Parked 2026-09-08, not started. Related: a leg still open past the
-  window is priced at the window-end spot but its sample is stamped at
-  the leg's expiry (metrics.md decision), so the equity curve runs past
-  `exp.to`; decide whether that stays when this lands.
-- **Second concrete policy** -- on deck once case-2 settlement is
+- **Settlement rule (replaces "surface-based theoretical settle").**
+  A contract's `expiry` is stamped at parse time as the listed date at
+  16:00 ET; settlement reads that instant as the last price the market
+  put on the contract, which it is not. On the ten-year strangle run
+  (`5700d3f242f8132e`) 1691 of 1700 expiry instants have a spot; the
+  nine misses are calendar, not sparse data: six early-close sessions
+  (the official close was 13:00 ET), two unscheduled closures
+  (2018-12-05, 2025-01-09, where the OCC settled against the previous
+  session's close), and the final pair past the end of the data. Real
+  mechanics for SPY: exercise by exception, intrinsic against the
+  official close of the last session on or before the listed expiry
+  date. The component: a settlement rule owned by the experiment,
+  answering (1) the settlement session (last session on or before the
+  listed date), (2) its close instant and reference price (the last
+  regular-session spot print stands in for the auction), (3) the payoff
+  (intrinsic), and separately (4) the mark for a leg still open past the
+  window end (the contract's own quote mark at the window end, surface
+  price as fallback; today it is intrinsic at the window-end spot, and
+  the sample is stamped at the expiry rather than the mark's instant, so
+  the equity curve runs past `exp.to`). Sessions derived from the spot
+  tree (a date is a session if the underlying printed in regular hours;
+  its close is the last print at or before 16:00 ET) rather than a static
+  calendar, with an override hook. In core identity, so one more id
+  break. Not a surface problem at all. Parked 2026-09-08: 18 of 4480 legs
+  plus the final pair, all with a known correct answer; revisit with the
+  first policy that holds past a session close by design.
+- **Second concrete policy** -- on deck once settlement is
   honest. Candidate: a daily iron condor (same scheduled-gate /
   `invert_delta` shape, four legs instead of two). Once the duplication
   is visible, decide whether to extract a `Structure` abstraction
