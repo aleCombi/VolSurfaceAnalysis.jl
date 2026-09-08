@@ -223,7 +223,7 @@ end
         err = try asof(d, VolatilitySurface, _MD_SPY, _SF_TS2) catch e; e end
         @test err isa DerivationExhausted
         @test err.bound == 2 && err.requested == _SF_TS2
-        @test err.oldest == _SF_TS1 - Millisecond(1)      # the cursor after the last try
+        @test err.oldest == _SF_TS1                       # the oldest instant actually tried
     end
 
     # running out of chain entirely is temporal, not exhaustion: empty

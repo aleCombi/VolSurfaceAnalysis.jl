@@ -112,15 +112,17 @@ between(r::SurfaceReader, m, ::Type{VolatilitySurface}, u::Underlying, from::Dat
 # never build within the bound throw.
 function asof(r::SurfaceReader, m, ::Type{VolatilitySurface}, u::Underlying, ts::DateTime)
     cursor = ts
+    oldest = ts
     for _ in 1:r.spec.lookback_ticks
         q = asof(m, OptionQuote, u, cursor)
         isempty(q) && return VolatilitySurface[]
         win = first(q).timestamp
         s = at(r, m, VolatilitySurface, u, win)
         isempty(s) || return s
+        oldest = win                       # the instant tried, not the cursor after it
         cursor = win - Millisecond(1)
     end
-    throw(DerivationExhausted(VolatilitySurface, u, ts, cursor, r.spec.lookback_ticks))
+    throw(DerivationExhausted(VolatilitySurface, u, ts, oldest, r.spec.lookback_ticks))
 end
 
 # An over-estimate for a derived kind, deliberately: making it exact would
