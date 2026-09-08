@@ -30,6 +30,30 @@ const _MD_SEC = Second(1)
     @test timestamps(m, SpotPrice, _MD_SPY, _MD_T3 + _MD_SEC, _MD_T3 + Day(1)) == DateTime[]
 end
 
+@testset "InMemory: snapshot kinds collapse duplicates, throw on conflict" begin
+    dup = _md_spot(_MD_SPY, _MD_T1, 481.0)
+    p = InMemory(vcat(_md_spots(), [dup]))            # exact duplicate of the T1 SPY row
+    @test length(p.rows) == length(_md_spots())
+    @test only_or_missing(at(MarketData(p), SpotPrice, _MD_SPY, _MD_T1)).price == 481.0
+
+    bad = _md_spot(_MD_SPY, _MD_T1, 499.0)
+    err = try
+        InMemory(vcat(_md_spots(), [bad])); nothing
+    catch e
+        e
+    end
+    @test err isa ConflictingRecords
+    @test err.kind === SpotPrice && err.selector === _MD_SPY && err.timestamp == _MD_T1
+    @test occursin("499.0", sprint(showerror, err))
+
+    # Two selectors at one instant are two series, not a conflict.
+    @test length(InMemory([_md_spot(_MD_SPY, _MD_T1, 1.0), _md_spot(_MD_SPX, _MD_T1, 2.0)]).rows) == 2
+
+    # Grid kinds keep every row at an instant: the fixture has two SPY bars at each instant.
+    bars = InMemory(_md_bars())
+    @test length(at(MarketData(bars), OptionBar, _MD_SPY, _MD_T1)) == 2
+end
+
 @testset "InMemory: asof returns every record at the winning timestamp" begin
     m = MarketData(InMemory(_md_bars()))
     chain = asof(m, OptionBar, _MD_SPY, _MD_T2 + Minute(1))

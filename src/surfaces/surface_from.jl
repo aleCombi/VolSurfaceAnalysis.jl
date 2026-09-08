@@ -10,6 +10,7 @@
 
 selector(s::VolatilitySurface) = s.underlying
 selector_type(::Type{<:VolatilitySurface}) = Underlying
+snapshot(::Type{<:VolatilitySurface}) = true
 
 """
     SurfaceFrom(; currency, spot_for = Dict(), lookback_ticks = 3)

@@ -10,7 +10,10 @@
 
 Fixture provider: every record of kind `R` in `rows`, kept sorted by
 `timestamp` (stable, so input order is preserved within one instant).
-Serves every selector present in `rows`.
+Serves every selector present in `rows`. For a `snapshot` kind the rows
+obey the same rule as the parquet spot reader: two rows for one selector
+at one instant collapse when equal and throw `ConflictingRecords` when
+they differ, so a fixture cannot hold a state the real reader aborts on.
 """
 struct InMemory{R}
     rows::Vector{R}
@@ -18,9 +21,38 @@ struct InMemory{R}
     sels::Set{Any}                        # the selectors present, for `serves`
     function InMemory{R}(rows) where {R}
         sorted = sort(collect(R, rows); by = r -> r.timestamp)   # default sort is stable
+        snapshot(R) && _collapse_snapshot!(sorted, R)
         new{R}(sorted, DateTime[r.timestamp for r in sorted],
                Set{Any}(selector(r) for r in sorted))
     end
+end
+
+# One record per selector per instant, on rows already sorted by
+# timestamp: an exact duplicate is dropped, a disagreement throws naming
+# both records. Mirrors `_collapse_duplicates!` in the parquet spot
+# reader, generic over the kind via `==` on the whole record.
+function _collapse_snapshot!(sorted::Vector{R}, ::Type{R}) where {R}
+    length(sorted) < 2 && return sorted
+    keep = trues(length(sorted))
+    seen = Dict{Any,R}()                  # selector => record, within one instant
+    run_ts = sorted[1].timestamp
+    for (i, r) in enumerate(sorted)
+        if r.timestamp != run_ts
+            empty!(seen)
+            run_ts = r.timestamp
+        end
+        sel = selector(r)
+        prev = get(seen, sel, nothing)
+        if prev === nothing
+            seen[sel] = r
+        elseif prev == r
+            keep[i] = false
+        else
+            throw(ConflictingRecords(R, sel, r.timestamp, prev, r))
+        end
+    end
+    all(keep) || deleteat!(sorted, findall(!, keep))
+    return sorted
 end
 InMemory(rows::AbstractVector{R}) where {R} = InMemory{R}(rows)
 

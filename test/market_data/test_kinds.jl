@@ -25,9 +25,18 @@ end
     @test selector(bar) isa selector_type(OptionBar)
 end
 
+@testset "snapshot trait: one record per selector per instant" begin
+    @test snapshot(SpotPrice)
+    @test snapshot(RateCurve)
+    @test snapshot(DivCurve)
+    @test snapshot(RawSurface)
+    @test !snapshot(OptionBar)
+    @test !snapshot(OptionQuote)
+end
+
 @testset "protocol: exported names, no Base collisions" begin
     exported = names(VolSurfaceAnalysis)
-    for s in (:Currency, :selector, :selector_type, :at, :between, :asof,
+    for s in (:Currency, :selector, :selector_type, :snapshot, :at, :between, :asof,
               :timestamps, :kind, :only_or_missing, :by_timestamp)
         @test s in exported
     end

@@ -208,13 +208,6 @@ intended direction, but not currently in flight.
   per-order chain fetch in `run_backtest` stays as it is. Reopen only
   with a policy on the full minute grid and a whole-run measurement that
   says otherwise.
-- **`InMemory` rejects conflicting rows like the parquet reader.**
-  Decided: the fixture provider must not represent a state the real
-  reader throws on. Blocked on a per-kind "one record per selector per
-  instant" trait, because `InMemory` is generic over the kind and a grid
-  kind has many rows per instant by design; the check then goes in the
-  inner constructor, once per fixture. Measure which fixtures carry two
-  rows for one selector and instant before writing it.
 - **Reader and SQL duplication in `market_data/parquet.jl`.**
   `ParquetBarsReader` and `ParquetSpotsReader` repeat open, close,
   partition listing, the backward walk and the grid, differing only in

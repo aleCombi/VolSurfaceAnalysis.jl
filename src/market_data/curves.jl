@@ -93,3 +93,5 @@ selector(r::RateCurve) = r.currency
 selector(r::DivCurve)  = r.underlying
 selector_type(::Type{RateCurve}) = Currency
 selector_type(::Type{DivCurve})  = Underlying
+snapshot(::Type{RateCurve}) = true
+snapshot(::Type{DivCurve})  = true
