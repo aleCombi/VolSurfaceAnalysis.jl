@@ -118,7 +118,7 @@ policy underlying matches the clock selector. The partition convention is
 time-ordered with a one-day spill allowance, and SQL range bounds keep
 millisecond precision. One regression testset per finding lives in
 `test/regressions/test_review_findings.jl` and is part of the gate.
-**Gate on the DevBox (2 cores, 3.7 GB, Julia 1.12.7): 1198 passed, 0
+**Gate on the DevBox (2 cores, 3.7 GB, Julia 1.12.7): 1206 passed, 0
 failed.** What the review deferred is in the backlog below.
 
 ## In flight
