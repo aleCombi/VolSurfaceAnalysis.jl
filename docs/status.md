@@ -123,6 +123,14 @@ failed.** What the review deferred is in the backlog below.
 
 ## In flight
 
+Nothing. The next slice is being scoped on the `quote-synthesis-cost`
+branch (see *Quote synthesis cost* in the backlog).
+
+## Backlog
+
+Backlog items are concrete parked work: visible enough to preserve the
+intended direction, but not currently in flight.
+
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail
@@ -131,25 +139,23 @@ failed.** What the review deferred is in the backlog below.
   few-week pause, the docs should be the trustworthy entry point to read
   back in from. `data.md` is the first pass / template; the other module
   docs follow. `market_data.md` (new) follows the template from the
-  start.
+  start. Parked after PR #9 (2026-09-08); no slice in progress.
 - **Surface-based theoretical settle.** When the spot at a leg's
   settlement instant is absent (Polygon minute bars are sparse
   at the 16:00 ET close minute), today's policy returns `missing` and
   the lot is unmarked. The fix is to compute the leg's theoretical
   mark from the surface at (or just before) the expiry. Lands in
   `experiment._build_settle`; transparent to the metrics contract.
+  Parked 2026-09-08, not started. Related: a leg still open past the
+  window is priced at the window-end spot but its sample is stamped at
+  the leg's expiry (metrics.md decision), so the equity curve runs past
+  `exp.to`; decide whether that stays when this lands.
 - **Second concrete policy** -- on deck once case-2 settlement is
   honest. Candidate: a daily iron condor (same scheduled-gate /
   `invert_delta` shape, four legs instead of two). Once the duplication
   is visible, decide whether to extract a `Structure` abstraction
   (`policies.md` Future work) or keep policies as 4-leg inline
-  `decide` bodies.
-
-## Backlog
-
-Backlog items are concrete parked work: visible enough to preserve the
-intended direction, but not currently in flight.
-
+  `decide` bodies. Parked 2026-09-08 behind the settle item.
 - **Reproducibility harness for stored runs.** Opt-in, data-gated tests
   that rerun each saved run (`load_run` -> `run_experiment`) and assert its
   `metrics` / `pnl_series` still match, auto-skipping where the source data
