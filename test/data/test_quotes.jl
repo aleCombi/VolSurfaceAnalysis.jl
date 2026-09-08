@@ -37,3 +37,12 @@ end
     @test s.price == 480.5
     @test ticker(s.underlying) == "SPY"
 end
+
+@testset "Underlying: content hash and equality" begin
+    @test Underlying("spy") == Underlying("SPY")
+    @test hash(Underlying("spy")) == hash(Underlying("SPY"))
+    @test hash(Underlying("SPY")) != hash(Underlying("SPX"))
+    d = Dict(Underlying("SPY") => 1)
+    @test d[Underlying("spy")] == 1
+    @test isequal(Underlying("SPY"), Underlying("SPY"))
+end

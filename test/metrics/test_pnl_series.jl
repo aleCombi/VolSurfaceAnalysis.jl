@@ -11,10 +11,10 @@ function _ps_pos(strike, otype, direction, qty, entry_price, ts)
     Position(trd, Float64(entry_price), 480.0, missing, missing, ts)
 end
 
-# Settle closure that returns a fixed spot for every expiry (test-only
+# Settle closure that returns a fixed spot for every leg (test-only
 # helper: matches the old single-spot-settle behaviour while exercising
-# the new per-leg API).
-_const_settle(spot::Real) = (_::DateTime) -> Float64(spot)
+# the per-leg API, which is handed the lot's own `Trade`).
+_const_settle(spot::Real) = (_::Trade) -> Float64(spot)
 
 # Wrapper around the new kwarg-only API to keep test sites terse.
 _ps(positions, spot::Real) = pnl_series(positions;
@@ -34,7 +34,7 @@ end
 @testset "pnl_series: single open, no close -> residual marked at expiry" begin
     ts1 = DateTime(2024, 1, 15, 15, 30)
     open = _ps_pos(480.0, Call, +1, 1.0, 5.0, ts1)   # long call @ 5.0
-    s = _ps([open], 490.0)                            # settle returns 490 at any expiry
+    s = _ps([open], 490.0)                            # settle returns 490 for any leg
     @test length(s.pnl) == 1
     # payoff = max(490 - 480, 0) * +1 = 10; entry_cost = 5 * +1 = 5; pnl = 5
     @test s.pnl[1] ≈ 5.0
@@ -140,4 +140,21 @@ end
     close = _ps_pos(480.0, Call, -1, 1.0, 6.0, ts2)
     s = _ps([open, close], 500.0)
     @test equity_curve(s) ≈ cumsum(s.pnl)
+end
+
+@testset "pnl_series: samples at one timestamp are ordered by pnl, whatever the ledger order" begin
+    ts1 = DateTime(2024, 1, 15, 15, 30)
+    # three residual legs settling at the same expiry with distinct pnls
+    a = _ps_pos(470.0, Put,  +1, 1.0, 2.0, ts1)     # payoff 0 at 490 -> pnl -2
+    b = _ps_pos(480.0, Call, +1, 1.0, 5.0, ts1)     # payoff 10        -> pnl +5
+    c = _ps_pos(485.0, Call, +1, 1.0, 1.0, ts1)     # payoff 5         -> pnl +4
+    s1 = _ps([a, b, c], 490.0)
+    s2 = _ps([c, a, b], 490.0)
+    s3 = _ps([b, c, a], 490.0)
+    @test s1.pnl == s2.pnl == s3.pnl == [-2.0, 5.0, 4.0][sortperm([-2.0, 5.0, 4.0])]
+    @test s1.pnl == [-2.0, 4.0, 5.0]
+    @test all(==(_PS_EXPIRY), s1.timestamps)
+    # losses first: equity [-2, 2, 7] never falls below its start -> 0.0;
+    # gains first ([5, 3, 7]) would have read 2.0. Deterministic either way.
+    @test max_drawdown(s1) == max_drawdown(s2) == max_drawdown(s3) == 0.0
 end

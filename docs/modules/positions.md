@@ -11,7 +11,7 @@ inputs came from.
 
 ```mermaid
 flowchart LR
-    DS[(DataSource /<br/>ModelDataSource)]:::ext
+    DS[(MarketData<br/>time cut)]:::ext
     DS -. OptionQuote .-> OP
     DS -. entry spot .-> OP
     DS -. settlement spot .-> PAY
@@ -29,8 +29,8 @@ flowchart LR
 ```
 
 A `Trade` is whatever the caller (strategy, ad-hoc script, trading
-engine) decides. The data layer -- today a `DataSource`, soon a
-`ModelDataSource` composed on top -- supplies the `OptionQuote` at fill
+engine) decides. The data layer (the `market_data` map behind a
+`TimeCut`) supplies the `OptionQuote` at fill
 time and the spot observations used at both entry and expiry. The two
 `spot` arrows are different observations, not the same scalar: one is
 the underlying at fill, the other at settlement. Everything inside the
@@ -48,6 +48,15 @@ Fields: `underlying`, `strike`, `expiry`, `option_type`, `direction` (`+1`
 long / `-1` short), `quantity` (contracts, `> 0`). The inner constructor
 validates `direction`, `quantity`, and `strike`; the outer kwarg form
 defaults to long-one-contract.
+
+`Trade` implements `selector` (its `underlying`), and is the **one
+non-kind type that does**. [`market_data`](market_data.md) documents
+`selector` as a per-kind trait, and a `Trade` is not a kind -- it has no
+`timestamp` and no provider serves it, so `selector_type` stays on kinds
+only. The method is still the right call: the engine and the settlement
+closure both ask "the spot for this leg", and that is the module's
+vocabulary for "which parallel series is this about" rather than a bare
+field access.
 
 ### `Position`
 
@@ -95,7 +104,7 @@ realized_pnl(positions, settlement_spot)  :: Float64
 ## Responsibility boundaries
 
 **Owns:** trade / position records, fill-side semantics, the four PnL
-primitives.
+primitives, and `selector(::Trade)`.
 
 **Does NOT own:**
 

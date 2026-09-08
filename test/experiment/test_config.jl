@@ -1,7 +1,7 @@
 # Tests for the TOML config loader. Most assertions hit the small
 # Dict->object builders directly so we don't need real parquet data on
 # disk; one end-to-end `load_experiment` test writes a tiny TOML file
-# pointing at a temp `ParquetDataSource` tree.
+# pointing at a temp parquet tree.
 
 using TOML
 using DuckDB
@@ -44,16 +44,6 @@ end
 @testset "build_synthesizer: unknown type errors with known list" begin
     @test_throws ErrorException build_synthesizer(
         Dict{String,Any}("type" => "bogus", "lambda" => 0.7))
-end
-
-@testset "build_data_source: parquet requires [source.synthesizer]" begin
-    # `_require` errors before any filesystem touch, so no parquet tree needed.
-    @test_throws ErrorException build_data_source(Dict{String,Any}(
-        "type"         => "parquet",
-        "underlying"   => "SPY",
-        "options_root" => "/nonexistent/opts",
-        "spot_root"    => "/nonexistent/spot",
-    ))
 end
 
 @testset "build_policy: noop" begin
@@ -131,6 +121,209 @@ end
     @test_throws ErrorException build_agent(Dict{String,Any}("type" => "static"))
 end
 
+# ---- [data.*] provider builders and load-time checks ----
+
+const _CFG_DATA = Dict{String,Any}(
+    "option_bar"   => Dict{String,Any}("type" => "parquet_option_bars", "root" => "/x/options_1min"),
+    "option_quote" => Dict{String,Any}("type" => "from_bars",
+                                       "synthesizer" => Dict{String,Any}("type" => "ohlcv_spread", "lambda" => 0.7)),
+    "spot_price"   => Dict{String,Any}("type" => "parquet_spots", "root" => "/x/spots_1min"),
+    "rate_curve"   => Dict{String,Any}("type" => "constant", "currency" => "USD", "value" => 0.04),
+    "div_curve"    => Dict{String,Any}("type" => "constant", "underlying" => "SPY", "value" => 0.015),
+    "vol_surface"  => Dict{String,Any}("type" => "surface_from", "currency" => "USD"),
+)
+_cfg_data(; overrides...) = (d = deepcopy(_CFG_DATA); for (k, v) in overrides; d[String(k)] = v; end; d)
+
+@testset "build_market_data: every builder from Dicts" begin
+    m = build_market_data(_cfg_data())
+    @test m isa MarketData
+    @test entry(m, OptionBar) == ParquetOptionBars("/x/options_1min")
+    @test entry(m, SpotPrice) == ParquetSpots("/x/spots_1min")
+    @test entry(m, OptionQuote).synthesizer == SpreadFromOHLCV(0.7)
+    @test entry(m, RateCurve) == Constant(RateCurve(Currency("USD"), FlatCurve(0.04)))
+    @test entry(m, DivCurve) == Constant(DivCurve(Underlying("SPY"), FlatCurve(0.015)))
+    @test entry(m, VolatilitySurface) == SurfaceFrom(currency=Currency("USD"))
+    @test kind_name(kind(entry(m, VolatilitySurface))) == "vol_surface"
+end
+
+@testset "build_market_data: constant with a curve table, surface_from with spot_for, by_selector" begin
+    d = _cfg_data(
+        rate_curve = Dict{String,Any}("type" => "constant", "currency" => "usd",
+            "curve" => Dict{String,Any}("type" => "pc", "knots" => [DateTime(2024, 1, 1)], "values" => [0.05])),
+        vol_surface = Dict{String,Any}("type" => "surface_from", "currency" => "USD",
+            "spot_for" => Dict{String,Any}("SPY" => "SPX")),
+        spot_price = Dict{String,Any}("type" => "by_selector",
+            "SPY" => Dict{String,Any}("type" => "parquet_spots", "root" => "/x/spots_1min"),
+            "SPX" => Dict{String,Any}("type" => "parquet_spots", "root" => "/y/spots_1min")))
+    m = build_market_data(d)
+    rc = entry(m, RateCurve).record
+    @test rc.currency == Currency("USD") && rc.curve isa PCCurve && rc.curve(DateTime(2025)) == 0.05
+    @test entry(m, VolatilitySurface).spot_for == Dict(Underlying("SPY") => Underlying("SPX"))
+    bs = entry(m, SpotPrice)
+    @test bs isa BySelector{SpotPrice}
+    @test first.(bs.parts) == (Underlying("SPX"), Underlying("SPY"))       # sorted by selector
+    @test last(bs.parts[2]) == ParquetSpots("/x/spots_1min")
+end
+
+@testset "build_market_data: load-time checks" begin
+    # unknown table name
+    @test_throws ErrorException build_market_data(_cfg_data(dividends = Dict{String,Any}("type" => "constant")))
+    # wrong kind under a table name
+    @test_throws ErrorException build_market_data(
+        _cfg_data(spot_price = Dict{String,Any}("type" => "parquet_option_bars", "root" => "/x")))
+    # derived input missing
+    d = _cfg_data(); delete!(d, "option_bar")
+    @test_throws ErrorException build_market_data(d)
+    d = _cfg_data(); delete!(d, "rate_curve")
+    @test_throws ErrorException build_market_data(d)
+    # unknown provider type, missing type, constant on a non-curve kind, bad by_selector part
+    @test_throws ErrorException build_market_data(_cfg_data(spot_price = Dict{String,Any}("type" => "csv_spots", "path" => "/x")))
+    @test_throws ErrorException build_market_data(_cfg_data(spot_price = Dict{String,Any}("root" => "/x")))
+    @test_throws ErrorException build_market_data(_cfg_data(spot_price = Dict{String,Any}("type" => "constant", "underlying" => "SPY", "value" => 1.0)))
+    @test_throws ErrorException build_market_data(_cfg_data(spot_price = Dict{String,Any}("type" => "by_selector", "SPY" => "not a table")))
+    @test_throws ErrorException build_market_data(_cfg_data(spot_price = Dict{String,Any}("type" => "by_selector")))
+    @test_throws ErrorException build_market_data(Dict{String,Any}())
+    # constant needs value or curve, and the right selector key
+    @test_throws ErrorException build_market_data(_cfg_data(rate_curve = Dict{String,Any}("type" => "constant", "currency" => "USD")))
+    @test_throws ErrorException build_market_data(_cfg_data(rate_curve = Dict{String,Any}("type" => "constant", "underlying" => "SPY", "value" => 0.04)))
+end
+
+@testset "build_market_data: surface_from lookback_ticks round-trips and is checked" begin
+    @test entry(build_market_data(_cfg_data()), VolatilitySurface).lookback_ticks == 3
+    d = _cfg_data(vol_surface = Dict{String,Any}(
+        "type" => "surface_from", "currency" => "USD", "lookback_ticks" => 7))
+    @test entry(build_market_data(d), VolatilitySurface).lookback_ticks == 7
+    # rejected at construction below 1
+    @test_throws ArgumentError build_market_data(_cfg_data(vol_surface = Dict{String,Any}(
+        "type" => "surface_from", "currency" => "USD", "lookback_ticks" => 0)))
+    @test_throws ErrorException build_market_data(_cfg_data(vol_surface = Dict{String,Any}(
+        "type" => "surface_from", "currency" => "USD", "lookback_ticks" => "three")))
+    # the one table that rejects unknown keys: a typo here would take the
+    # default silently and fork identity from intent
+    @test_throws ErrorException build_market_data(_cfg_data(vol_surface = Dict{String,Any}(
+        "type" => "surface_from", "currency" => "USD", "lookback_tick" => 5)))
+end
+
+@testset "build_market_data: a statically demanded selector nobody serves fails at load" begin
+    # the surface selects its rate curve by currency; the only one built is USD
+    d = _cfg_data(vol_surface = Dict{String,Any}("type" => "surface_from", "currency" => "EUR"))
+    err = try build_market_data(d); nothing catch e; e end
+    @test err isa ErrorException
+    @test occursin("rate_curve", err.msg)
+    @test occursin("EUR", err.msg) && occursin("USD", err.msg)
+
+    # a spot_for remap onto a selector the spot entry does not route
+    d2 = _cfg_data(
+        vol_surface = Dict{String,Any}("type" => "surface_from", "currency" => "USD",
+            "spot_for" => Dict{String,Any}("SPY" => "SPX")),
+        spot_price = Dict{String,Any}("type" => "by_selector",
+            "SPY" => Dict{String,Any}("type" => "parquet_spots", "root" => "/x/spots_1min")))
+    @test_throws ErrorException build_market_data(d2)
+
+    # ... and the check never touches the filesystem: every root above is
+    # nonexistent, and a parquet spec answers `missing` rather than probing.
+    @test build_market_data(_cfg_data()) isa MarketData
+    @test build_market_data(_cfg_data(
+        vol_surface = Dict{String,Any}("type" => "surface_from", "currency" => "USD",
+            "spot_for" => Dict{String,Any}("SPY" => "SPX")))) isa MarketData
+end
+
+@testset "build_clock: kind name and typed selector" begin
+    c = build_clock(Dict{String,Any}("kind" => "option_quote", "underlying" => "spy"))
+    @test c == Clock{OptionQuote}(Underlying("SPY"))
+    @test build_clock(Dict{String,Any}("kind" => "rate_curve", "currency" => "usd")) == Clock{RateCurve}(Currency("USD"))
+    @test_throws ErrorException build_clock(Dict{String,Any}("kind" => "bogus", "underlying" => "SPY"))
+    @test_throws ErrorException build_clock(Dict{String,Any}("kind" => "option_quote", "currency" => "USD"))
+    @test_throws ErrorException build_clock(Dict{String,Any}("underlying" => "SPY"))
+end
+
+const _CFG_HEAD = """
+name  = "x"
+from  = 2024-01-15T15:30:00
+to    = 2024-01-15T15:31:00
+clock = { kind = "option_quote", underlying = "SPY" }
+[data.option_bar]
+type = "parquet_option_bars"
+root = "/nonexistent/options_1min"
+[data.option_quote]
+type = "from_bars"
+synthesizer = { type = "ohlcv_spread", lambda = 0.7 }
+[data.spot_price]
+type = "parquet_spots"
+root = "/nonexistent/spots_1min"
+[data.rate_curve]
+type = "constant"
+currency = "USD"
+value = 0.04
+[data.div_curve]
+type = "constant"
+underlying = "SPY"
+value = 0.015
+[data.vol_surface]
+type = "surface_from"
+currency = "USD"
+[agent]
+type = "static"
+[agent.policy]
+type = "noop"
+"""
+
+@testset "load_experiment: the clock and the policy must name one underlying" begin
+    strangle(u) = """
+        [agent.policy]
+        type        = "daily_short_strangle"
+        underlying  = "$u"
+        entry_time  = 15:45:00
+        expiry_days = 1
+        put_delta   = 0.20
+        call_delta  = 0.20
+        """
+    with_policy(u) = replace(_CFG_HEAD, "[agent.policy]\ntype = \"noop\"\n" => strangle(u))
+    # the clock steps on SPY: a SPY policy loads, a QQQ policy does not
+    @test load_experiment_str(with_policy("SPY")) isa Experiment
+    err = try load_experiment_str(with_policy("QQQ")); nothing catch e; e end
+    @test err isa ErrorException
+    @test occursin("QQQ", err.msg) && occursin("SPY", err.msg)
+    # a policy that declares nothing statically cannot be checked, and is not
+    @test load_experiment_str(_CFG_HEAD) isa Experiment
+end
+
+@testset "load_experiment: [data.*] + clock, data absent fails only at open" begin
+    e = load_experiment_str(_CFG_HEAD)
+    @test e.data isa MarketData
+    @test e.clock == Clock{OptionQuote}(Underlying("SPY"))
+    @test entry(e.data, OptionBar).root == "/nonexistent/options_1min"
+    @test_throws ArgumentError open_data(e.data)
+    # clock kind without a table: drop vol_surface (nothing depends on it) and tick on it
+    no_surface = replace(_CFG_HEAD, "[data.vol_surface]\ntype = \"surface_from\"\ncurrency = \"USD\"\n" => "")
+    @test load_experiment_str(no_surface).data isa MarketData
+    @test_throws ErrorException load_experiment_str(replace(no_surface,
+        "clock = { kind = \"option_quote\", underlying = \"SPY\" }" => "clock = { kind = \"vol_surface\", underlying = \"SPY\" }"))
+    # a clock on a kind that is present but whose selector type is wrong for that kind
+    @test_throws ErrorException load_experiment_str(replace(_CFG_HEAD,
+        "clock = { kind = \"option_quote\", underlying = \"SPY\" }" => "clock = { kind = \"option_quote\", currency = \"USD\" }"))
+    @test_throws ErrorException load_experiment_str(replace(_CFG_HEAD, "clock = { kind = \"option_quote\", underlying = \"SPY\" }\n" => ""))
+    @test_throws ErrorException load_experiment_str(replace(_CFG_HEAD, "[data.option_bar]" => "[source]"))
+end
+
+@testset "load_experiment: the old [source] table is rejected with a pointer" begin
+    err = try load_experiment_str("""
+        name = "old"
+        from = 2024-01-15T15:30:00
+        to   = 2024-01-15T15:31:00
+        [source]
+        type = "parquet"
+        underlying = "SPY"
+        root = "/x"
+        [agent]
+        type = "static"
+        [agent.policy]
+        type = "noop"
+        """); nothing catch e; e end
+    @test err isa ErrorException
+    @test occursin("[data.<kind>]", err.msg) && occursin("experiment.md", err.msg)
+end
+
 @testset "load_experiment: top-level metrics errors clearly" begin
     @test_throws ErrorException load_experiment_str("""
         name = "old_metrics_shape"
@@ -144,8 +337,8 @@ end
 
 # Minimal parquet fixture: one date, one timestamp, one option row + one
 # spot row. The runner's NoOpPolicy never trades; we only need the
-# loader to construct a working ModelDataSource and the engine to find
-# at least one timestamp so settlement resolves.
+# loader to construct a working MarketData + Clock and the engine to find
+# at least one clock tick so settlement resolves.
 function _write_smoke_parquet_tree(root::AbstractString)
     options_root = joinpath(root, "options_1min")
     spot_root    = joinpath(root, "spots_1min")
@@ -191,30 +384,39 @@ end
         # depend on the default subdir convention.
         open(cfg_path, "w") do io
             print(io, """
-            name = "noop_loader_smoke"
-            from = 2024-01-15T15:30:00
-            to   = 2024-01-15T15:30:00
+            name  = "noop_loader_smoke"
+            from  = 2024-01-15T15:30:00
+            to    = 2024-01-15T15:30:00
+            clock = { kind = "option_quote", underlying = "SPY" }
 
             [outputs]
             metrics = ["sharpe"]
 
-            [source]
-            type         = "parquet"
-            underlying   = "SPY"
-            options_root = "$(replace(tree.options_root, "\\" => "/"))"
-            spot_root    = "$(replace(tree.spot_root,    "\\" => "/"))"
+            [data.option_bar]
+            type = "parquet_option_bars"
+            root = "$(replace(tree.options_root, "\\" => "/"))"
 
-            [source.synthesizer]
-            type   = "ohlcv_spread"
-            lambda = 0.7
+            [data.option_quote]
+            type = "from_bars"
+            synthesizer = { type = "ohlcv_spread", lambda = 0.7 }
 
-            [source.rate]
-            type  = "flat"
+            [data.spot_price]
+            type = "parquet_spots"
+            root = "$(replace(tree.spot_root, "\\" => "/"))"
+
+            [data.rate_curve]
+            type = "constant"
+            currency = "USD"
             value = 0.04
 
-            [source.div]
-            type  = "flat"
+            [data.div_curve]
+            type = "constant"
+            underlying = "SPY"
             value = 0.015
+
+            [data.vol_surface]
+            type = "surface_from"
+            currency = "USD"
 
             [agent]
             type = "static"
@@ -231,17 +433,20 @@ end
         @test exp.outputs.metrics == [:sharpe]
         @test exp.agent isa StaticAgent
         @test exp.agent.policy isa NoOpPolicy
-        @test exp.source isa ModelDataSource
+        @test exp.data isa MarketData
+        @test exp.clock == Clock{OptionQuote}(Underlying("SPY"))
+        @test Set(kind_name(kind(s)) for s in exp.data.entries) ==
+              Set(["option_bar", "option_quote", "spot_price", "rate_curve", "div_curve", "vol_surface"])
+        @test entry(exp.data, OptionBar).root == tree.options_root
+        @test entry(exp.data, SpotPrice).root == tree.spot_root
+        @test entry(exp.data, RateCurve).record.currency == Currency("USD")
+        @test entry(exp.data, DivCurve).record.underlying == Underlying("SPY")
 
-        res = run_experiment(exp)
+        res = run_experiment(exp)               # opens and closes the readers itself
         @test isempty(res.positions)
         @test res.metrics.total_pnl == 0.0
         @test res.experiment === exp
-
-        # Release the DuckDB handle so mktempdir cleanup doesn't trip on
-        # locked parquet files (Windows). Explicit close + GC.gc() drops
-        # both the connection and any lingering Tables cursors.
-        close(exp.source.chain_source)
+        @test res.pnl_series.window_end_spot == 480.0
         exp = nothing
         res = nothing
         GC.gc()
@@ -254,13 +459,15 @@ end
     trd = Trade(_EX_UND, 480.0, f.expiry, Call)
     exp = Experiment(name="show-test",
                      agent=StaticAgent(_ExOpenOnceAt(f.ts2, trd)),
-                     source=f.mds, from=f.ts1, to=f.ts3,
+                     data=f.data, clock=_EX_CLOCK, from=f.ts1, to=f.ts3,
                      outputs=OutputSpec(metrics=[:sharpe]))
     res = run_experiment(exp)
     io = IOBuffer()
     show(io, MIME"text/plain"(), res)
     s = String(take!(io))
     @test occursin("ExperimentResult: show-test", s)
+    @test occursin("option_quote", s)
+    @test occursin("clock", s)
     @test occursin("Metrics:", s)
     @test occursin("total_pnl", s)
     @test occursin("sharpe", s)

@@ -12,7 +12,7 @@ always-on core set.
 ```mermaid
 flowchart LR
     Ledger[Vector Position] --> PS([pnl_series])
-    Settle[settle DateTime to Union of Float64 and Missing] --> PS
+    Settle[settle Trade to Union of Float64 and Missing] --> PS
     WES[window_end_spot] --> PS
     PS --> Series[PnLSeries]
     Series --> Metrics[(metric functions)]
@@ -47,8 +47,11 @@ A "round trip" is either:
   on the same contract -- one entry per matched chunk, timestamped at
   the close fill, PnL `= (-_unit_cost(open) - _unit_cost(close)) * qty`; or
 - an open lot still outstanding at the end of the ledger -- one entry
-  per residual chunk. The caller-supplied `settle(expiry)` closure
-  decides the per-leg spot:
+  per residual chunk. The caller-supplied `settle(trade)` closure
+  decides the per-leg spot. It is handed the lot's own `Trade`, not just
+  its expiry, so the closure can resolve a spot for *that leg's*
+  underlying; the expiry is one field away on it, and passing both would
+  let a caller supply a mismatched pair:
   - if `settle` returns a `Float64`, the entry is stamped at the leg's
     `trade.expiry` with PnL `= (_unit_payoff(open, s) - _unit_cost(open)) * qty`;
   - if `settle` returns `missing`, the lot is skipped and
@@ -56,9 +59,12 @@ A "round trip" is either:
     a wrong number -- the closure is the single source of truth for
     "can this leg honestly be priced?"
 
-`window_end_spot` is recorded on the series for provenance (the spot
-the orchestrator chose to use for case-1 marks inside its `settle`
-closure). The metrics layer itself never uses it for any computation.
+`window_end_spot` is recorded on the series for provenance only: the
+spot of the run's reference (clock) underlying at the window end. No
+layer computes with it -- not the metrics layer, and not the
+orchestrator, whose settlement resolves per lot from the lot's own
+trade. It stays a plain `Float64` field in the same position, so the
+persisted schema is unchanged.
 
 Direction sequence is permissive: any fill that doesn't match
 opposing lots becomes a new lot on its own side. The metrics layer
@@ -148,11 +154,13 @@ the list of known names.
 | **`PnLSeries` carries timestamps and raw counts, not just `Vector{Float64}`** | Sharpe-with-annualization wants a per-trade time index; max-drawdown wants the equity curve in time order; `n_opens` / `n_closes` are not derivable from `pnl` alone (still-open residuals diverge from closed round trips). A slightly richer struct buys all of those without rework. |
 | **Round-trip aggregation, not per-fill** | The backtest engine records closes as counter-trade `Position` rows whose own `realized_pnl(p, spot)` is the *payoff of the close leg*, not its contribution to a round trip. Summing per-fill would double-count. The intermediate sits one layer above and emits one number per round trip plus one per still-open residual. |
 | **FIFO lot matching** | The accounting default. Doesn't affect `total_pnl`, but is the right convention for per-round-trip PnL and the close-fill timestamps the equity curve carries. |
-| **Per-leg settle closure, no scalar settlement spot** | A single `settlement_spot` would mark every still-open lot at the same number regardless of when its leg expired -- silently wrong for any strategy that holds to expiry (1-DTE strangles, daily condors). The caller-supplied `settle(expiry) -> Union{Float64, Missing}` closure pushes the policy decision -- "what spot honestly prices this expiry?" -- up to the orchestrator that owns the data source and the window. |
+| **Per-leg settle closure, no scalar settlement spot** | A single `settlement_spot` would mark every still-open lot at the same number regardless of when its leg expired -- silently wrong for any strategy that holds to expiry (1-DTE strangles, daily condors). The caller-supplied `settle(trade) -> Union{Float64, Missing}` closure pushes the policy decision -- "what spot honestly prices this leg?" -- up to the orchestrator that owns the data source and the window. |
+| **The closure receives the `Trade`, not the expiry** | Passing only the expiry made one underlying -- whichever was captured when the closure was built -- apply to every lot, so a leg on one instrument could be marked against another's price. The series builder is holding the lot when it calls the closure, with the underlying one field away from the expiry it was passing. The trade replaces the expiry rather than being added beside it: two arguments would let a caller pass a mismatched pair. |
 | **Residuals stamped at the leg's own `trade.expiry`** | Held-to-expiry legs are stamped at the moment they actually settle, not at the test window end. The equity curve walks chronologically through real expiration events. The contract for a residual is "the leg's own settlement," not "what was true at `exp.to`." |
-| **`settle(expiry) === missing` increments `n_unmarked` rather than substituting a fallback** | Silent fallback was the bug the per-leg settle was introduced to fix. The metrics layer never invents a spot; data gaps surface as a visible count on `PnLSeries.n_unmarked` and the lot is excluded from realized PnL until a more sophisticated settlement (e.g. surface-based theoretical mark) lands upstream. |
+| **`settle(trade) === missing` increments `n_unmarked` rather than substituting a fallback** | Silent fallback was the bug the per-leg settle was introduced to fix. The metrics layer never invents a spot; data gaps surface as a visible count on `PnLSeries.n_unmarked` and the lot is excluded from realized PnL until a more sophisticated settlement (e.g. surface-based theoretical mark) lands upstream. |
 | **Always-on vs optional split** | Always-on metrics are cheap, unparameterized, and read on every reporting line; lying about their cost by making them opt-in would force every `Experiment` to list `[:total_pnl, :hit_rate, ...]`. Optional metrics carry kwargs and dispatch by symbol so `OutputSpec.metrics` stays a flat config-friendly `Vector{Symbol}`. |
 | **Symbol → function dispatch table** | Mirrors the backend-selection pattern used by Optim.jl / MLJ.jl. Each table entry is `(fn=..., defaults=(...))`, so requesting a symbol is one call with a complete contract; the per-experiment kwargs override merges on top. Unknown symbols error loudly rather than silently dropping. |
+| **Canonical sample order: timestamp, then pnl ascending** | Samples that settle at the same instant have no natural order, yet `max_drawdown` reads the equity curve sample by sample. The per-contract matching walks a `Dict`, whose iteration order depends on key hashes and therefore on the package build; left as is, the series order and `max_drawdown` differed between builds of identical code (found at step 2.1 of the data-kinds plan). Losses-first within a timestamp is deterministic, reconstructible from the persisted series, and conservative for drawdown. Aggregating simultaneous samples for path metrics is the fuller answer and is future work. |
 | **One sample = one round trip** | The annualizing metrics (Sharpe / Sortino / volatility) treat each round-trip PnL as one observation and scale by `sqrt(periods_per_year)`. Callers with a different trade cadence override `periods_per_year` rather than this layer trying to infer it from `timestamps`. Resampling to a regular time grid is future work. |
 | **Default kwargs baked into the dispatch entry** | The symbol carries the contract; default-arg drift between two call sites is impossible because there is only one source of truth. Per-experiment overrides come in through `compute_metrics(..., kwargs=...)`; they are not promoted to `Experiment` itself in this slice. |
 
@@ -180,15 +188,16 @@ entry point.
 | Closing fill with no opposing open lot | Treated as opening a fresh lot on its own side -- the layer can't tell intent from a single fill direction. |
 | Closing fill that exceeds the opposing open quantity | Closes what it can and leaves the residual as a fresh open on its own side. |
 | Mixed open / close fills on the same contract out of timestamp order | Sorted internally; original ledger order is not required. |
+| Several samples settle at one timestamp | Ordered by pnl ascending within the timestamp (losses first); ledger order does not matter. |
 | `compute_metrics` called with an unknown symbol | Errors loudly with the offending symbol and the list of known names. |
 | Sharpe / Sortino / volatility on `<2` trades or zero variance | Returns `NaN`. |
 | Profit factor on all-breakeven or empty series | Returns `NaN`. Wins with zero losses returns `Inf`. |
 
 ## Future work
 
-- **Surface-based theoretical settle for case 2.** Today, when `settle`
-  is the orchestrator's default closure and `get_spot(source, expiry)`
-  returns `missing`, the leg lands in `n_unmarked`. The correct
+- **Surface-based theoretical settle.** Today, when `settle` is the
+  orchestrator's default closure and there is no spot record at the
+  leg's settlement instant, the leg lands in `n_unmarked`. The correct
   long-term answer is to mark the leg at its model-implied price using
   the surface at (or just before) expiry, so the leg's expiration PnL
   is computable even when the spot bar is not present. Lands in

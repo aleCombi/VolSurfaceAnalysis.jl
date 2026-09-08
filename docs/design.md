@@ -24,6 +24,10 @@
    conventions for naming, layout, interface declaration, and
    testing structure. Cite the findings in the design discussion so
    the choice is traceable.
+   Record the findings in a *Conventions consulted* section of the
+   module's `docs/modules/<module>.md`, one entry per decision naming
+   the source checked. That section is the durable record; a design
+   discussion may point to it but is not where the citation lives.
 
 6. **Keep module docs lean and architectural.** Module docs should
    explain boundaries, invariants, data flow, and consequential design
@@ -33,3 +37,13 @@
    and boundaries over implementation specifics (magic numbers, internal
    data structures, incidental library names) that drift as code
    changes.
+
+7. **Empty means temporal absence only.** An empty result from any read
+   means "served, and nothing at this instant". Every other unanswerable
+   question has a name: nothing serves this selector, two records with
+   two answers, a derivation that keeps failing past its bound, a leg
+   that cannot honestly be priced. Name it with an error type or a
+   counted field, never with an ordinary empty result. A consumer that
+   cannot tell "not yet" from "not ever" correctly concludes it has
+   nothing to do, and the run completes with no positions and no
+   diagnostic.

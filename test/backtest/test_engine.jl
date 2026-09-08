@@ -1,29 +1,31 @@
-# Tests for run_backtest and resolve_quote.
+# Tests for run_backtest and resolve_quote, on an in-memory MarketData.
 #
-# Quotes here carry real bid/ask so open_position can actually fill.
+# Quotes here carry real bid/ask so open_position can actually fill. The
+# map serves OptionQuote directly from an InMemory fixture: no bars, no
+# surface, since these policies never look at one.
 
 const _EN_UND = Underlying("SPY")
+const _EN_CLOCK = Clock{OptionQuote}(_EN_UND)
 
 function _en_fixture()
     ts1 = DateTime(2024, 1, 15, 15, 30)
     ts2 = DateTime(2024, 1, 15, 15, 31)
     ts3 = DateTime(2024, 1, 15, 15, 32)
-    spot = 480.0; r = 0.04; q = 0.015
+    spot = 480.0
     expiry = DateTime(2024, 2, 16, 21, 0)
-    T = time_to_expiry(expiry, ts1)
     mk_quote(ts, strike, otype, bid, ask) = OptionQuote(
         "X", _EN_UND, expiry, strike, otype,
         bid, ask, (bid + ask) / 2, missing, missing, missing, ts,
     )
-    mk_chain(ts) = [
-        mk_quote(ts, 480.0, Call, 5.00, 5.10),
-        mk_quote(ts, 480.0, Put,  4.80, 4.90),
-    ]
-    chains = Dict(ts1 => mk_chain(ts1), ts2 => mk_chain(ts2), ts3 => mk_chain(ts3))
-    spots  = Dict(ts1 => spot,           ts2 => spot,           ts3 => spot)
-    inner  = InMemoryDataSource(_EN_UND; chains=chains, spots=spots)
-    mds    = ModelDataSource(inner; rate=FlatCurve(r), div=FlatCurve(q))
-    (mds=mds, ts1=ts1, ts2=ts2, ts3=ts3, expiry=expiry, spot=spot)
+    quotes = OptionQuote[]
+    spots  = SpotPrice[]
+    for ts in (ts1, ts2, ts3)
+        push!(quotes, mk_quote(ts, 480.0, Call, 5.00, 5.10))
+        push!(quotes, mk_quote(ts, 480.0, Put,  4.80, 4.90))
+        push!(spots, SpotPrice(_EN_UND, spot, ts))
+    end
+    data = MarketData(InMemory(quotes), InMemory(spots))
+    (data=data, ts1=ts1, ts2=ts2, ts3=ts3, expiry=expiry, spot=spot)
 end
 
 # A test policy that opens one long call at ts1 and nothing else.
@@ -33,7 +35,7 @@ struct _OpenOnceAt <: Policy
 end
 
 function VolSurfaceAnalysis.decide(s::_OpenOnceAt, t::DateTime,
-                                   ::TimeCutModelDataSource,
+                                   ::TimeCut,
                                    ::AbstractVector{Position})::Vector{Trade}
     return t == s.when ? Trade[s.trade] : Trade[]
 end
@@ -46,7 +48,7 @@ struct _OpenThenClose <: Policy
 end
 
 function VolSurfaceAnalysis.decide(s::_OpenThenClose, t::DateTime,
-                                   ::TimeCutModelDataSource,
+                                   ::TimeCut,
                                    ::AbstractVector{Position})::Vector{Trade}
     if t == s.open_at
         return Trade[s.contract]
@@ -61,14 +63,14 @@ end
 
 @testset "run_backtest(policy): NoOpPolicy yields empty ledger" begin
     f = _en_fixture()
-    positions = run_backtest(NoOpPolicy(), f.mds, f.ts1, f.ts3)
+    positions = run_backtest(NoOpPolicy(), f.data, f.ts1, f.ts3, _EN_CLOCK)
     @test isempty(positions)
 end
 
 @testset "run_backtest(policy): single fill at scheduled tick" begin
     f = _en_fixture()
     trd = Trade(_EN_UND, 480.0, f.expiry, Call)
-    positions = run_backtest(_OpenOnceAt(f.ts2, trd), f.mds, f.ts1, f.ts3)
+    positions = run_backtest(_OpenOnceAt(f.ts2, trd), f.data, f.ts1, f.ts3, _EN_CLOCK)
     @test length(positions) == 1
     pos = positions[1]
     @test pos.trade === trd
@@ -81,7 +83,7 @@ end
     f = _en_fixture()
     open_trade = Trade(_EN_UND, 480.0, f.expiry, Call)
     s = _OpenThenClose(f.ts1, f.ts3, open_trade)
-    positions = run_backtest(s, f.mds, f.ts1, f.ts3)
+    positions = run_backtest(s, f.data, f.ts1, f.ts3, _EN_CLOCK)
     @test length(positions) == 2
     @test positions[1].entry_timestamp == f.ts1
     @test positions[1].trade.direction == 1
@@ -98,8 +100,8 @@ end
     f = _en_fixture()
     trd = Trade(_EN_UND, 480.0, f.expiry, Call)
     p = _OpenOnceAt(f.ts2, trd)
-    via_policy = run_backtest(p, f.mds, f.ts1, f.ts3)
-    via_agent  = run_backtest(StaticAgent(p), f.mds, f.ts1, f.ts3)
+    via_policy = run_backtest(p, f.data, f.ts1, f.ts3, _EN_CLOCK)
+    via_agent  = run_backtest(StaticAgent(p), f.data, f.ts1, f.ts3, _EN_CLOCK)
     @test length(via_agent) == length(via_policy) == 1
     @test via_agent[1].trade === via_policy[1].trade
     @test via_agent[1].entry_timestamp == via_policy[1].entry_timestamp
@@ -114,7 +116,7 @@ struct _SwapAgent <: Agent
 end
 
 function VolSurfaceAnalysis.current_policy(a::_SwapAgent, t::DateTime,
-                                           ::TimeCutModelDataSource,
+                                           ::TimeCut,
                                            ::AbstractVector{Position})
     t < a.swap_at ? NoOpPolicy() : a.after
 end
@@ -122,25 +124,50 @@ end
 @testset "run_backtest(agent): swap-mid-run agent acts only after swap" begin
     f = _en_fixture()
     trd = Trade(_EN_UND, 480.0, f.expiry, Call)
-    # Active policy fires at ts3; agent only swaps it in starting at ts2,
-    # so a swap at ts2 still produces the ts3 fill, but a swap after ts3
-    # produces nothing.
     agent_fires = _SwapAgent(f.ts2, _OpenOnceAt(f.ts3, trd))
     agent_silent = _SwapAgent(f.ts3 + Second(1), _OpenOnceAt(f.ts3, trd))
-    @test length(run_backtest(agent_fires,  f.mds, f.ts1, f.ts3)) == 1
-    @test isempty(run_backtest(agent_silent, f.mds, f.ts1, f.ts3))
+    @test length(run_backtest(agent_fires,  f.data, f.ts1, f.ts3, _EN_CLOCK)) == 1
+    @test isempty(run_backtest(agent_silent, f.data, f.ts1, f.ts3, _EN_CLOCK))
+end
+
+@testset "run_backtest: the clock defines the ticks" begin
+    f = _en_fixture()
+    trd = Trade(_EN_UND, 480.0, f.expiry, Call)
+    # A clock on a selector nothing serves is a broken configuration, not an
+    # empty grid: enumerating it throws rather than running zero ticks.
+    @test_throws UnservedSelector run_backtest(_OpenOnceAt(f.ts2, trd), f.data,
+                                               f.ts1, f.ts3,
+                                               Clock{OptionQuote}(Underlying("QQQ")))
+    # A clock on the spot grid ticks at the same instants here.
+    @test length(run_backtest(_OpenOnceAt(f.ts2, trd), f.data, f.ts1, f.ts3,
+                              Clock{SpotPrice}(_EN_UND))) == 1
+end
+
+@testset "run_backtest: missing spot at a fill errors" begin
+    f = _en_fixture()
+    trd = Trade(_EN_UND, 480.0, f.expiry, Call)
+    # served, but no row at the fill instant: the loud "missing spot" error
+    thin_spots = MarketData(entry(f.data, OptionQuote),
+                            InMemory([SpotPrice(_EN_UND, f.spot, f.ts1)]))
+    @test_throws ErrorException run_backtest(_OpenOnceAt(f.ts2, trd), thin_spots,
+                                             f.ts1, f.ts3, _EN_CLOCK)
+    # nothing serves SpotPrice for SPY at all: structural, so it is named
+    no_spots = MarketData(entry(f.data, OptionQuote), InMemory(SpotPrice[]))
+    @test_throws UnservedSelector run_backtest(_OpenOnceAt(f.ts2, trd), no_spots,
+                                               f.ts1, f.ts3, _EN_CLOCK)
 end
 
 @testset "resolve_quote: strike not in chain errors" begin
     f = _en_fixture()
-    cut = TimeCutModelDataSource(f.mds, f.ts1)
+    cut = TimeCut(f.data, f.ts1)
     bogus = Trade(_EN_UND, 999.0, f.expiry, Call)
     @test_throws ErrorException resolve_quote(cut, bogus, f.ts1)
+    @test_throws ErrorException resolve_quote(cut, Trade(_EN_UND, 480.0, f.expiry, Call), f.ts2)  # masked
 end
 
 @testset "resolve_quote: returns matching contract" begin
     f = _en_fixture()
-    cut = TimeCutModelDataSource(f.mds, f.ts1)
+    cut = TimeCut(f.data, f.ts1)
     put_trade = Trade(_EN_UND, 480.0, f.expiry, Put)
     q = resolve_quote(cut, put_trade, f.ts1)
     @test q.strike == 480.0

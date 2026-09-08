@@ -18,7 +18,7 @@ fit itself* live on the Agent.
 ```mermaid
 flowchart LR
     Engine[Backtest engine] --> Clock[t]
-    Engine --> Cut[TimeCutModelDataSource]
+    Engine --> Cut[TimeCut]
     Engine --> Ledger[positions]
 
     Agent[Agent] --> CP([current_policy])
@@ -43,13 +43,26 @@ visible to both calls.
 ```julia
 abstract type Agent end
 
-current_policy(a::Agent, t::DateTime, data::TimeCutModelDataSource,
+current_policy(a::Agent, t::DateTime, data::TimeCut,
                positions::AbstractVector{Position}) -> Policy
+
+tick_times(a::Agent, data::MarketData, from, to) -> Union{Nothing, Vector{DateTime}}
+
+declared_underlyings(a::Agent) -> Tuple of Underlying
 ```
 
-One method, four arguments, one Policy returned. Concrete agents
+One method, four arguments, one Policy returned; plus the optional
+`tick_times` override (default `nothing`; `StaticAgent` delegates to
+its policy's), where a multi-policy agent unions its policies'
+schedules. Concrete agents
 subtype `Agent` and implement `current_policy`. The returned Policy
 must be valid for at least the current tick.
+
+`declared_underlyings` mirrors the [policy-level trait](policies.md) at
+this layer: default empty, `StaticAgent` delegates to its one policy, and
+an agent that swaps policies over time reports their union or nothing
+when it cannot say ahead of time. `load_experiment` reads it to check the
+clock and the strategy name one underlying.
 
 ### `StaticAgent`
 
@@ -70,7 +83,7 @@ one-line wrapper around the Agent overload.
 | Decision | Why |
 |---|---|
 | **Per-tick query, not per-event callback** | The engine calls `current_policy` on every tick rather than asking the Agent to push policy-change events. This keeps the engine loop one-shape (mirrors the per-tick `decide` call) and means a "refit on schedule" Agent is a trivial calendar check inside `current_policy`. Cost on minute-data over a year for a no-op `current_policy`: dwarfed by data IO. |
-| **`current_policy` sees `(t, cut, positions)`** | Same arguments as `decide`. A refit-on-month-boundary Agent needs `t`; an Agent that retrains on a lookback window needs `cut`; an Agent that adapts position sizing to current exposure needs `positions`. Passing all three uniformly means no Agent ever has to thread state out-of-band. |
+| **`current_policy` sees `(t, cut, positions)`** | Same arguments as `decide`. A refit-on-month-boundary Agent needs `t`; an Agent that retrains on a lookback window reads it through `cut` (history before `from` is visible, anything after `t` is not, derived data included); an Agent that adapts position sizing to current exposure needs `positions`. |
 | **Agent is not itself a Policy** | The two have different responsibilities (evolve over time vs. decide for one tick) and different invariants (mutable cadence/state vs. frozen for the tick). Conflating them collapses the split that motivates the abstraction in the first place. An Agent that *never* changes its Policy is a `StaticAgent`, not a Policy worn as an Agent. |
 | **Engine accepts both `Agent` and `Policy`** | `run_backtest(policy, ...)` is a one-line wrapper around `run_backtest(StaticAgent(policy), ...)`. The bare-policy form is the natural primitive for training/evaluation code that wants to score a single candidate Policy over a window without constructing an Agent. |
 | **No refit-schedule protocol** | The engine does not have a separate `refit_times(agent, source)` hook. Anything an Agent wants to schedule it gates inside `current_policy`, the same way policies gate inside `decide`. One uniform query model, no engine-side knowledge of how an Agent is structured internally. |
@@ -78,7 +91,8 @@ one-line wrapper around the Agent overload.
 ## Responsibility boundaries
 
 **Owns:** the `Agent` abstract type, the `current_policy` contract,
-the `StaticAgent` base case.
+the agent-level `declared_underlyings` delegation, the `StaticAgent`
+base case.
 
 **Does NOT own:**
 
@@ -104,7 +118,7 @@ mutable struct MonthlyRefitAgent{F,P<:Policy} <: Agent
 end
 
 function current_policy(a::MonthlyRefitAgent, t::DateTime,
-                        cut::TimeCutModelDataSource,
+                        cut::TimeCut,
                         positions::AbstractVector{Position})
     ym = (year(t), month(t))
     if ym != a.last_refit_month

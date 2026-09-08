@@ -1,6 +1,6 @@
 # Config-file loading: TOML -> Experiment.
 #
-# Stdlib TOML only. Each dispatched sum-type (DataSource, Curve, Policy,
+# Stdlib TOML only. Each dispatched sum-type (data provider, Curve, Policy,
 # Agent) has its own builder registry keyed by a string discriminator
 # (`type = "..."` in the config); the rest of that table is forwarded
 # as the builder's kwargs. New concrete types register themselves by
@@ -74,55 +74,194 @@ function build_synthesizer(d::AbstractDict)::QuoteSynthesizer
     return _dispatch(_SYNTHESIZER_BUILDERS, t, "synthesizer")(d)
 end
 
-# ---- DataSource builders ------------------------------------------------
+# ---- Kind names ---------------------------------------------------------
+# The one string <-> type table. Kinds are keyed by type everywhere on the
+# runtime path; only config and identity use these names.
 
-function _build_parquet_source(d::AbstractDict)::DataSource
-    underlying = _require(d, "underlying", "source(parquet)")
-    synth_tbl  = _require(d, "synthesizer", "source(parquet)")
-    synth = build_synthesizer(Dict{String,Any}(synth_tbl))
-    max_days = haskey(d, "max_days_cached") ? Int(d["max_days_cached"]) : 3
-    if haskey(d, "root")
-        return ParquetDataSource(
-            String(underlying), String(d["root"]);
-            synthesizer     = synth,
-            max_days_cached = max_days,
-        )
-    end
-    options_root = _require(d, "options_root", "source(parquet) without \"root\"")
-    spot_root    = _require(d, "spot_root",    "source(parquet) without \"root\"")
-    return ParquetDataSource(
-        String(underlying);
-        options_root    = String(options_root),
-        spot_root       = String(spot_root),
-        synthesizer     = synth,
-        max_days_cached = max_days,
-    )
+const _KINDS = Dict{String,Type}(
+    "option_bar"   => OptionBar,
+    "option_quote" => OptionQuote,
+    "spot_price"   => SpotPrice,
+    "rate_curve"   => RateCurve,
+    "div_curve"    => DivCurve,
+    "vol_surface"  => VolatilitySurface,
+)
+const _KIND_NAMES = Dict{Type,String}(v => k for (k, v) in _KINDS)
+
+"""
+    kind_name(::Type) -> String
+
+The config / identity name of a kind (`OptionQuote` -> `"option_quote"`).
+"""
+kind_name(T::Type) = get(_KIND_NAMES, T) do
+    error("kind_name: no config name for kind $T (known: $(sort(collect(keys(_KINDS)))))")
 end
 
-const _DATA_SOURCE_BUILDERS = Dict{String, Function}(
-    "parquet" => _build_parquet_source,
+# ---- Provider builders (`[data.<kind>]` tables) ------------------------
+# One table per kind. The table name selects the kind; `type` selects the
+# builder; the builder gets the rest of the table and the kind and returns
+# a spec. Every builder has the signature `(d, R) -> spec`.
+
+_selector_key(::Type{Underlying}) = "underlying"
+_selector_key(::Type{Currency})   = "currency"
+_parse_selector(::Type{Underlying}, s) = Underlying(String(s))
+_parse_selector(::Type{Currency}, s)   = Currency(String(s))
+
+# The selector of kind `R`, read from the key its type is named by.
+function _selector_from(d::AbstractDict, ::Type{R}, where_::AbstractString) where {R}
+    S = selector_type(R)
+    key = _selector_key(S)
+    return _parse_selector(S, _require(d, key, where_))
+end
+
+_build_parquet_option_bars(d::AbstractDict, ::Type) =
+    ParquetOptionBars(String(_require(d, "root", "data(parquet_option_bars)")))
+
+_build_parquet_spots(d::AbstractDict, ::Type) =
+    ParquetSpots(String(_require(d, "root", "data(parquet_spots)")))
+
+_build_from_bars(d::AbstractDict, ::Type) =
+    QuotesFromBars(build_synthesizer(Dict{String,Any}(_require(d, "synthesizer", "data(from_bars)"))))
+
+# `value` is a flat curve; `curve = { type = ... }` any curve builder.
+function _curve_from(d::AbstractDict, where_::AbstractString)::Curve
+    if haskey(d, "curve")
+        return build_curve(Dict{String,Any}(d["curve"]))
+    elseif haskey(d, "value")
+        return FlatCurve(Float64(d["value"]))
+    end
+    error("load_experiment: $where_ needs \"value\" (flat) or a \"curve\" table")
+end
+
+_constant_record(::Type{RateCurve}, sel::Currency,  c::Curve) = RateCurve(sel, c)
+_constant_record(::Type{DivCurve},  sel::Underlying, c::Curve) = DivCurve(sel, c)
+_constant_record(::Type{R}, sel, ::Curve) where {R} = error(
+    "load_experiment: data(constant) supports rate_curve and div_curve, not $(kind_name(R))")
+
+function _build_constant(d::AbstractDict, ::Type{R}) where {R}
+    sel = _selector_from(d, R, "data(constant)")
+    return Constant(_constant_record(R, sel, _curve_from(d, "data(constant)")))
+end
+
+# The only builder that rejects unknown keys. `[data.<kind>]` tables
+# otherwise drop them silently (a recorded cleanup item), which is
+# tolerable until a key changes identity: a typo'd `lookback_ticks` would
+# take the default and silently change identity-vs-intent.
+const _SURFACE_FROM_KEYS = Set(["type", "currency", "spot_for", "lookback_ticks"])
+
+function _build_surface_from(d::AbstractDict, ::Type)
+    unknown = sort!(collect(setdiff(keys(d), _SURFACE_FROM_KEYS)))
+    isempty(unknown) || error(
+        "load_experiment: data(surface_from) has unknown key(s) $(unknown). " *
+        "Known: $(sort(collect(_SURFACE_FROM_KEYS)))")
+    currency = Currency(String(_require(d, "currency", "data(surface_from)")))
+    spot_for = Dict{Underlying,Underlying}()
+    if haskey(d, "spot_for")
+        for (k, v) in d["spot_for"]
+            spot_for[Underlying(String(k))] = Underlying(String(v))
+        end
+    end
+    lookback = get(d, "lookback_ticks", 3)
+    lookback isa Integer || error(
+        "load_experiment: data(surface_from) lookback_ticks must be an integer, " *
+        "got $(typeof(lookback))")
+    return SurfaceFrom(currency=currency, spot_for=spot_for,
+                       lookback_ticks=Int(lookback))
+end
+
+# Every key other than `type` is `selector = { sub-table }`.
+function _build_by_selector(d::AbstractDict, ::Type{R}) where {R}
+    parts = Pair[]
+    for (k, v) in d
+        k == "type" && continue
+        v isa AbstractDict || error(
+            "load_experiment: data(by_selector) entry \"$k\" must be a table with a \"type\"")
+        sel = _parse_selector(selector_type(R), k)
+        push!(parts, sel => _build_provider(Dict{String,Any}(v), R, "data(by_selector).$k"))
+    end
+    isempty(parts) && error("load_experiment: data(by_selector) has no parts")
+    sort!(parts; by = p -> string(first(p)))
+    return BySelector{R}(parts...)
+end
+
+const _PROVIDER_BUILDERS = Dict{String, Function}(
+    "parquet_option_bars" => _build_parquet_option_bars,
+    "parquet_spots"       => _build_parquet_spots,
+    "from_bars"           => _build_from_bars,
+    "constant"            => _build_constant,
+    "surface_from"        => _build_surface_from,
+    "by_selector"         => _build_by_selector,
 )
 
-function build_data_source(d::AbstractDict)::DataSource
-    t = _pop_type!(d, "source")
-    return _dispatch(_DATA_SOURCE_BUILDERS, t, "source")(d)
+function _build_provider(d::AbstractDict, ::Type{R}, where_::AbstractString) where {R}
+    t = _pop_type!(d, where_)
+    spec = _dispatch(_PROVIDER_BUILDERS, t, "data provider")(d, R)
+    kind(spec) === R || error(
+        "load_experiment: $where_ has type \"$t\", which serves " *
+        "$(kind_name(kind(spec))), not $(kind_name(R))")
+    return spec
 end
 
-# ---- ModelDataSource ----------------------------------------------------
+"""
+    build_market_data(d::AbstractDict) -> MarketData
 
-function _build_model_data_source(d::AbstractDict)::ModelDataSource
-    rate_tbl = _require(d, "rate", "source")
-    div_tbl  = _require(d, "div",  "source")
-    rate = build_curve(Dict{String,Any}(rate_tbl))
-    div_ = build_curve(Dict{String,Any}(div_tbl))
-    # `build_data_source` reads its own "type"/fields from the top-level
-    # source table; strip the curve sub-tables so they don't leak into
-    # the source kwargs. (The synthesizer sub-table is consumed by the
-    # source builder itself, so it stays in.)
-    source_only = Dict{String,Any}(k => v for (k, v) in d
-                                   if k != "rate" && k != "div")
-    chain_src = build_data_source(source_only)
-    return ModelDataSource(chain_src; rate=rate, div=div_)
+Build the provider map from a `[data]` table: one sub-table per kind,
+keyed by kind name, each with a `type` discriminator. Load-time checks:
+every table name is a known kind; the built spec serves that kind;
+every derived spec's input kinds are present; every spec has a
+lifecycle pair; and every selector a derived spec `demands` statically
+is one the map serves.
+"""
+function build_market_data(d::AbstractDict)::MarketData
+    isempty(d) && error("load_experiment: [data] has no entries")
+    specs = Any[]
+    for name in sort!(collect(keys(d)))
+        haskey(_KINDS, name) || error(
+            "load_experiment: unknown data kind \"$name\". Known: $(sort(collect(keys(_KINDS))))")
+        R = _KINDS[name]
+        tbl = d[name]
+        tbl isa AbstractDict || error("load_experiment: [data.$name] must be a table")
+        push!(specs, _build_provider(Dict{String,Any}(tbl), R, "data.$name"))
+    end
+    m = MarketData(Tuple(specs))
+    present = Set(kind(s) for s in m.entries)
+    for s in m.entries, need in inputs(s)
+        need in present || error(
+            "load_experiment: data.$(kind_name(kind(s))) needs $(kind_name(need)), " *
+            "which no [data.*] table provides")
+    end
+    for s in m.entries
+        has_lifecycle(s) || error(
+            "load_experiment: data.$(kind_name(kind(s))) has no open_data method")
+    end
+    # Fast path over the closed-world providers: a derived spec naming a
+    # selector nobody serves fails in a second rather than after a
+    # backtest has been running. `missing` is skipped, which is what keeps
+    # this check off the filesystem -- a parquet spec cannot answer until
+    # it is opened. The mechanism is `serves` in the four map-level
+    # shapes; this is only the fast path.
+    for s in m.entries, (K, sel) in demands(s)
+        K in present || continue
+        serves(m, K, sel) === false && error(
+            "load_experiment: data.$(kind_name(kind(s))) needs $(kind_name(K)) for " *
+            "$(sel), which data.$(kind_name(K)) does not serve " *
+            "($(served_description(entry(m, K))))")
+    end
+    return m
+end
+
+"""
+    build_clock(d::AbstractDict) -> Clock
+
+Build the tick grid from a `clock = { kind = "...", <selector> = "..." }`
+table; the selector key is `underlying` or `currency` per the kind.
+"""
+function build_clock(d::AbstractDict)::Clock
+    name = String(_require(d, "kind", "clock"))
+    haskey(_KINDS, name) || error(
+        "load_experiment: unknown clock kind \"$name\". Known: $(sort(collect(keys(_KINDS))))")
+    R = _KINDS[name]
+    return Clock{R}(_selector_from(d, R, "clock"))
 end
 
 # ---- Policy builders ----------------------------------------------------
@@ -220,40 +359,49 @@ end
 
 Parse a TOML file and construct the [`Experiment`](@ref) it describes.
 
-The schema is a flat header (`name`, `from`, `to`) plus nested tables
-(`[outputs]`, `[source]`, `[agent]`). Every dispatched sum-type (data
-source, synthesizer, curve, policy, agent) is keyed by a `type`
-discriminator; the rest of that table is forwarded to the matching
-builder. Optional metrics live under `[outputs]`; top-level `metrics`
-is rejected so old configs do not silently default to a different output
-set.
+The schema is a flat header (`name`, `from`, `to`, `clock`) plus nested
+tables (`[outputs]`, `[data.<kind>]`, `[agent]`). Every dispatched
+sum-type (data provider, synthesizer, curve, policy, agent) is keyed by
+a `type` discriminator; the rest of that table is forwarded to the
+matching builder. Optional metrics live under `[outputs]`; top-level
+`metrics` and the old `[source]` table are rejected with a pointer.
 
 # Example
 
 ```toml
-name = "noop_smoke"
-from = 2024-01-15T15:30:00
-to   = 2024-01-15T15:32:00
+name  = "noop_smoke"
+from  = 2024-01-15T15:30:00
+to    = 2024-01-15T15:32:00
+clock = { kind = "option_quote", underlying = "SPY" }
 
 [outputs]
 metrics = ["sharpe", "max_drawdown"]
 
-[source]
-type       = "parquet"
-underlying = "SPY"
-root       = "C:/data/polygon"
+[data.option_bar]
+type = "parquet_option_bars"
+root = "C:/data/polygon/options_1min"
 
-[source.synthesizer]
-type   = "ohlcv_spread"
-lambda = 0.7
+[data.option_quote]
+type = "from_bars"
+synthesizer = { type = "ohlcv_spread", lambda = 0.7 }
 
-[source.rate]
-type = "flat"
+[data.spot_price]
+type = "parquet_spots"
+root = "C:/data/polygon/spots_1min"
+
+[data.rate_curve]
+type = "constant"
+currency = "USD"
 value = 0.04
 
-[source.div]
-type = "flat"
+[data.div_curve]
+type = "constant"
+underlying = "SPY"
 value = 0.015
+
+[data.vol_surface]
+type = "surface_from"
+currency = "USD"
 
 [agent]
 type = "static"
@@ -299,12 +447,28 @@ function _experiment_from_cfg(cfg::AbstractDict)::Experiment
     haskey(cfg, "metrics") && error(
         "load_experiment: top-level \"metrics\" is no longer supported; " *
         "move it under [outputs] as metrics = [...]")
-    source_tbl = _require(cfg, "source", "config")
-    agent_tbl  = _require(cfg, "agent",  "config")
-    source = _build_model_data_source(Dict{String,Any}(source_tbl))
-    agent  = build_agent(Dict{String,Any}(agent_tbl))
+    haskey(cfg, "source") && error(
+        "load_experiment: the [source] table is no longer supported; " *
+        "use [data.<kind>] tables and a top-level clock (see docs/modules/experiment.md)")
+    data_tbl  = _require(cfg, "data",  "config")
+    clock_tbl = _require(cfg, "clock", "config")
+    agent_tbl = _require(cfg, "agent", "config")
+    data  = build_market_data(Dict{String,Any}(data_tbl))
+    clock = build_clock(Dict{String,Any}(clock_tbl))
+    any(kind(s) === kind(clock) for s in data.entries) || error(
+        "load_experiment: clock kind \"$(kind_name(kind(clock)))\" has no [data.*] table")
+    agent = build_agent(Dict{String,Any}(agent_tbl))
+    # One experiment, one underlying. The clock selector says *when* to
+    # step; settlement and fills both resolve prices per trade. Asserting
+    # the two agree is what makes that safe by construction -- a policy
+    # that declares nothing statically cannot be checked here, and is not.
+    declared = declared_underlyings(agent)
+    isempty(declared) || clock.sel in declared || error(
+        "load_experiment: the agent declares $(join(string.(declared), ", ")) " *
+        "but the clock steps on $(clock.sel); an experiment ticks and trades " *
+        "on one underlying")
     outputs = haskey(cfg, "outputs") ?
         build_output_spec(Dict{String,Any}(cfg["outputs"])) : OutputSpec()
-    return Experiment(; name=name, agent=agent, source=source,
+    return Experiment(; name=name, agent=agent, data=data, clock=clock,
                        from=from, to=to, outputs=outputs)
 end

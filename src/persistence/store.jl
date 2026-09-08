@@ -18,9 +18,14 @@
 # (the backtest-only identity, shared by output variations of one backtest)
 # and code provenance (`commit_sha` / `dirty`).
 
-using SHA
 using DuckDB
 using DuckDB: DBInterface
+
+# Manifest schema version, outside the run hash. Bumped once by the
+# data-kinds migration (every run id changed with the identity
+# projection); `load_run` refuses a run written under another version
+# rather than rebuilding an experiment its config cannot describe.
+const RUN_SCHEMA_VERSION = 2
 
 """
     RunStore
@@ -76,7 +81,7 @@ end
     with_run_store(f, root)
 
 Open a `RunStore`, call `f(store)`, then close the store in a `finally`
-block. Mirrors `with_parquet_source` for resource-scoped use.
+block. Mirrors `with_data` for resource-scoped use.
 """
 function with_run_store(f::Function, root::AbstractString)
     s = RunStore(root)
@@ -180,18 +185,14 @@ function save_run(store::RunStore, result::ExperimentResult,
     # Integrity: the config we persist must rebuild the experiment being
     # saved, so load_run reproduces it faithfully. `name` is not part of
     # full_hash (label only), so compare it explicitly.
-    config_exp = load_experiment_str(config_toml)
-    try
-        config_id = full_hash(config_exp)
-        config_id == id || throw(ArgumentError(
-            "save_run: config_toml does not describe result.experiment " *
-            "(config full_hash=$config_id, result full_hash=$id)"))
-        config_exp.name == result.experiment.name || throw(ArgumentError(
-            "save_run: config_toml name \"$(config_exp.name)\" does not match " *
-            "result.experiment name \"$(result.experiment.name)\""))
-    finally
-        _close_experiment_sources(config_exp)
-    end
+    config_exp = load_experiment_str(config_toml)           # specs only, nothing to close
+    config_id = full_hash(config_exp)
+    config_id == id || throw(ArgumentError(
+        "save_run: config_toml does not describe result.experiment " *
+        "(config full_hash=$config_id, result full_hash=$id)"))
+    config_exp.name == result.experiment.name || throw(ArgumentError(
+        "save_run: config_toml name \"$(config_exp.name)\" does not match " *
+        "result.experiment name \"$(result.experiment.name)\""))
     dir = run_dir(store, id)
     mkpath(dir)
 
@@ -205,19 +206,6 @@ function save_run(store::RunStore, result::ExperimentResult,
     _write_pnl_series(store, dir, id, result)
 
     return id
-end
-
-function _close_if_possible(x)
-    hasmethod(close, Tuple{typeof(x)}) && close(x)
-    return nothing
-end
-
-function _close_experiment_sources(exp::Experiment)
-    chain = exp.source.chain_source
-    spot = exp.source.spot_source
-    _close_if_possible(chain)
-    spot === chain || _close_if_possible(spot)
-    return nothing
 end
 
 function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractString,
@@ -238,7 +226,8 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         window_end_spot DOUBLE,
         commit_sha VARCHAR,
         dirty BOOLEAN,
-        written_at TIMESTAMP
+        written_at TIMESTAMP,
+        schema_version INTEGER
     )"""
     insert = "INSERT INTO _writebuf VALUES (" * join([
         _str_sql(id),
@@ -254,6 +243,7 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         _str_sql(commit_sha),
         dirty ? "TRUE" : "FALSE",
         _dt_sql(Dates.now(UTC)),
+        string(RUN_SCHEMA_VERSION),
     ], ", ") * ")"
     _write_parquet(store, joinpath(dir, "manifest.parquet"), schema, [insert])
 end
@@ -349,27 +339,34 @@ Rehydrate a previously [`save_run`](@ref)-saved run back into an
 `pnl_series`, and the `metrics` NamedTuple (preserving the integer
 types of `n_round_trips`, `n_opens`, `n_closes`).
 
-The underlying data source declared by the saved config does not need
-to be present on disk -- `ParquetDataSource` validates roots lazily, so
-the rebuilt `Experiment.source` simply throws on first read if the
-data has moved. Inspecting the persisted fields (`positions`,
-`pnl_series`, `metrics`) needs no source data at all.
+The data declared by the saved config does not need to be present on
+disk: `Experiment.data` holds provider specs, which are pure values, so
+the rebuilt experiment only fails at `open_data` (i.e. at
+`run_experiment`) if the data has moved. Inspecting the persisted
+fields (`positions`, `pnl_series`, `metrics`) needs no data at all.
 
 Throws `ArgumentError` if the run folder or any of the expected files
-is missing.
+is missing, or if the manifest's `schema_version` is absent or differs
+from `RUN_SCHEMA_VERSION` (a run written before the data-kinds
+migration): rerun its config to regenerate it.
 """
 function load_run(store::RunStore, run_id::AbstractString)::ExperimentResult
     _assert_open(store)
     dir = run_dir(store, run_id)
     isdir(dir) || throw(ArgumentError("load_run: no run folder for id $run_id at $dir"))
 
+    manifest = _load_manifest(store, dir)
+    manifest.schema_version == RUN_SCHEMA_VERSION || throw(ArgumentError(
+        "load_run: run $run_id was written with manifest schema_version " *
+        "$(manifest.schema_version) (pre data-kinds); this store reads version " *
+        "$RUN_SCHEMA_VERSION only -- rerun the config to regenerate it"))
+
     cfg_path = joinpath(dir, "config.toml")
     isfile(cfg_path) || throw(ArgumentError("load_run: missing config.toml in $dir"))
     config_toml = read(cfg_path, String)
     exp = load_experiment_str(config_toml)
 
-    manifest = _load_manifest(store, dir)
-    positions = _load_positions(store, dir, exp.source.chain_source.underlying)
+    positions = _load_positions(store, dir)
     series = _load_pnl_series(store, dir, manifest)
     metrics = _load_metrics(store, dir, exp.outputs.metrics)
 
@@ -381,21 +378,24 @@ function _select_rows(store::RunStore, path::AbstractString, sql::AbstractString
     return collect(DBInterface.execute(store.con, sql))
 end
 
+# `SELECT *` so a manifest written without `schema_version` (an old run)
+# still reads; the missing column reports as version 0.
 function _load_manifest(store::RunStore, dir::AbstractString)
     path = joinpath(dir, "manifest.parquet")
-    rows = _select_rows(store, path,
-        "SELECT window_end_spot, n_opens, n_closes, n_unmarked FROM '$(_sql_pq_path(path))'")
+    rows = _select_rows(store, path, "SELECT * FROM '$(_sql_pq_path(path))'")
     length(rows) == 1 ||
         throw(ArgumentError("load_run: manifest.parquet must have exactly 1 row, got $(length(rows))"))
     r = first(rows)
+    version = :schema_version in propertynames(r) && r.schema_version !== missing ?
+        Int(r.schema_version) : 0
     return (window_end_spot=Float64(r.window_end_spot),
             n_opens=Int(r.n_opens),
             n_closes=Int(r.n_closes),
-            n_unmarked=Int(r.n_unmarked))
+            n_unmarked=Int(r.n_unmarked),
+            schema_version=version)
 end
 
-function _load_positions(store::RunStore, dir::AbstractString,
-                         underlying::Underlying)::Vector{Position}
+function _load_positions(store::RunStore, dir::AbstractString)::Vector{Position}
     path = joinpath(dir, "positions.parquet")
     rows = _select_rows(store, path,
         "SELECT leg_idx, underlying, strike, expiry, option_type, direction, " *
@@ -403,11 +403,7 @@ function _load_positions(store::RunStore, dir::AbstractString,
         "FROM '$(_sql_pq_path(path))' ORDER BY leg_idx")
     out = Position[]
     for r in rows
-        # `underlying` from the parquet should match the source's; trust the
-        # row but build a per-row Underlying so this stays correct if a future
-        # multi-symbol persistence schema lands.
-        u = String(r.underlying) == ticker(underlying) ? underlying :
-            Underlying(String(r.underlying))
+        u = Underlying(String(r.underlying))      # per row: the ledger may span symbols
         otype = String(r.option_type) == "C" ? Call : Put
         trade = Trade(u, Float64(r.strike), DateTime(r.expiry), otype;
                       direction=Int(r.direction), quantity=Float64(r.quantity))

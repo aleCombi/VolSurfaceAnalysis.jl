@@ -23,3 +23,4 @@ julia --project=. scripts/run_experiment.jl configs/noop_smoke.toml --save   # p
 - [docs/vision.md](docs/vision.md) -- where it's going
 - [docs/design.md](docs/design.md) -- coding rules
 - [docs/modules/](docs/modules) -- per-module notes
+- [docs/nvim.md](docs/nvim.md) -- exploring the repo in the Neovim workspace

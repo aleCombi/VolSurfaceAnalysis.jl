@@ -31,11 +31,12 @@ Rendered binaries are quarantined under each run's `artifacts/` subdir
 so they never sit as peers of the parquet; they are convenience
 snapshots, regenerable from `load_run`, not the source of truth.
 
-## `DataSource`-shaped, but for output
+## Reader-shaped, but for output
 
-`RunStore` mirrors `ParquetDataSource`: owns its DuckDB connection,
-exposes a `close` / `with_run_store` scoped form, and finalizer cleans
-up. Same pattern, opposite direction (writes instead of reads).
+`RunStore` mirrors the parquet readers' open/close pair: owns its
+DuckDB connection, exposes a `close` / `with_run_store` scoped form,
+and a finalizer cleans up. Same pattern, opposite direction (writes
+instead of reads).
 
 ## Public surface
 
@@ -61,11 +62,10 @@ coherent even though `name` is deliberately excluded from identity.
 rebuilds the live `Experiment` via `load_experiment_str`, and
 reconstructs `positions`, `pnl_series`, and the `metrics` `NamedTuple`
 (integer types preserved for `n_round_trips` / `n_opens` / `n_closes`,
-NaN / Inf preserved verbatim). The rebuilt `Experiment.source` does
-**not** need its data on disk -- `ParquetDataSource` validates roots
-lazily, so inspecting `positions` / `pnl_series` / `metrics` always
-works; only an actual `get_chain` / `get_spot` against a missing root
-throws.
+NaN / Inf preserved verbatim). The rebuilt `Experiment.data` does
+**not** need its data on disk -- it holds provider specs, pure values,
+so inspecting `positions` / `pnl_series` / `metrics` always works; only
+`run_experiment` (which opens the data) throws on a missing root.
 
 ### Cross-run queries
 
@@ -95,7 +95,7 @@ omitted-vs-explicit defaults, and machine cache knobs therefore do
 same folder in place.
 
 The manifest also records `core_hash` -- the hash of the
-backtest-determining inputs only (source, agent, window). Two runs that
+backtest-determining inputs only (data, clock, agent, window). Two runs that
 differ only in outputs (metrics / artifacts) share a `core_hash` but get
 distinct `run_id`s, so output variations of one backtest are detectable
 in a cross-run query:
@@ -108,11 +108,19 @@ DBInterface.execute(store.con, """
 ```
 
 Both hashes come from `to_dict`, an identity projection (in the
-experiment module) that omits non-result-affecting fields (cache sizes,
-the `root` shorthand-vs-explicit distinction). The verbatim
-`config.toml` is still stored -- for reading and for rebuilding the
-experiment on load -- but it is no longer what identity is computed
-from.
+experiment module) that emits one entry per data kind, the clock, the
+agent and the window, omitting non-result-affecting fields (cache
+sizes, readers, part order). The parquet specs' root sits in a
+reserved `dataset` slot of that projection, the place a logical
+dataset id and version would go. The verbatim `config.toml` is still
+stored -- for reading and for rebuilding the experiment on load -- but
+it is not what identity is computed from.
+
+**One-time id break.** The data-kinds migration changed the
+projection, so every run id written before it is stale. The manifest
+carries a `schema_version` outside the hash; `load_run` refuses a run
+whose version is absent or differs, with a message that says to rerun
+its config. No migration script: the store held one run at the time.
 
 ## Responsibility boundaries
 
@@ -152,6 +160,7 @@ from.
 | `commit_sha` | VARCHAR | git commit of the code that produced the run |
 | `dirty` | BOOLEAN | working tree had uncommitted changes |
 | `written_at` | TIMESTAMP | UTC time of the save |
+| `schema_version` | INTEGER | manifest schema version (`RUN_SCHEMA_VERSION`, currently 2); outside the hash |
 
 ### `metrics.parquet`
 
@@ -203,11 +212,11 @@ One row per round trip, post-sort by timestamp (matches `PnLSeries`).
 |---|---|
 | **Parquet + DuckDB-as-engine, no single-file DB** | Matches the `data` module's existing pattern. Files are inspectable from any parquet-aware tool; a single corrupt run doesn't take down the whole store; `rm -rf <run_dir>` is a valid delete. |
 | **Hive partition `run_id=<hash>`** | DuckDB and pandas / polars all understand the layout natively. Cross-run queries are one parquet glob, no separate manifest table to keep in sync. |
-| **`load_run` returns `ExperimentResult`, not a separate `StoredRun`** | Same type as `run_experiment` means same recipes / `show` / downstream consumers. The "what about missing source data?" objection is resolved by `ParquetDataSource`'s lazy root validation -- the rebuilt source just throws on first read if its data is gone, while positions / pnl / metrics remain inspectable. No separate stored-vs-live type needed. |
+| **`load_run` returns `ExperimentResult`, not a separate `StoredRun`** | Same type as `run_experiment` means same recipes / `show` / downstream consumers. The "what about missing source data?" objection is resolved by specs being pure values -- the rebuilt experiment only touches the data when run, while positions / pnl / metrics remain inspectable. No separate stored-vs-live type needed. |
 | **Long-form `metrics.parquet`** | Optional metrics come and go per run; a wide schema would force columns to NULL across runs and break naive `UNION ALL` reads. Long form is stable and trivially pivotable. |
 | **NaN / Inf preserved, not nulled** | A NaN sharpe (e.g. one trade, zero variance) is meaningful information about that run; collapsing it to NULL would lose the distinction from "metric not requested." |
 | **Caller passes the TOML bytes** | The TOML is the source of truth for what was run; pushing the bytes through `save_run` keeps the persistence layer ignorant of how the `Experiment` was built and avoids stashing config strings on `Experiment` itself. |
-| **DuckDB connection per store, exposed as `store.con`** | Same as `ParquetDataSource`. Lets viz / notebook code query without spawning a second DuckDB session. |
+| **DuckDB connection per store, exposed as `store.con`** | Same as the parquet readers. Lets viz / notebook code query without spawning a second DuckDB session. |
 | **Best-effort atomicity** | A write-to-tmp-then-rename pass is the right fix, but it complicates the first slice. The recovery story is "re-run the same config," which works because identity is content-addressed. |
 
 ## Future work

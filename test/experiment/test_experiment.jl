@@ -1,26 +1,34 @@
-# Tests for the Experiment orchestrator.
+# Tests for the Experiment orchestrator, on in-memory MarketData maps.
 
 const _EX_UND = Underlying("SPY")
+const _EX_USD = Currency("USD")
+const _EX_CLOCK = Clock{OptionQuote}(_EX_UND)
+
+function _ex_map(quotes::Vector{OptionQuote}, spots::Vector{SpotPrice}; r=0.04, q=0.015)
+    MarketData(InMemory(quotes), InMemory(spots),
+               Constant(RateCurve(_EX_USD, FlatCurve(r))),
+               Constant(DivCurve(_EX_UND, FlatCurve(q))),
+               SurfaceFrom(currency=_EX_USD))
+end
 
 function _ex_fixture()
     ts1 = DateTime(2024, 1, 15, 15, 30)
     ts2 = DateTime(2024, 1, 15, 15, 31)
     ts3 = DateTime(2024, 1, 15, 15, 32)
-    spot = 480.0; r = 0.04; q = 0.015
+    spot = 480.0
     expiry = DateTime(2024, 2, 16, 21, 0)
     mk_quote(ts, strike, otype, bid, ask) = OptionQuote(
         "X", _EX_UND, expiry, strike, otype,
         bid, ask, (bid + ask) / 2, missing, missing, missing, ts,
     )
-    mk_chain(ts) = [
-        mk_quote(ts, 480.0, Call, 5.00, 5.10),
-        mk_quote(ts, 480.0, Put,  4.80, 4.90),
-    ]
-    chains = Dict(ts1 => mk_chain(ts1), ts2 => mk_chain(ts2), ts3 => mk_chain(ts3))
-    spots  = Dict(ts1 => spot,           ts2 => spot,           ts3 => spot)
-    inner  = InMemoryDataSource(_EX_UND; chains=chains, spots=spots)
-    mds    = ModelDataSource(inner; rate=FlatCurve(r), div=FlatCurve(q))
-    (mds=mds, ts1=ts1, ts2=ts2, ts3=ts3, expiry=expiry, spot=spot)
+    quotes = OptionQuote[]
+    spots  = SpotPrice[]
+    for ts in (ts1, ts2, ts3)
+        push!(quotes, mk_quote(ts, 480.0, Call, 5.00, 5.10))
+        push!(quotes, mk_quote(ts, 480.0, Put,  4.80, 4.90))
+        push!(spots, SpotPrice(_EX_UND, spot, ts))
+    end
+    (data=_ex_map(quotes, spots), ts1=ts1, ts2=ts2, ts3=ts3, expiry=expiry, spot=spot)
 end
 
 # Policy that opens one long call at a chosen tick and does nothing else.
@@ -30,19 +38,31 @@ struct _ExOpenOnceAt <: Policy
 end
 
 function VolSurfaceAnalysis.decide(s::_ExOpenOnceAt, t::DateTime,
-                                   ::TimeCutModelDataSource,
+                                   ::TimeCut,
                                    ::AbstractVector{Position})::Vector{Trade}
     return t == s.when ? Trade[s.trade] : Trade[]
 end
 
+# Same, but its tick_times emits a candidate *after* the last quote, to
+# show the window end stays on the clock.
+struct _ExLateTicks <: Policy
+    when::DateTime
+    trade::Trade
+end
+VolSurfaceAnalysis.decide(s::_ExLateTicks, t::DateTime, ::TimeCut, ::AbstractVector{Position}) =
+    t == s.when ? Trade[s.trade] : Trade[]
+VolSurfaceAnalysis.tick_times(s::_ExLateTicks, ::MarketData, from::DateTime, to::DateTime) =
+    [s.when, to]
+
 @testset "Experiment: kwarg constructor round-trips fields" begin
     f = _ex_fixture()
     exp = Experiment(name="smoke", agent=StaticAgent(NoOpPolicy()),
-                     source=f.mds, from=f.ts1, to=f.ts3,
+                     data=f.data, clock=_EX_CLOCK, from=f.ts1, to=f.ts3,
                      outputs=OutputSpec(metrics=[:sharpe]))
     @test exp.name == "smoke"
     @test exp.agent isa StaticAgent
-    @test exp.source === f.mds
+    @test exp.data === f.data
+    @test exp.clock === _EX_CLOCK
     @test exp.from == f.ts1
     @test exp.to == f.ts3
     @test exp.outputs.metrics == [:sharpe]
@@ -51,7 +71,7 @@ end
 @testset "Experiment: default outputs = all registered metrics" begin
     f = _ex_fixture()
     exp = Experiment(name="default", agent=StaticAgent(NoOpPolicy()),
-                     source=f.mds, from=f.ts1, to=f.ts3)
+                     data=f.data, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
     @test Set(exp.outputs.metrics) ==
           Set([:sharpe, :sortino, :max_drawdown, :volatility, :profit_factor])
     @test exp.outputs.artifacts == [:equity_curve]
@@ -60,7 +80,7 @@ end
 @testset "run_experiment: NoOpPolicy -> empty result, provenance carried" begin
     f = _ex_fixture()
     exp = Experiment(name="noop", agent=StaticAgent(NoOpPolicy()),
-                     source=f.mds, from=f.ts1, to=f.ts3)
+                     data=f.data, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
     res = run_experiment(exp)
     @test res.experiment === exp
     @test isempty(res.positions)
@@ -70,16 +90,15 @@ end
     @test isnan(res.metrics.hit_rate)
 end
 
-@testset "run_experiment: single-fill leg past window-end -> case 1 mark at window-end spot" begin
-    # The leg's expiry (Feb 16) is past the window end (ts3 = Jan 15).
-    # _build_settle case 1 returns window_end_spot = f.spot. Timestamp is
-    # stamped at the leg's expiry, not at the window end (the new contract:
-    # residual entries are honestly stamped at the leg's own expiry).
+@testset "run_experiment: leg past the window end marks at the window end" begin
+    # The leg's expiry (Feb 16) is past the window end (ts3 = Jan 15), so
+    # settlement resolves the spot for this leg's own underlying at the
+    # window end. The entry is still stamped at the leg's expiry.
     f = _ex_fixture()
     trd = Trade(_EX_UND, 480.0, f.expiry, Call)
     exp = Experiment(name="case1-mark",
                      agent=StaticAgent(_ExOpenOnceAt(f.ts2, trd)),
-                     source=f.mds, from=f.ts1, to=f.ts3)
+                     data=f.data, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
     res = run_experiment(exp)
     @test length(res.positions) == 1
     @test length(res.pnl_series.pnl) == 1
@@ -91,9 +110,9 @@ end
     @test res.pnl_series.n_unmarked == 0
 end
 
-@testset "run_experiment: held-to-expiry leg inside window settles at expiry spot (case 2)" begin
-    # Build a tiny fixture whose source has a real bar at the leg's expiry,
-    # so `get_spot(source, expiry)` returns a number and case 2 succeeds.
+@testset "run_experiment: held-to-expiry leg inside window settles at its expiry spot" begin
+    # A map with a real spot at the leg's expiry, so the lookup at
+    # min(expiry, window_end) == expiry returns a record.
     ts1 = DateTime(2024, 1, 15, 15, 30)
     ts2 = DateTime(2024, 1, 15, 15, 31)
     ts3 = DateTime(2024, 1, 15, 15, 32)
@@ -101,17 +120,12 @@ end
     spot   = 480.0
     mk_q(ts, K) = OptionQuote("X", _EX_UND, expiry, K, Call,
                               5.00, 5.10, 5.05, missing, missing, missing, ts)
-    chains = Dict(ts1 => [mk_q(ts1, 480.0)],
-                  ts2 => [mk_q(ts2, 480.0)],
-                  ts3 => [mk_q(ts3, 480.0)])
-    spots  = Dict(ts1 => spot, ts2 => spot, ts3 => spot)
-    inner  = InMemoryDataSource(_EX_UND; chains=chains, spots=spots)
-    mds    = ModelDataSource(inner; rate=FlatCurve(0.04), div=FlatCurve(0.015))
-
+    data = _ex_map([mk_q(ts1, 480.0), mk_q(ts2, 480.0), mk_q(ts3, 480.0)],
+                   [SpotPrice(_EX_UND, spot, ts) for ts in (ts1, ts2, ts3)])
     trd = Trade(_EX_UND, 480.0, expiry, Call)
-    exp = Experiment(name="case2-held",
+    exp = Experiment(name="held-to-expiry",
                      agent=StaticAgent(_ExOpenOnceAt(ts2, trd)),
-                     source=mds, from=ts1, to=ts3)
+                     data=data, clock=_EX_CLOCK, from=ts1, to=ts3)
     res = run_experiment(exp)
     @test length(res.positions) == 1
     @test length(res.pnl_series.pnl) == 1
@@ -120,11 +134,71 @@ end
     @test res.pnl_series.n_unmarked == 0
 end
 
+@testset "run_experiment: settlement follows the trade, not the clock" begin
+    # A QQQ leg under a SPY clock. The engine has priced fills per trade
+    # since the data-kinds rewrite; settlement now agrees with it. QQQ is
+    # served but has no spot at the window end, so the lot is unmarked --
+    # a state the old past-the-window branch could not reach, because it
+    # returned a scalar computed once from the clock underlying.
+    ts1 = DateTime(2024, 1, 15, 15, 30)
+    ts3 = DateTime(2024, 1, 15, 15, 32)
+    qqq = Underlying("QQQ")
+    far = DateTime(2024, 2, 16, 21, 0)                 # past the window end
+    spy_q(ts) = OptionQuote("SPY", _EX_UND, far, 480.0, Call,
+                            5.00, 5.10, 5.05, missing, missing, missing, ts)
+    qqq_q = OptionQuote("QQQ", qqq, far, 400.0, Call,
+                        1.00, 1.10, 1.05, missing, missing, missing, ts1)
+    data = _ex_map([spy_q(ts1), spy_q(ts3), qqq_q],
+                   [SpotPrice(_EX_UND, 480.0, ts1), SpotPrice(_EX_UND, 480.0, ts3),
+                    SpotPrice(qqq, 400.0, ts1)])      # QQQ served, absent at ts3
+    exp = Experiment(name="foreign-leg",
+                     agent=StaticAgent(_ExOpenOnceAt(ts1, Trade(qqq, 400.0, far, Call))),
+                     data=data, clock=_EX_CLOCK, from=ts1, to=ts3)
+    res = run_experiment(exp)
+    @test length(res.positions) == 1
+    @test res.pnl_series.n_unmarked == 1               # QQQ has no spot at the window end
+    @test isempty(res.pnl_series.pnl)
+    @test res.pnl_series.window_end_spot == 480.0      # the clock underlying, provenance only
+end
+
+@testset "run_experiment: expiry inside the window without a spot -> unmarked" begin
+    ts1 = DateTime(2024, 1, 15, 15, 30)
+    ts3 = DateTime(2024, 1, 15, 15, 32)
+    expiry = DateTime(2024, 1, 15, 15, 31)             # no spot row at this instant
+    mk_q(ts) = OptionQuote("X", _EX_UND, expiry, 480.0, Call,
+                           5.00, 5.10, 5.05, missing, missing, missing, ts)
+    data = _ex_map([mk_q(ts1), mk_q(ts3)], [SpotPrice(_EX_UND, 480.0, ts) for ts in (ts1, ts3)])
+    trd = Trade(_EX_UND, 480.0, expiry, Call)
+    exp = Experiment(name="case2-unmarked",
+                     agent=StaticAgent(_ExOpenOnceAt(ts1, trd)),
+                     data=data, clock=_EX_CLOCK, from=ts1, to=ts3)
+    res = run_experiment(exp)
+    @test res.pnl_series.n_unmarked == 1
+    @test isempty(res.pnl_series.pnl)
+end
+
+@testset "run_experiment: window end is the last clock tick, not a later candidate or spot" begin
+    f = _ex_fixture()
+    later = f.ts3 + Hour(1)
+    # A spot exists after the last quote; tick_times also emits `to` as a
+    # candidate. The residual must still mark at the spot of the last
+    # *clock* tick (480), not the later spot (481).
+    spots = vcat([s for s in entry(f.data, SpotPrice).rows], [SpotPrice(_EX_UND, 481.0, later)])
+    data = _ex_map(entry(f.data, OptionQuote).rows, spots)
+    trd = Trade(_EX_UND, 480.0, f.expiry, Call)
+    exp = Experiment(name="window-end",
+                     agent=StaticAgent(_ExLateTicks(f.ts2, trd)),
+                     data=data, clock=_EX_CLOCK, from=f.ts1, to=later)
+    res = run_experiment(exp)
+    @test length(res.positions) == 1
+    @test res.pnl_series.window_end_spot == 480.0
+end
+
 @testset "run_experiment: requested optional metric appears in result" begin
     f = _ex_fixture()
     exp = Experiment(name="with-sharpe",
                      agent=StaticAgent(NoOpPolicy()),
-                     source=f.mds, from=f.ts1, to=f.ts3,
+                     data=f.data, clock=_EX_CLOCK, from=f.ts1, to=f.ts3,
                      outputs=OutputSpec(metrics=[:sharpe, :max_drawdown]))
     res = run_experiment(exp)
     @test haskey(res.metrics, :sharpe)
@@ -136,20 +210,39 @@ end
 @testset "run_experiment: unknown metric symbol errors" begin
     f = _ex_fixture()
     exp = Experiment(name="bogus", agent=StaticAgent(NoOpPolicy()),
-                     source=f.mds, from=f.ts1, to=f.ts3,
+                     data=f.data, clock=_EX_CLOCK, from=f.ts1, to=f.ts3,
                      outputs=OutputSpec(metrics=[:nonsense_metric]))
     @test_throws ErrorException run_experiment(exp)
 end
 
-@testset "run_experiment: empty time window errors" begin
+@testset "run_experiment: no clock tick in the window errors" begin
     f = _ex_fixture()
-    # Window strictly before any available ts.
     early = DateTime(2024, 1, 1, 0, 0)
     later = DateTime(2024, 1, 2, 0, 0)
     exp = Experiment(name="empty-window",
                      agent=StaticAgent(NoOpPolicy()),
-                     source=f.mds, from=early, to=later)
+                     data=f.data, clock=_EX_CLOCK, from=early, to=later)
     @test_throws ErrorException run_experiment(exp)
+    # ticks exist before `from` but none inside the window
+    after = Experiment(name="after-data", agent=StaticAgent(NoOpPolicy()),
+                       data=f.data, clock=_EX_CLOCK, from=f.ts3 + Hour(1), to=f.ts3 + Hour(2))
+    @test_throws ErrorException run_experiment(after)
+    # window-end spot missing at the last clock tick: SPY is served, but has
+    # no row at ts3, so this is the loud temporal error
+    thin_spots = _ex_map(entry(f.data, OptionQuote).rows,
+                         [SpotPrice(_EX_UND, f.spot, f.ts1)])
+    exp2 = Experiment(name="no-spot", agent=StaticAgent(NoOpPolicy()),
+                      data=thin_spots, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
+    @test_throws ErrorException run_experiment(exp2)
+    # nothing serves SpotPrice for SPY at all: structural, so it is named
+    no_spots = _ex_map(entry(f.data, OptionQuote).rows, SpotPrice[])
+    exp2b = Experiment(name="unserved-spot", agent=StaticAgent(NoOpPolicy()),
+                       data=no_spots, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
+    @test_throws UnservedSelector run_experiment(exp2b)
+    # a clock whose selector is not an Underlying cannot settle
+    exp3 = Experiment(name="ccy-clock", agent=StaticAgent(NoOpPolicy()),
+                      data=f.data, clock=Clock{RateCurve}(_EX_USD), from=f.ts1, to=f.ts3)
+    @test_throws ErrorException run_experiment(exp3)
 end
 
 @testset "run_experiment: provenance allows rerun via result.experiment" begin
@@ -157,7 +250,7 @@ end
     trd = Trade(_EX_UND, 480.0, f.expiry, Call)
     exp = Experiment(name="rerun",
                      agent=StaticAgent(_ExOpenOnceAt(f.ts2, trd)),
-                     source=f.mds, from=f.ts1, to=f.ts3)
+                     data=f.data, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
     res1 = run_experiment(exp)
     res2 = run_experiment(res1.experiment)
     @test res1.metrics.total_pnl == res2.metrics.total_pnl
@@ -186,17 +279,15 @@ function _strangle_ex_fixture()
                     missing, missing, missing, ts)
     end
 
-    mk_chain(ts) = OptionQuote[
-        mk_q(ts, K, e, K >= spot ? Call : Put)
+    quotes = OptionQuote[]
+    spots  = SpotPrice[]
+    for ts in (pre_ts, entry_ts, end_ts)
         for K in strikes, e in (e_target, e_far)
-    ] |> vec
-    chains = Dict(pre_ts => mk_chain(pre_ts),
-                  entry_ts => mk_chain(entry_ts),
-                  end_ts  => mk_chain(end_ts))
-    spots  = Dict(pre_ts => spot, entry_ts => spot, end_ts => spot)
-    inner  = InMemoryDataSource(_EX_UND; chains=chains, spots=spots)
-    mds    = ModelDataSource(inner; rate=FlatCurve(r), div=FlatCurve(q))
-    (mds=mds, pre_ts=pre_ts, entry_ts=entry_ts, end_ts=end_ts,
+            push!(quotes, mk_q(ts, K, e, K >= spot ? Call : Put))
+        end
+        push!(spots, SpotPrice(_EX_UND, spot, ts))
+    end
+    (data=_ex_map(quotes, spots; r, q), pre_ts=pre_ts, entry_ts=entry_ts, end_ts=end_ts,
      spot=spot, e_target=e_target)
 end
 
@@ -209,7 +300,7 @@ end
                                 quantity=1.0)
     exp = Experiment(name="strangle-e2e",
                      agent=StaticAgent(policy),
-                     source=f.mds, from=f.pre_ts, to=f.end_ts)
+                     data=f.data, clock=_EX_CLOCK, from=f.pre_ts, to=f.end_ts)
     res = run_experiment(exp)
 
     # The gate fires exactly once over [pre_ts, end_ts] -> 2 short legs opened.

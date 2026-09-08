@@ -18,7 +18,7 @@ which it was handed out.
 
 ```mermaid
 flowchart LR
-    Engine[Backtest engine] --> Cut[TimeCutModelDataSource]
+    Engine[Backtest engine] --> Cut[TimeCut]
     Engine --> Ledger[positions]
     Engine --> Clock[t]
     Cut --> D([decide])
@@ -38,15 +38,34 @@ produce the orders for this tick.
 ```julia
 abstract type Policy end
 
-decide(p::Policy, t::DateTime, data::TimeCutModelDataSource,
+decide(p::Policy, t::DateTime, data::TimeCut,
        positions::AbstractVector{Position}) -> Vector{Trade}
+
+tick_times(p::Policy, data::MarketData, from, to) -> Union{Nothing, Vector{DateTime}}
+
+declared_underlyings(p::Policy) -> Tuple of Underlying
 ```
 
-One method, four arguments, one return value. Concrete policies
-subtype `Policy` and implement `decide`. The empty return
-`Trade[]` is the "do nothing this tick" case and must be cheap --
-sparse policies (e.g. "trade once a day at 13:00") rely on it
-firing tens of thousands of times.
+One decision method, four arguments, one return value. Concrete
+policies subtype `Policy` and implement `decide`. The empty return
+`Trade[]` is the "do nothing this tick" case and must be cheap.
+Policies read data by kind and selector (`at(data, OptionQuote, u, t)`,
+`only_or_missing(at(data, VolatilitySurface, u, t))`), never by
+storage; "empty means absent" is the convention for every shape.
+
+`declared_underlyings` reports the underlyings a policy fixes in its own
+configuration, known without running it; the default is empty, meaning
+"cannot be checked at load". `load_experiment` uses it to enforce that an
+experiment ticks and trades on one underlying: the clock selector answers
+*when* to step, settlement and fills resolve prices per trade, and
+asserting the two agree is what keeps that safe. A policy that chooses
+its underlying per tick declares nothing and is simply not checked.
+
+`tick_times` is the optional sparse-schedule override: return the
+candidate timestamps in `[from, to]` (sorted, unique) and the engine
+calls `decide` only there; return `nothing` (the default) and the
+engine walks the experiment's declared clock. Candidates need not
+exist in the data.
 
 ### `NoOpPolicy`
 
@@ -65,15 +84,15 @@ a base case in property tests.
 | **Policy returns trade deltas, not a portfolio** | A policy's natural output is "orders to fire," not "the portfolio I want after this tick." Deltas keep the policy small (no need to redeclare unchanged positions), make the no-op case trivially `Trade[]`, and let the engine own the open-vs-close translation in one place. |
 | **Closes are counter-trades** | Rather than a separate `Close` action type or a mutable `Position`, a close is a regular `Trade` with opposite direction on the same contract. The ledger ends up holding both sides; net-open is a view (`sum(direction * quantity)` per contract). Keeps `Position` immutable and the engine path uniform: every order goes through `open_position`. A dedicated `closed::Vector{...}` register is a later convenience, not a primitive. |
 | **Stateless `decide`** | The policy struct holds only configuration. Any "state" the recurrence might want (rolling windows, last-action time, fitted predictions) is either derivable from `(t, data, positions)` plus config, or it belongs to an [`Agent`](agents.md) that hands out a fresh Policy when state advances. Stateless `decide` is easier to test (no setup), easier to replay deterministically, and avoids confusion about whether to mutate or rebuild between ticks. |
-| **No-lookahead is a type, not a convention** | `decide` accepts a [`TimeCutModelDataSource`](backtest.md), not a raw `ModelDataSource`. Through the supported accessor interface, queries strictly after `t` return `nothing` / `missing`. The legacy codebase enforced the same property via `HistoricalView` passed at runtime; the rebuild moves it into the function signature so accidental bypass is much harder. |
-| **`t` is an explicit argument** | Even though `data` is cut at `t`, schedule-driven policies that want to ask "is this my entry time?" shouldn't have to dig through `available_timestamps(data, ...)` for it. Making `t` explicit also gives the engine a trivially-cheap crosscheck against the cutoff. |
-| **No engine-side schedule protocol** | The legacy codebase had `entry_schedule(strategy)::Vector{DateTime}` driving the engine loop. The rebuild drops that: the engine walks every available timestamp and the policy gates inside `decide`. A scheduled policy's `decide` becomes a hash-lookup; the cost on minute-data over a year is ~7ms of waste, dominated by data IO. Removing the protocol means one less concept and a uniform driver shape. |
+| **No-lookahead is a type, not a convention** | `decide` accepts a [`TimeCut`](market_data.md), not the bare map. Every shape is empty strictly after `t`, and reads a derived provider makes on the policy's behalf go through the same cut. The legacy codebase enforced the same property via `HistoricalView` passed at runtime; the rebuild moves it into the function signature and into the data layer. |
+| **`t` is an explicit argument** | Even though `data` is cut at `t`, schedule-driven policies that want to ask "is this my entry time?" shouldn't have to dig through `timestamps(data, ...)` for it. Making `t` explicit also gives the engine a trivially-cheap crosscheck against the cutoff. |
+| **Gate inside `decide`, schedule with `tick_times`** | The engine's grid is the declared clock; a scheduled policy still gates inside `decide` (cheap, correct on any clock) and may narrow the engine's calls with `tick_times`. The window end stays a clock property, so the schedule can never move the settlement. |
 | **Policy / Agent split (RL convention)** | "Policy = the decide function, Agent = the thing that carries the policy and the machinery that changes it" is the Sutton-&-Barto split. The rebuild adopts it verbatim rather than overloading one type with both responsibilities. A policy that depends on a fitted ridge model is still a frozen Policy; the *learning* that produced it lives in its [`Agent`](agents.md). |
 
 ## Responsibility boundaries
 
 **Owns:** the `Policy` abstract type, the `decide` contract, the
-`NoOpPolicy` base case.
+`declared_underlyings` trait, the `NoOpPolicy` base case.
 
 **Does NOT own:**
 
@@ -110,12 +129,13 @@ struct DailyShortStrangle <: Policy
 end
 
 function decide(p::DailyShortStrangle, t::DateTime,
-                data::TimeCutModelDataSource, ::AbstractVector{Position})
+                data::TimeCut, ::AbstractVector{Position})
     Time(t) == p.entry_time || return Trade[]                  # cheap gate
-    surface = get_surface(data, t); surface === nothing && return Trade[]
+    surface = only_or_missing(at(data, VolatilitySurface, p.underlying, t))
+    ismissing(surface) && return Trade[]
     expiry  = _first_expiry_on_or_after(surface, t + p.expiry_interval)
     expiry === nothing && return Trade[]
-    chain   = get_chain(data, t); chain === nothing && return Trade[]
+    chain   = at(data, OptionQuote, p.underlying, t); isempty(chain) && return Trade[]
 
     K_put_raw  = invert_delta(surface, expiry, Put,  p.put_delta)
     K_call_raw = invert_delta(surface, expiry, Call, p.call_delta)
@@ -135,12 +155,13 @@ end
 
 Three properties worth noting:
 
-- **Cheap gate first.** `Time(t) == entry_time` runs before any surface
-  lookup; on a per-minute SPY backtest the policy fires `decide` tens of
-  thousands of times and the fast path must not touch chains.
+- **Cheap gate first, sparse schedule second.** `Time(t) == entry_time`
+  runs before any surface lookup, and `tick_times` emits one candidate
+  per calendar day at `entry_time`, so a ten-year run is a few thousand
+  `decide` calls whatever the clock.
 - **Snap against the chain, not the slice.** `invert_delta` returns a
   *continuous* target K. The engine's `resolve_quote` requires an exact
-  match on both strike *and* `option_type` against `get_chain(cut, t)`.
+  match on both strike *and* `option_type` against the quote chain at `t`.
   `slice.strikes` is the union of strikes that survived IV inversion --
   but per strike, only one side is retained by `build_surface._pick_otm`,
   so a slice strike near the spot may be Put-quoted only or Call-quoted
@@ -160,11 +181,6 @@ Three properties worth noting:
   state really is Policy-scoped, the signature can grow to
   `decide(p, t, data, positions, state) -> (orders, state')` with a
   default `init_state(p, _) = nothing`.
-- **Policy-controlled tick cadence.** If a policy is sparse on a
-  high-frequency tick stream and per-tick gating starts to matter,
-  add an opt-in `tick_times(policy, source)` override returning the
-  explicit timestamps to call `decide` at. Default is "every
-  available timestamp."
 - **Structures (iron condor, strangle, vertical) as first-class.**
   Today legs are constructed inline -- `DailyShortStrangle` builds two
   `Trade`s directly in `decide`. A scheduled iron condor would follow
@@ -177,7 +193,7 @@ Three properties worth noting:
   tells us what the helper surface should expose.
 - **Live-trading bridge.** The same `decide` signature can drive a
   live loop: replace the backtest engine with one that resolves
-  quotes from a broker feed instead of `get_chain`, with the same
+  quotes from a broker feed instead of the quote chain, with the same
   Agent handing out the same Policy.
 
 ## Layout

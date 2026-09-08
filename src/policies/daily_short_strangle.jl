@@ -7,7 +7,8 @@
 #
 # Engineering notes:
 # - The cheap gate `Time(t) == entry_time` runs before any surface lookup;
-#   the engine fires `decide` on every available timestamp.
+#   `tick_times` limits the engine to one candidate per day, but the gate
+#   keeps `decide` correct on any clock.
 # - Continuous `invert_delta` returns a target strike inside the slice's
 #   observed strike bracket; we then snap to the nearest strike actually
 #   in the slice, because `resolve_quote` in the engine requires an exact
@@ -112,15 +113,17 @@ function _snap_to_sorted(sorted_strikes::Vector{Float64},
 end
 
 """
-    tick_times(p::DailyShortStrangle, source, from, to) -> Vector{DateTime}
+    tick_times(p::DailyShortStrangle, data, from, to) -> Vector{DateTime}
 
 Emit one candidate timestamp per calendar day in `[from, to]`, at the
 policy's `entry_time`. Candidates that fall outside the data's chain
-coverage produce `Trade[]` inside `decide` (`get_surface` returns
-`nothing`), so non-trading days (weekends / holidays) are tolerated
-without consulting `available_timestamps` first.
+coverage produce `Trade[]` inside `decide` (no surface at that
+instant), so non-trading days (weekends / holidays) are tolerated
+without consulting the data's timestamps first.
 """
-function tick_times(p::DailyShortStrangle, ::ModelDataSource,
+declared_underlyings(p::DailyShortStrangle) = (p.underlying,)
+
+function tick_times(p::DailyShortStrangle, ::MarketData,
                     from::DateTime, to::DateTime)::Vector{DateTime}
     out = DateTime[]
     d = Date(from)
@@ -134,15 +137,15 @@ function tick_times(p::DailyShortStrangle, ::ModelDataSource,
 end
 
 function decide(p::DailyShortStrangle, t::DateTime,
-                data::TimeCutModelDataSource,
+                data::TimeCut,
                 ::AbstractVector{Position})::Vector{Trade}
     Time(t) == p.entry_time || return Trade[]                     # cheap gate
-    surface = get_surface(data, t)
-    surface === nothing && return Trade[]
+    surface = only_or_missing(at(data, VolatilitySurface, p.underlying, t))
+    ismissing(surface) && return Trade[]
     expiry = _first_expiry_on_or_after(surface, t + p.expiry_interval)
     expiry === nothing && return Trade[]
-    chain = get_chain(data, t)
-    chain === nothing && return Trade[]
+    chain = at(data, OptionQuote, p.underlying, t)
+    isempty(chain) && return Trade[]
 
     K_put_raw  = invert_delta(surface, expiry, Put,  p.put_delta)
     K_call_raw = invert_delta(surface, expiry, Call, p.call_delta)

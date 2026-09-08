@@ -10,7 +10,8 @@ function Base.show(io::IO, ::MIME"text/plain", r::ExperimentResult)
     nrts   = length(s.pnl)
     println(io, "ExperimentResult: ", e.name)
     println(io, "  window      ", e.from, "  to  ", e.to)
-    println(io, "  source      ", typeof(e.source))
+    println(io, "  data        ", join((kind_name(kind(p)) for p in e.data.entries), ", "))
+    println(io, "  clock       ", kind_name(kind(e.clock)), " / ", e.clock.sel)
     println(io, "  agent       ", typeof(e.agent))
     println(io, "  positions   ", length(r.positions),
                 "  (fills: ", nfills,

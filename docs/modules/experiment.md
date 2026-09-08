@@ -1,7 +1,7 @@
 # `experiment` module
 
-One-shot orchestrator: wires `(Agent, ModelDataSource, time window,
-requested metrics)` into a single rerunnable record. Owns one
+One-shot orchestrator: wires `(Agent, MarketData specs, Clock, time
+window, requested metrics)` into a single rerunnable record. Owns one
 struct, one result wrapper, one entry point. Train / val / test
 splits, refit cadence, and learning live inside the
 [`Agent`](agents.md); the `Experiment` only sees the evaluation
@@ -11,9 +11,9 @@ window.
 
 ```mermaid
 flowchart LR
-    Exp[Experiment] --> RB([run_backtest])
+    Exp[Experiment] -->|open_data| RB([run_backtest])
     RB -->|positions| PS([pnl_series])
-    Exp -->|spot at to| PS
+    Exp -->|spot at last clock tick| PS
     PS -->|PnLSeries| CM([compute_metrics])
     Exp -->|requested| CM
     CM -->|NamedTuple| ER[ExperimentResult]
@@ -22,11 +22,14 @@ flowchart LR
     Exp -->|provenance| ER
 ```
 
-Per call to `run_experiment`: tick the engine, resolve a settlement
-spot at the last available timestamp `<= exp.to`, aggregate the
-ledger into a `PnLSeries`, compute always-on plus requested optional
-metrics, and pack everything (including the originating `Experiment`)
-into one `ExperimentResult`.
+Per call to `run_experiment`: open the data (`with_data`), tick the
+engine on the clock, resolve the **last clock tick** `<= exp.to` and the
+clock underlying's spot there, aggregate the ledger into a `PnLSeries`
+(each residual lot settled from its own trade), compute
+always-on plus requested optional metrics, close the data, and pack
+everything (including the originating `Experiment`) into one
+`ExperimentResult`. Everything that touches readers runs inside
+`with_data`; the `Experiment` itself holds specs only.
 
 ## The abstraction
 
@@ -41,13 +44,14 @@ OutputSpec(; metrics=<all registered>, metric_params=Dict(), artifacts=[:equity_
 struct Experiment
     name    :: String
     agent   :: Agent
-    source  :: ModelDataSource
+    data    :: MarketData      # provider specs, one per kind; opened per run
+    clock   :: Clock           # tick grid: kind + selector; core identity
     from    :: DateTime
     to      :: DateTime
     outputs :: OutputSpec
 end
 
-Experiment(; name, agent, source, from, to, outputs=OutputSpec())
+Experiment(; name, agent, data, clock, from, to, outputs=OutputSpec())
 
 struct ExperimentResult
     experiment :: Experiment
@@ -57,7 +61,7 @@ struct ExperimentResult
 end
 
 run_experiment(exp::Experiment) -> ExperimentResult
-core_hash(exp) :: String   # backtest identity (source, agent, window)
+core_hash(exp) :: String   # backtest identity (data, clock, agent, window)
 full_hash(exp) :: String   # core + outputs; the run's id in the KB
 ```
 
@@ -88,9 +92,9 @@ to remember any other state.
 sub-windowed (train on `[from, t_split]` and evaluate on
 `[t_split, to]`, walk-forward refits inside the window, lookback
 buffers warmed on data *before* `from`) is the `Agent`'s concern.
-The Agent receives a `TimeCutModelDataSource` per tick whose `inner`
-is the full `ModelDataSource` -- it can read history before `from`
-freely, and only data strictly after the current tick is blocked.
+The Agent receives a `TimeCut` per tick over the full reader map --
+it can read history before `from` freely, and only data strictly after
+the current tick is blocked.
 
 ## Key decisions
 
@@ -98,12 +102,15 @@ freely, and only data strictly after the current tick is blocked.
 |---|---|
 | **`run_experiment`, not `run`** | `Base.run` is exported and dispatches on `Cmd`; shadowing it for a domain verb is exactly the convention warning every Julia style guide gives. `run_experiment` also reads as a peer of `run_backtest`. |
 | **Result carries the full `Experiment`, not just `name`** | Rerun is the primary use case for provenance. `run_experiment(result.experiment)` is the obvious primitive; a bare `name` would force a sidecar registry to look up the rest. The cost is one cheap struct reference. |
-| **Per-leg settlement, window-end spot for open residuals** | Each round-trip leg settles at its own `trade.expiry` via `get_spot`; legs whose expiry is past the window mark at the window-end spot (`get_spot(source, last_ts_in_window)`); legs whose expiry-time spot is missing count in `n_unmarked` rather than silently substituting a wrong number. |
+| **Window end = last clock tick** | The window end is the timestamp of `asof` on the clock's kind and selector at `exp.to` (one partition walk, no scan). A spot after the last tick, or a `tick_times` candidate past the data, can never move the residual mark. |
+| **Settlement follows the trade, not the clock** | Each residual lot settles at the spot of **its own trade's underlying**, at `min(trade.expiry, window_end)`: held-to-expiry legs use their expiration spot, legs still open past the window mark at the window end, and both resolve for the leg's own selector -- the same one the engine priced its fill against. A clock is a tick grid; its selector answers *when* to step, not *whose price*. A leg whose spot is missing at that instant counts in `n_unmarked` rather than silently substituting a wrong number. A `spot_for` remap on the surface provider prices the surface, not fills or settlement. |
+| **The clock underlying and a declared policy underlying must agree** | One experiment, one underlying is the real invariant here, and `load_experiment` asserts it rather than assuming it: it errors when `declared_underlyings(agent)` is non-empty and does not contain the clock selector. That is what makes settling past the window end safe by construction. A policy that chooses its underlying per tick declares nothing and is not checked at load; comparing at fill time is a follow-up. |
+| **Specs in, readers scoped to the run** | `Experiment.data` holds pure spec values (hashable, persistable); `run_experiment` opens them with `with_data` and closes them on every exit path. Rehydrating a saved run needs no data on disk until it is actually run. |
 | **Always-on metrics not in the output spec** | They are computed unconditionally and cost nothing extra. Listing them in `outputs.metrics` would force every experiment to repeat a boilerplate list and would imply they were opt-in, which they are not. |
 | **`metrics::Vector{Symbol}`, not `Vector{Function}`** | Symbols survive serialization to disk (now exercised by the TOML config loader), read cleanly in config dumps, and let `compute_metrics` carry the per-symbol default kwargs in one place ([`compute_metrics`](metrics.md)). Function references would skip the table at the cost of looking less like a config artifact. |
 | **Per-metric kwargs on `OutputSpec.metric_params`** | Non-default conventions (e.g. Sharpe at a different `risk_free`) ride in `OutputSpec.metric_params` (`Dict{Symbol,NamedTuple}`) and flow through `compute_metrics`'s `kwargs`. They are outputs, so they are part of `full_hash` but not `core_hash` -- a parameter change is a new run over the same backtest. |
 | **Identity from the resolved experiment, not config bytes** | `full_hash` / `core_hash` are computed from `to_dict(exp)` over the *resolved* experiment (`identity.jl`), so identity is insensitive to how the config was spelled and separates outputs from the backtest. The [`persistence`](persistence.md) layer records them; it does not compute them. |
-| **`run_experiment` errors loudly on missing data** | Empty time window or a missing settlement spot both indicate the experiment is mis-specified or the data source has gaps the caller did not expect. Silent zeros would invent a "result" that doesn't exist. |
+| **`run_experiment` errors loudly on missing data** | No clock tick in the window, a missing settlement spot, or a clock whose selector is not an `Underlying` all indicate the experiment is mis-specified or the data has gaps the caller did not expect. Silent zeros would invent a "result" that doesn't exist. |
 
 ## Responsibility boundaries
 
@@ -130,48 +137,64 @@ via `identity.jl`).
 
 | Condition | Behavior |
 |---|---|
-| Empty time window (`available_timestamps(source, from, to)` empty) | `run_experiment` errors with the window and experiment name. |
-| Settlement spot missing at the last in-window timestamp | `run_experiment` errors with the timestamp and experiment name. |
+| No clock tick in `[from, to]` | `run_experiment` errors with the window and experiment name. |
+| Clock underlying's spot missing at the last clock tick | `run_experiment` errors with the timestamp and experiment name. |
+| A residual lot's underlying is served but has no spot at `min(expiry, window_end)` | The lot counts in `pnl_series.n_unmarked` and is excluded from realized PnL. |
+| A residual lot's underlying is served by nothing | `at` throws `UnservedSelector`, naming `SpotPrice` and that underlying. |
+| A declared policy underlying differs from the clock selector | `load_experiment` errors naming both. |
+| Data root missing on this machine | `open_data` throws `ArgumentError` at the start of the run; loading the config succeeds. |
 | `exp.outputs.metrics` contains an unknown symbol | `compute_metrics` errors with the offending symbol and the known list. |
 | Agent / Policy never trades | `result.positions` and `result.pnl_series.pnl` are empty; always-on metrics are `0.0` / `0` / `NaN` per their empty-series conventions. |
-| Spot present but no fills happened | Settlement spot is recorded on `pnl_series` even when unused -- harmless and keeps the field non-optional. |
+| Spot present but no fills happened | `window_end_spot` is recorded on `pnl_series` even when unused -- it is provenance, and the field stays non-optional. |
 
 ## Config loading
 
 A TOML file resolves to an `Experiment` via `load_experiment(path)`.
-Schema is a flat header (`name`, `from`, `to`) plus nested tables:
-`[source]`, `[agent]`, and an optional `[outputs]`. Every sum-type
-(`DataSource`, `Curve`, `QuoteSynthesizer`, `Policy`, `Agent`) is keyed
-by a string `type` discriminator; the rest of that table is forwarded to
-the matching builder. `[outputs]` lists `metrics` / `artifacts` plus
-per-metric `[outputs.metric_params.<m>]`; omitted, it defaults to all
-metrics and the default artifacts. Legacy top-level `metrics` is rejected
-with a clear error; metrics must live under `[outputs]`.
+Schema: a flat header (`name`, `from`, `to`, `clock`) plus nested
+tables: one `[data.<kind>]` table per kind, `[agent]`, and an optional
+`[outputs]`. Every sum-type (data provider, `Curve`, `QuoteSynthesizer`,
+`Policy`, `Agent`) is keyed by a string `type` discriminator; the rest
+of that table is forwarded to the matching builder. `[outputs]` lists
+`metrics` / `artifacts` plus per-metric `[outputs.metric_params.<m>]`;
+omitted, it defaults to all metrics and the default artifacts. The old
+top-level `metrics` and the old `[source]` table are rejected with a
+pointer here.
 
 ```toml
-name = "noop_smoke"
-from = 2024-01-16T14:30:00
-to   = 2024-01-16T14:35:00
+name  = "noop_smoke"
+from  = 2024-01-16T14:30:00
+to    = 2024-01-16T14:35:00
+clock = { kind = "option_quote", underlying = "SPY" }
 
 [outputs]                      # optional; omit for all-metrics defaults
 metrics = ["sharpe", "max_drawdown"]
 
-[source]
-type       = "parquet"
+[data.option_bar]
+type = "parquet_option_bars"
+root = "C:/data/polygon/options_1min"
+
+[data.option_quote]
+type = "from_bars"
+synthesizer = { type = "ohlcv_spread", lambda = 0.7 }
+
+[data.spot_price]
+type = "parquet_spots"
+root = "C:/data/polygon/spots_1min"
+
+[data.rate_curve]
+type = "constant"
+currency = "USD"
+value = 0.04                   # or curve = { type = "pc", knots = [...], values = [...] }
+
+[data.div_curve]
+type = "constant"
 underlying = "SPY"
-root       = "C:/data/polygon"
-
-[source.synthesizer]
-type   = "ohlcv_spread"
-lambda = 0.7
-
-[source.rate]
-type  = "flat"
-value = 0.04
-
-[source.div]
-type  = "flat"
 value = 0.015
+
+[data.vol_surface]
+type = "surface_from"
+currency = "USD"
+# spot_for = { SPY = "SPX" }   # optional remap of the pricing spot
 
 [agent]
 type = "static"
@@ -180,12 +203,61 @@ type = "static"
 type = "noop"
 ```
 
+The loader owns the only string-to-kind table:
+
+| table name | kind | provider types |
+|---|---|---|
+| `option_bar` | `OptionBar` | `parquet_option_bars` |
+| `option_quote` | `OptionQuote` | `from_bars` |
+| `spot_price` | `SpotPrice` | `parquet_spots` |
+| `rate_curve` | `RateCurve` | `constant` (`currency`) |
+| `div_curve` | `DivCurve` | `constant` (`underlying`) |
+| `vol_surface` | `VolatilitySurface` | `surface_from` (`currency`, optional `spot_for`, optional `lookback_ticks`) |
+
+`by_selector` composes any kind: every key other than `type` is a
+selector naming a sub-table (`SPY = { type = "parquet_spots", root =
+... }`). The clock's selector key follows its kind (`underlying` or
+`currency`).
+
+Load-time checks, each with a clear message: every table name is a
+known kind; the built spec serves that kind; every derived spec's input
+kinds are present; every spec has a lifecycle pair; every selector a
+derived spec `demands` statically is one the map `serves`; the clock's
+kind has a table and its selector has the right type.
+
+The selector-demand check is a **fast path, not the mechanism**. A
+mistyped currency on a `vol_surface` table then fails in a second rather
+than after a backtest has been running, but the guarantee comes from
+`serves` in the four map-level shapes (see
+[`market_data`](market_data.md)). It skips providers that answer
+`missing`, which is what keeps it off the filesystem: a parquet spec
+cannot answer until it is opened, so a config is never validated by
+probing a data root. Cache sizes are
+`open_data` kwargs, never config, never identity; the data roots *are*
+identity (the reserved `dataset` slot of the parquet specs), so the
+same config on a machine with the data elsewhere is a distinct run.
+
+A spec field that changes *which records a policy sees* is identity, and
+`lookback_ticks` on `surface_from` is one: it decides how far back `asof`
+walks for a surface, so it changes results. It is emitted by `to_dict`
+always, not omitted when it takes its default -- identity is projected
+from the resolved experiment, and the omit-when-default trick on
+`Constant`'s visibility stamp is a documented exception, not the house
+style. Consequence: rerunning an existing config that has a
+`[data.vol_surface]` table produces a new `run_id`, so it lands beside
+the old run rather than replacing it. `[data.vol_surface]` is also the
+one table that rejects unknown keys, because a typo there would take the
+default silently and fork identity from intent.
+
 New concrete types register themselves by adding one entry to the
-relevant builder table (`_DATA_SOURCE_BUILDERS`, `_CURVE_BUILDERS`,
-`_SYNTHESIZER_BUILDERS`, `_POLICY_BUILDERS`, `_AGENT_BUILDERS`) -- same
-pattern as `_METRIC_TABLE` in [`metrics`](metrics.md). A new sum-type
-also needs a `to_dict` method (`identity.jl`) so it contributes to the
-run hashes.
+relevant builder table (`_PROVIDER_BUILDERS`, `_CURVE_BUILDERS`,
+`_SYNTHESIZER_BUILDERS`, `_POLICY_BUILDERS`, `_AGENT_BUILDERS`) -- same pattern as
+`_METRIC_TABLE` in [`metrics`](metrics.md). A new sum-type also needs a
+`to_dict` method (`identity.jl`) so it contributes to the run hashes; a
+new provider spec needs `kind`, `inputs` (if derived), a lifecycle
+pair, and its `to_dict`; a closed-world provider also needs `serves` and
+`served_description`, and a derived spec that names selectors in its own
+configuration should implement `demands`.
 
 Run from the CLI:
 

@@ -22,21 +22,24 @@ duration of that tick.
 abstract type Policy end
 
 """
-    decide(policy::Policy, t::DateTime, data::TimeCutModelDataSource,
+    decide(policy::Policy, t::DateTime, data::TimeCut,
            positions::AbstractVector{Position}) -> Vector{Trade}
 
 Return the trades the policy wants to fire at time `t`. An empty vector
 means "no action this tick." Closes are emitted as counter-trades.
 
-`data` is a [`TimeCutModelDataSource`](@ref) cut to `t`; the type signature
-makes the supported data interface no-lookahead by construction. Accessors on
-`data` return absent values for timestamps strictly after `t`.
+`data` is a [`TimeCut`](@ref) of the market data at `t`; the type
+signature makes the supported data interface no-lookahead by
+construction. Every shape on `data` is empty for timestamps strictly
+after `t`, including reads made by derived providers on the policy's
+behalf. Policies name kinds and selectors (`at(data, OptionQuote,
+underlying, t)`), never storage.
 
 `positions` is the full ledger of fills so far (open *and* offsetting
 closes). Policies that want only currently-open net positions can
 derive that view by netting `direction * quantity` per contract.
 """
-function decide(::Policy, ::DateTime, ::TimeCutModelDataSource, ::AbstractVector{Position})::Vector{Trade}
+function decide(::Policy, ::DateTime, ::TimeCut, ::AbstractVector{Position})::Vector{Trade}
     error("decide not implemented for this Policy")
 end
 
@@ -48,24 +51,40 @@ and as a base case in tests.
 """
 struct NoOpPolicy <: Policy end
 
-decide(::NoOpPolicy, ::DateTime, ::TimeCutModelDataSource, ::AbstractVector{Position}) = Trade[]
+decide(::NoOpPolicy, ::DateTime, ::TimeCut, ::AbstractVector{Position}) = Trade[]
 
 """
-    tick_times(policy::Policy, source::ModelDataSource,
+    declared_underlyings(policy::Policy) -> Tuple of Underlying
+
+The underlyings a policy fixes in its own configuration, known without
+running it. Empty when it declares none, which means it cannot be checked
+at load -- a policy that chooses its underlying per tick is the case the
+default covers.
+
+`load_experiment` uses it to enforce the real invariant of this codebase:
+one experiment, one underlying. The clock selector answers *when* to step,
+not *whose price*, and settlement resolves per trade; asserting the two
+agree is what makes that safe by construction rather than by assumption.
+"""
+declared_underlyings(::Policy) = ()
+
+"""
+    tick_times(policy::Policy, data::MarketData,
                from::DateTime, to::DateTime) -> Union{Nothing, Vector{DateTime}}
 
 Optional override letting a sparse policy tell the engine "I only need to
 be called at these specific timestamps in `[from, to]`." Default returns
-`nothing`, in which case the engine falls back to walking every
-`available_timestamps(source, from, to)` and the policy gates inside
-`decide`. Concrete policies whose `decide` is a hard no-op on most ticks
-(e.g. once-a-day-at-19:30 strategies on minute data) can implement this
-to skip the engine churn entirely.
+`nothing`, in which case the engine walks the experiment's declared
+clock and the policy gates inside `decide`. Concrete policies whose
+`decide` is a hard no-op on most ticks (e.g. once-a-day-at-19:30
+strategies on minute data) can implement this to skip the engine churn
+entirely.
 
-Implementations are not required to filter against `available_timestamps`
-themselves -- the engine treats the returned vector as candidates and
-tolerates timestamps where no chain exists (`decide` will see
-`get_surface(...) === nothing` and return `Trade[]`).
+Implementations are not required to filter against the data's
+timestamps -- the engine treats the returned vector as candidates and
+tolerates timestamps where no chain exists (`decide` sees an empty
+result and returns `Trade[]`). The experiment's window end is still the
+last *clock* tick, never a candidate emitted here.
 
 **Contract** (the engine trusts the return verbatim -- no sort, dedupe, or
 range filter is applied at `run_backtest`):
@@ -79,4 +98,4 @@ For agent-level overrides that union per-policy schedules, normalize
 (sort + unique) inside the agent's `tick_times` implementation rather
 than relying on the engine.
 """
-tick_times(::Policy, ::ModelDataSource, ::DateTime, ::DateTime) = nothing
+tick_times(::Policy, ::MarketData, ::DateTime, ::DateTime) = nothing
