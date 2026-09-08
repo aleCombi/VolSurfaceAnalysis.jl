@@ -103,54 +103,23 @@ policy underlying matches it -- one experiment, one underlying.
 `scripts/run_experiment.jl --out-dir <dir>` renders the equity-curve
 artifact from any config (via `scripts/lib/artifacts.jl` + `viz/pnl.jl`).
 
-The review of the data-kinds branch (PR #9) then found six correctness
-defects that were all one stance: a question that could not be answered
-was reported as an ordinary empty result, and every consumer downstream
-correctly concluded it had nothing to do. **Empty is now reserved for
-"served, and nothing at this instant"; every other unanswerable question
-has a name.** `serves(m, R, sel)` answers the structural question and the
-map-level shapes check it, so an unserved selector throws
-`UnservedSelector` instead of vanishing; two spot rows at one instant
-collapse if identical and throw `ConflictingRecords` if they disagree;
-the surface `asof` walks back past an unbuildable chain under a
-`lookback_ticks` bound and throws `DerivationExhausted` past it; a
-`Constant` honours its own visibility stamp in `asof` as it already did
-in the other three shapes; and settlement follows each lot's own trade
-rather than the clock, with `load_experiment` asserting that a declared
+The review of the data-kinds branch (PR #9) found six correctness
+defects that were one stance: an unanswerable question reported as an
+ordinary empty result, so every consumer downstream correctly concluded
+it had nothing to do. That stance is now design rule 7 and the
+`market_data` protocol enforces it: `serves` answers the structural
+question and the map-level shapes check it; two spot rows at one instant
+collapse if identical and throw `ConflictingRecords` if they disagree,
+on every spot shape including `asof`; the surface `asof` walks back under
+a `lookback_ticks` bound and throws `DerivationExhausted` past it; a
+`Constant` honours its visibility stamp in every shape; settlement
+follows each lot's own trade, with `load_experiment` asserting a declared
 policy underlying matches the clock selector. The partition convention is
-tightened to time-ordered, and SQL range bounds keep millisecond
-precision. Decisions in
-[proposals/pr9_correctness_fixes.md](proposals/pr9_correctness_fixes.md),
-commit sequence and open design choices in
-[proposals/pr9_implementation_plan.md](proposals/pr9_implementation_plan.md),
-deferred items in
-[proposals/pr9_remaining_findings.md](proposals/pr9_remaining_findings.md).
-One regression testset per finding lives in
-`test/regressions/test_review_findings.jl` and is part of the gate. Two
-items came out of implementing it, in
-[proposals/pr9_followups.md](proposals/pr9_followups.md); making
-`InMemory` reject conflicting rows the way the parquet reader does stays
-open — decided, but it needs a per-kind "one record per instant" trait
-first.
-
-That fix sequence was then itself reviewed, in
-[proposals/pr9_fix_review.md](proposals/pr9_fix_review.md): the six
-findings are fixed at the level their decisions asked for, and three
-things came out of it, all landed. The spot `asof` path that bypassed
-the collapse-or-throw rule is **closed** — it takes its winning instant
-from the backward walk and reads it through `between`, so every spot read
-obeys the rule by construction. The review also measured why the cheap
-version of that fix would not have done: reading one block means reading
-one partition, so a conflict across the overlap came back as a number
-nobody verified. Two smaller items with it: decision 5's justification
-still cited a partition-overlap permission the next commit had withdrawn,
-and `DerivationExhausted` named an instant one millisecond before any it
-had tried. **Gate after them: 1198 passed, 0 failed.**
-
-**Gate run** (PR #9 step 10, this commit's tree): `Pkg.test()` on the
-DevBox (2 cores, 3.7 GB, Julia 1.12.7) — **1181 passed, 0 failed**, 1m02
-wall, including the six regression testsets. The per-commit runs were
-subsets; this is the only full-suite run of the sequence.
+time-ordered with a one-day spill allowance, and SQL range bounds keep
+millisecond precision. One regression testset per finding lives in
+`test/regressions/test_review_findings.jl` and is part of the gate.
+**Gate on the DevBox (2 cores, 3.7 GB, Julia 1.12.7): 1198 passed, 0
+failed.** What the review deferred is in the backlog below.
 
 ## In flight
 
@@ -192,7 +161,7 @@ intended direction, but not currently in flight.
 - **Dataset fingerprint in identity.** The parquet specs carry their
   root in a reserved `dataset` slot of the identity projection; a real
   logical dataset id and version (so the same tree at two paths, or a
-  re-collected tree at one path, hash right) is its own proposal.
+  re-collected tree at one path, hash right) is its own design note.
   Declined in data-kinds v3.
 - **Capability-restricted views.** A structural raw/model boundary (a
   policy view that cannot address `OptionBar`) was declined in
@@ -207,3 +176,34 @@ intended direction, but not currently in flight.
   samples at one timestamp by pnl (losses first) so `max_drawdown` is
   deterministic; aggregating simultaneous samples for path metrics is
   the fuller answer.
+- **Quote synthesis cost (PR #9 finding B).** `at(::QuotesFromBars, ...)`
+  rebuilds the whole `OptionQuote` chain from the cached `OptionBar` chain
+  on every call, and one tick that fires performs `n + 2` such passes
+  (surface reader, `decide`, one per order). Two steps, in order. First,
+  the engine fetches the chain once per underlying per tick and
+  `resolve_quote` gains an arity that takes the chain; no measurement
+  needed. Second, a benchmark modelled on `scripts/bench_point_vs_range.jl`
+  over one month of SPY: synthesis once, three times and `n + 2` times per
+  timestamp, and against a `QuotesFromBars` reader with a bounded
+  `(underlying, timestamp)` chain cache, plus the whole-run wall time and
+  peak RSS of the strangle config over one month. The cache lands only if
+  it moves the whole-run number by roughly 20%, because it is a lifecycle
+  change (a spec/reader pair, `serves`, a cut-independence argument like
+  `SurfaceReader`'s); only `at` would be cached, the bound an `open_data`
+  kwarg outside identity. The only real config narrows the grid with
+  `tick_times`, so the expected answer is "matters for a policy that does
+  not exist yet".
+- **`InMemory` rejects conflicting rows like the parquet reader.**
+  Decided: the fixture provider must not represent a state the real
+  reader throws on. Blocked on a per-kind "one record per selector per
+  instant" trait, because `InMemory` is generic over the kind and a grid
+  kind has many rows per instant by design; the check then goes in the
+  inner constructor, once per fixture. Measure which fixtures carry two
+  rows for one selector and instant before writing it.
+- **Reader and SQL duplication in `market_data/parquet.jl`.**
+  `ParquetBarsReader` and `ParquetSpotsReader` repeat open, close,
+  partition listing, the backward walk and the grid, differing only in
+  how a timestamp is read from a partition; unifying them would have
+  closed the spot `asof` gap by construction. The SQL timestamp formatter
+  duplicates one in the store module and the path quoter one in the
+  polygon module; extraction needs a home across module boundaries.
