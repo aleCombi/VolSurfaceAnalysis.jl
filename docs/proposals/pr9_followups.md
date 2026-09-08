@@ -1,6 +1,8 @@
 # PR #9 follow-ups
 
-Status: two items, one decided and one open. Both come out of implementing
+Status: two items, one decided and one open. Work sequenced in
+[pr9_followups_plan.md](pr9_followups_plan.md), which also plans the
+measurement finding B was deferred pending. Both come out of implementing
 [pr9_correctness_fixes.md](pr9_correctness_fixes.md); neither was in scope for
 that sequence. The larger deferrals (finding B, the SQL and reader duplication)
 stay in the triage table of
