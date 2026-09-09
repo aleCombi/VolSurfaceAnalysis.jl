@@ -123,7 +123,16 @@ failed.** What the review deferred is in the backlog below.
 
 ## In flight
 
-Nothing.
+- **Ledger rebuild (proposal).** Review of the fill-vector ledger found
+  the lifecycle split over three layers (engine fills, `pnl_series`
+  matches, `run_experiment` settles) with no shared record, plus a
+  FIFO float-residue defect, per-share units labelled USD, and per-leg
+  sampling that inflates the annualised ratios. The plan -- typed event
+  ledger booked inside the run, `Order` with intent and structure id out
+  of `decide`, a `Book` view in, lifecycle rules in core identity,
+  metrics over `round_trips` and an equity curve -- is in
+  [docs/proposals/ledger.md](proposals/ledger.md). Decisions in its
+  section 4 are open; no code yet.
 
 ## Backlog
 
