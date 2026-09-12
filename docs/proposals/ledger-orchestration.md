@@ -5,22 +5,64 @@ human wants to do nothing between review points. Your job is to run
 the loop below, one slice at a time, and surface a report at each
 review point.
 
-## State when this was written (2026-09-11)
+## State as of 2026-09-12, evening
 
-- Branch `claude/ledger-system-review-h9c8md` is checked out, tracking
-  origin. Uncommitted: `docs/proposals/ledger.md` (the design, revised
-  after four reviews) and the in-flight entry in `docs/status.md`.
-- Untracked: `docs/proposals/ledger-slice1.md` (the slice 1 brief),
-  `docs/proposals/ledger-events-review.md` and
-  `docs/proposals/ledger-fill-review.md` (two codex reviews whose
-  content is folded into the proposal; delete before the first commit),
-  and this file.
-- Nothing is committed and no code exists. The human decides commits.
-- The `julia` tmux window holds a REPL with the package loaded and no
-  state worth keeping. It may be exited to free memory; say so in the
-  report when you do.
-- The `codex` tmux window has an interactive codex session open from
-  the reviews. Exit it (`/quit`) before starting a new one.
+- Branch `claude/ledger-system-review-h9c8md`, tracking origin, six
+  commits ahead, nothing pushed. Tree clean except two untracked review
+  inputs, `docs/proposals/ledger-events-review.md` and
+  `ledger-fill-review.md`, folded into the proposal long ago; the human
+  has not yet said to delete them.
+- Landed and committed: slice 1 (the pure `ledger` module), its fix
+  round (`ledger-slice1-fix.md`, codex review `-fix-review.md`), and a
+  hardening round (`ledger-slice1-hardening.md`, codex review
+  `-hardening-review.md`, inventory `ledger-slice1-coverage.md`). Gate:
+  2306 passed, 0 failed, 1 broken. The one Broken is deliberate: the
+  `@test_broken` structure-atomicity testset at the end of
+  `test/ledger/test_append.jl`, which waits for slice 2's
+  `record_order!`; when that writer lands the test records an
+  unexpected pass and must be flipped to `@test`.
+- Next: slice 2. Write `docs/proposals/ledger-slice2.md` in the shape of
+  the slice 1 brief, derived from the code as it stands, then run the
+  loop. See "Decisions taken on 2026-09-12" below; they are binding.
+- The `julia` tmux window holds a REPL with Revise and the package
+  loaded, no state worth keeping. Exit it before the gate when under
+  about 1.3 GB available; relaunch it after
+  (`julia --project=. -e 'using Revise' -i`, then `using VolSurfaceAnalysis`).
+- The `codex` tmux window is at a bash prompt. Headless codex worked
+  well: `codex exec --dangerously-bypass-approvals-and-sandbox "$(cat
+  prompt)"` from a runner script that tees to a log and appends a
+  `CODEX_EXIT=` marker, watched by a Monitor; codex writes its review to
+  `docs/proposals/ledger-slice<N>-review.md`.
+
+## Decisions taken on 2026-09-12 (binding for later slices)
+
+- **Cash is an integer number of USD cents** inside the ledger;
+  `contract_cents` is the one rounding point; `NonIntegralCash` refuses
+  what is not whole cents. Fee shares by cumulative rounding.
+- **The simulated venue is shaped like Interactive Brokers**: a combo
+  order fills in whole units or not at all (`GuaranteedCombo`), one
+  fill per leg, commissions per contract as `Fee` events with a
+  per-order minimum (numbers cited from IBKR's page when the model
+  lands); net-price allocation and partial fills in whole units are
+  later models; margin and rejections out of scope. Proposal section
+  "Contract, venue, simplifications" has the text.
+- **`record_order!` is slice 2's central piece**: plan every leg's
+  fills and matches against the book as it would be after the earlier
+  legs, validate all, then one `commit!`; the group is minted inside the
+  transaction and not consumed on failure. Codex's proposed signature:
+  `record_order!(L, book, order::Order; prices, effective_at,
+  recorded_at, order_leg_ids, fill_rule)` with per-leg vectors.
+- **Tests live beside the source they test**, one file per source file
+  in the mirrored folder (`test/metrics/test_ledger_series.jl` stays).
+- **Named failures, never bare errors**; every failure test checks it
+  fires, leaves ledger and book untouched, and prints its name.
+- **Commit at each checkpoint before the next mission**, split so that
+  the human's doc decisions and a round's code are separate commits;
+  the human confirmed this workflow. Nothing is pushed without the
+  human saying so.
+- Rule additions R1 to R4 (recorded time at or after effective time and
+  nondecreasing; settlement price finite and non-negative; positive
+  join ids) are in force; codex kept all four.
 
 ## Read before acting
 
