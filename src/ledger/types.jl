@@ -181,12 +181,12 @@ end
     Fee
 
 A cost tied to its cause: `source_id` is the fill that caused it and
-`amount` is signed cash (a cost is negative).
+`amount` is signed cash in whole USD cents (a cost is negative).
 """
 struct Fee
     header::EventHeader
     source_id::Int
-    amount::Float64
+    amount::Int
 end
 
 """

@@ -1,4 +1,5 @@
 # The writers and the validated write path. Cases 1, 2, 3, 6 and 9.
+# Cash literals are whole USD cents (0.85 per share is 8500 per contract).
 
 @testset "append: mint_group! counts up" begin
     L = Ledger()
@@ -22,9 +23,9 @@ end
     @test f1.order_leg_id == 1 && f2.order_leg_id == 2
     @test f1.fill_rule == :cross_spread
     @test effective_at(m) == _LG_T_CLOSE && recorded_at(m) == _LG_T_CLOSE
-    @test cash(f1) ≈ 85.0
-    @test cash(f2) ≈ -40.0
-    @test book.cash ≈ 45.0
+    @test cash(f1) == 8500                       # +0.85 * 100 * 100
+    @test cash(f2) == -4000                      # -0.40 * 100 * 100
+    @test book.cash == 4500                      # 8500 - 4000
     @test isempty(open_lots(book))
     @test isempty(open_groups(book))
     @test (L.next_id, L.next_sequence, L.next_execution, L.next_group) == (4, 4, 3, 2)
@@ -48,7 +49,7 @@ end
     @test [(m.open_fill_id, m.quantity) for m in matches] == [(1, 2), (2, 1)]   # FIFO
     @test all(m.close_fill_id == 3 for m in matches)
     @test [sequence(m) for m in matches] == [4, 5]
-    @test book.cash ≈ 140.0
+    @test book.cash == 14000                     # 17000 + 9000 - 12000
     @test isempty(open_lots(book))
 end
 
@@ -60,12 +61,12 @@ end
     batch = _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, 0.40, g; at=_LG_T_CLOSE, leg_id=3)
     @test length(batch) == 2
     @test open_lots(book) == [Lot(1, _LG_PUT470, Short, 1, 1, 0.85), Lot(1, _LG_PUT470, Short, 2, 1, 0.90)]
-    @test book.cash ≈ 220.0
+    @test book.cash == 22000                     # 17000 + 9000 - 4000
 end
 
 @testset "append: case 3, two groups on one contract" begin
     L, book = _lg_case_two_groups()
-    @test book.cash ≈ 160.0
+    @test book.cash == 16000                     # 11000 + 12000 - 7000
     @test open_groups(book) == [1]
     @test lots(book, 1) == [Lot(1, _LG_CALL490, Short, 1, 1, 1.10)]
     @test isempty(lots(book, 2))
@@ -79,14 +80,14 @@ end
     # a close matches the opposite side only: a same-side "close" has nothing to close
     @test_throws NothingToClose _lg_fill!(L, book, _LG_CALL490, Short, Close, 1, 0.70, 1; at=_LG_T_CLOSE, leg_id=4)
     @test _lg_snapshot(L) == snap
-    @test book.cash ≈ 160.0
+    @test book.cash == 16000
     err = try _lg_fill!(L, book, _LG_CALL490, Long, Close, 2, 0.70, 1; at=_LG_T_CLOSE, leg_id=4); nothing catch e; e end
     @test err isa ExceedsOpen && err.group == 1 && err.requested == 2 && err.available == 1
 end
 
 @testset "append: case 6, a lot left open at the window end" begin
     L, book = _lg_case_open_at_end()
-    @test book.cash ≈ 135.0
+    @test book.cash == 13500                     # 8500 + 11000 - 6000
     @test open_lots(book) == [Lot(1, _LG_PUT470, Short, 1, 1, 0.85)]
     @test open_groups(book) == [1]
 end
@@ -98,14 +99,14 @@ end
     @test x.open_fill_id == 1 && x.contract == _LG_PUT470 && x.side == Short && x.group == 1
     @test x.settlement_price == 468.0 && x.outcome == CashSettled
     @test effective_at(x) == _LG_EXPIRY_A && recorded_at(x) == _LG_T_NEXT
-    @test cash(x) ≈ -200.0
+    @test cash(x) == -20000                      # -(2.00 * 100 * 100)
     lot = only(open_lots(book))
     w = record_expiry!(L, book, lot; settlement_price=470.0, effective_at=_LG_EXPIRY_B, recorded_at=_LG_EXPIRY_B)
     @test w.outcome == Worthless
     @test w.quantity == 1
-    @test cash(w) == 0.0
+    @test cash(w) == 0
     @test isempty(open_lots(book))
-    @test book.cash ≈ 35.0
+    @test book.cash == 3500                      # 8500 + 15000 - 20000
     # the lot is gone: expiring it again over-consumes a lot with nothing left
     snap = _lg_snapshot(L)
     @test_throws ExceedsOpen record_expiry!(L, book, lot; settlement_price=470.0, effective_at=_LG_EXPIRY_B, recorded_at=_LG_EXPIRY_B)
@@ -116,13 +117,13 @@ end
     L, book = _lg_case_fees()
     fee = L.events[end]
     @test fee isa Fee
-    @test fee.source_id == 3 && fee.amount == -1.30
-    @test book.cash ≈ 138.70
+    @test fee.source_id == 3 && fee.amount == -130
+    @test book.cash == 13870                     # 14000 - 130
     snap = _lg_snapshot(L)
-    @test_throws DanglingReference record_fee!(L, book, 99, -1.0; effective_at=_LG_T_CLOSE, recorded_at=_LG_T_CLOSE)
-    @test_throws DanglingReference record_fee!(L, book, 4, -1.0; effective_at=_LG_T_CLOSE, recorded_at=_LG_T_CLOSE)  # 4 is a Match
+    @test_throws DanglingReference record_fee!(L, book, 99, -100; effective_at=_LG_T_CLOSE, recorded_at=_LG_T_CLOSE)
+    @test_throws DanglingReference record_fee!(L, book, 4, -100; effective_at=_LG_T_CLOSE, recorded_at=_LG_T_CLOSE)  # 4 is a Match
     @test _lg_snapshot(L) == snap
-    @test book.cash ≈ 138.70
+    @test book.cash == 13870
 end
 
 @testset "append: FillAfterExpiry" begin
@@ -141,35 +142,35 @@ end
     L, book = _lg_case_round_trip()
     snap = _lg_snapshot(L)
     mk(id, seq) = Fill(EventHeader(id, _LG_T_CLOSE, _LG_T_CLOSE, seq), 1, 9, 9, _LG_PUT470, Short, Open, 1, 0.85, :cross_spread)
-    @test_throws SequenceGap commit!(L, book, LedgerEvent[mk(L.next_id, L.next_sequence + 1)], _LG_SPEC)
-    @test_throws SequenceGap commit!(L, book, LedgerEvent[mk(L.next_id + 1, L.next_sequence)], _LG_SPEC)
-    @test_throws SequenceGap commit!(L, book, LedgerEvent[mk(L.next_id - 1, L.next_sequence - 1)], _LG_SPEC)   # a replay of an old id
-    err = try commit!(L, book, LedgerEvent[mk(L.next_id + 1, L.next_sequence)], _LG_SPEC); nothing catch e; e end
+    @test_throws SequenceGap commit!(L, book, LedgerEvent[mk(L.next_id, L.next_sequence + 1)])
+    @test_throws SequenceGap commit!(L, book, LedgerEvent[mk(L.next_id + 1, L.next_sequence)])
+    @test_throws SequenceGap commit!(L, book, LedgerEvent[mk(L.next_id - 1, L.next_sequence - 1)])   # a replay of an old id
+    err = try commit!(L, book, LedgerEvent[mk(L.next_id + 1, L.next_sequence)]); nothing catch e; e end
     @test err.counter == :id && err.expected == 4 && err.got == 5
-    err = try commit!(L, book, LedgerEvent[mk(L.next_id, L.next_sequence + 2)], _LG_SPEC); nothing catch e; e end
+    err = try commit!(L, book, LedgerEvent[mk(L.next_id, L.next_sequence + 2)]); nothing catch e; e end
     @test err.counter == :sequence && err.expected == 4 && err.got == 6
     # a batch whose second event skips
-    @test_throws SequenceGap commit!(L, book, LedgerEvent[mk(L.next_id, L.next_sequence), mk(L.next_id + 2, L.next_sequence + 2)], _LG_SPEC)
+    @test_throws SequenceGap commit!(L, book, LedgerEvent[mk(L.next_id, L.next_sequence), mk(L.next_id + 2, L.next_sequence + 2)])
     @test _lg_snapshot(L) == snap
-    @test book.cash ≈ 45.0
+    @test book.cash == 4500
 end
 
 @testset "append: DanglingReference" begin
     L, book = _lg_case_round_trip()          # events 1 (open), 2 (close), 3 (match); nothing open
     snap = _lg_snapshot(L)
     # an expiry naming a fill that does not exist
-    @test_throws DanglingReference commit!(L, book, LedgerEvent[Expiry(_lg_hdr(L, 0, _LG_EXPIRY_A), 1, 42, _LG_PUT470, Short, 1, 468.0, CashSettled)], _LG_SPEC)
+    @test_throws DanglingReference commit!(L, book, LedgerEvent[Expiry(_lg_hdr(L, 0, _LG_EXPIRY_A), 1, 42, _LG_PUT470, Short, 1, 468.0, CashSettled)])
     # an expiry naming the closing fill as its opening fill
-    @test_throws DanglingReference commit!(L, book, LedgerEvent[Expiry(_lg_hdr(L, 0, _LG_EXPIRY_A), 1, 2, _LG_PUT470, Long, 1, 468.0, CashSettled)], _LG_SPEC)
+    @test_throws DanglingReference commit!(L, book, LedgerEvent[Expiry(_lg_hdr(L, 0, _LG_EXPIRY_A), 1, 2, _LG_PUT470, Long, 1, 468.0, CashSettled)])
     # a match naming the match as its opening fill
     c = Fill(_lg_hdr(L, 0), 1, 9, 9, _LG_PUT470, Long, Close, 1, 0.40, :cross_spread)
-    @test_throws DanglingReference commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), 1, 3, event_id(c), 1)], _LG_SPEC)
+    @test_throws DanglingReference commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), 1, 3, event_id(c), 1)])
     # a fee naming a match
-    @test_throws DanglingReference commit!(L, book, LedgerEvent[Fee(_lg_hdr(L, 0), 3, -1.0)], _LG_SPEC)
+    @test_throws DanglingReference commit!(L, book, LedgerEvent[Fee(_lg_hdr(L, 0), 3, -100)])
     # a match on its own whose closing fill does not exist
-    @test_throws DanglingReference commit!(L, book, LedgerEvent[Match(_lg_hdr(L, 0), 1, 1, 77, 1)], _LG_SPEC)
+    @test_throws DanglingReference commit!(L, book, LedgerEvent[Match(_lg_hdr(L, 0), 1, 1, 77, 1)])
     @test _lg_snapshot(L) == snap
-    err = try commit!(L, book, LedgerEvent[Fee(_lg_hdr(L, 0), 3, -1.0)], _LG_SPEC); nothing catch e; e end
+    err = try commit!(L, book, LedgerEvent[Fee(_lg_hdr(L, 0), 3, -100)]); nothing catch e; e end
     @test err isa DanglingReference && err.field == :source_id && err.id == 3
 end
 
@@ -184,32 +185,49 @@ end
     mkclose(q, g=g1) = Fill(_lg_hdr(L, 0), g, 9, 9, _LG_PUT470, Long, Close, q, 0.40, :cross_spread)
     # the matches do not exhaust the close
     c = mkclose(2)
-    @test_throws MatchMismatch commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), g1, 1, event_id(c), 1)], _LG_SPEC)
+    @test_throws MatchMismatch commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), g1, 1, event_id(c), 1)])
     # no matches at all
-    @test_throws MatchMismatch commit!(L, book, LedgerEvent[mkclose(1)], _LG_SPEC)
+    @test_throws MatchMismatch commit!(L, book, LedgerEvent[mkclose(1)])
     # the matches over-fill the close
     c = mkclose(1)
-    @test_throws MatchMismatch commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), g1, 1, event_id(c), 1), Match(_lg_hdr(L, 2), g1, 1, event_id(c), 1)], _LG_SPEC)
+    @test_throws MatchMismatch commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), g1, 1, event_id(c), 1), Match(_lg_hdr(L, 2), g1, 1, event_id(c), 1)])
     # a match pairing a lot of another group
     c = mkclose(1)
-    @test_throws MatchMismatch commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), g1, 3, event_id(c), 1)], _LG_SPEC)
+    @test_throws MatchMismatch commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), g1, 3, event_id(c), 1)])
     # a match whose own group differs from its closing fill's
     c = mkclose(1)
-    @test_throws MatchMismatch commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), g2, 1, event_id(c), 1)], _LG_SPEC)
+    @test_throws MatchMismatch commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), g2, 1, event_id(c), 1)])
     # a match pairing a same-side lot
     c = mkclose(1)
-    @test_throws MatchMismatch commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), g1, 2, event_id(c), 1)], _LG_SPEC)
+    @test_throws MatchMismatch commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), g1, 2, event_id(c), 1)])
     # a match on its own, naming a fill already committed
-    @test_throws MatchMismatch commit!(L, book, LedgerEvent[Match(_lg_hdr(L, 0), g1, 1, 1, 1)], _LG_SPEC)
+    @test_throws MatchMismatch commit!(L, book, LedgerEvent[Match(_lg_hdr(L, 0), g1, 1, 1, 1)])
     # an expiry whose copied side, contract or group differ from its opening fill's
-    @test_throws MatchMismatch commit!(L, book, LedgerEvent[Expiry(_lg_hdr(L, 0, _LG_EXPIRY_A), g1, 1, _LG_PUT470,  Long,  1, 468.0, CashSettled)], _LG_SPEC)
-    @test_throws MatchMismatch commit!(L, book, LedgerEvent[Expiry(_lg_hdr(L, 0, _LG_EXPIRY_A), g1, 1, _LG_CALL490, Short, 1, 468.0, CashSettled)], _LG_SPEC)
-    @test_throws MatchMismatch commit!(L, book, LedgerEvent[Expiry(_lg_hdr(L, 0, _LG_EXPIRY_A), g2, 1, _LG_PUT470,  Short, 1, 468.0, CashSettled)], _LG_SPEC)
+    @test_throws MatchMismatch commit!(L, book, LedgerEvent[Expiry(_lg_hdr(L, 0, _LG_EXPIRY_A), g1, 1, _LG_PUT470,  Long,  1, 468.0, CashSettled)])
+    @test_throws MatchMismatch commit!(L, book, LedgerEvent[Expiry(_lg_hdr(L, 0, _LG_EXPIRY_A), g1, 1, _LG_CALL490, Short, 1, 468.0, CashSettled)])
+    @test_throws MatchMismatch commit!(L, book, LedgerEvent[Expiry(_lg_hdr(L, 0, _LG_EXPIRY_A), g2, 1, _LG_PUT470,  Short, 1, 468.0, CashSettled)])
     @test _lg_snapshot(L) == snap
     @test length(open_lots(book)) == 3
-    @test book.cash ≈ 210.0                     # 170 - 50 + 90
-    err = try commit!(L, book, LedgerEvent[mkclose(1)], _LG_SPEC); nothing catch e; e end
+    @test book.cash == 21000                    # 17000 - 5000 + 9000
+    err = try commit!(L, book, LedgerEvent[mkclose(1)]); nothing catch e; e end
     @test err isa MatchMismatch && err.id == L.next_id
+end
+
+@testset "append: references point backward in effective time" begin
+    L, book = Ledger(), Book()
+    g = mint_group!(L)
+    _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.85, g; at=_LG_T_OPEN2, leg_id=1)   # fill 1 at T_OPEN2
+    snap, before = _lg_snapshot(L), deepcopy(book)
+    # a fee effective before its source fill
+    @test_throws MatchMismatch record_fee!(L, book, 1, -65; effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN2)
+    # a match at an instant other than its closing fill's
+    c = Fill(_lg_hdr(L, 0, _LG_T_CLOSE), g, 2, 2, _LG_PUT470, Long, Close, 1, 0.40, :cross_spread)
+    @test_throws MatchMismatch commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1, _LG_T_CLOSE + Minute(1)), g, 1, event_id(c), 1)])
+    @test _lg_snapshot(L) == snap
+    @test book == before
+    # at the source's own instant a fee is fine
+    record_fee!(L, book, 1, -65; effective_at=_LG_T_OPEN2, recorded_at=_LG_T_OPEN2)
+    @test book.cash == 8435                                          # 8500 - 65
 end
 
 @testset "append: ExceedsOpen on a hand-built over-consumption" begin
@@ -218,12 +236,12 @@ end
     _lg_fill!(L, book, _LG_PUT470, Short, Open, 2, 0.85, g; leg_id=1)   # fill 1
     snap = _lg_snapshot(L)
     c = Fill(_lg_hdr(L, 0), g, 9, 9, _LG_PUT470, Long, Close, 3, 0.40, :cross_spread)
-    @test_throws ExceedsOpen commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), g, 1, event_id(c), 3)], _LG_SPEC)
+    @test_throws ExceedsOpen commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), g, 1, event_id(c), 3)])
     # two matches in one batch that together over-consume the lot
     c = Fill(_lg_hdr(L, 0), g, 9, 9, _LG_PUT470, Long, Close, 3, 0.40, :cross_spread)
-    @test_throws ExceedsOpen commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), g, 1, event_id(c), 2), Match(_lg_hdr(L, 2), g, 1, event_id(c), 1)], _LG_SPEC)
+    @test_throws ExceedsOpen commit!(L, book, LedgerEvent[c, Match(_lg_hdr(L, 1), g, 1, event_id(c), 2), Match(_lg_hdr(L, 2), g, 1, event_id(c), 1)])
     # an expiry for more than the lot holds
-    @test_throws ExceedsOpen commit!(L, book, LedgerEvent[Expiry(_lg_hdr(L, 0, _LG_EXPIRY_A), g, 1, _LG_PUT470, Short, 3, 468.0, CashSettled)], _LG_SPEC)
+    @test_throws ExceedsOpen commit!(L, book, LedgerEvent[Expiry(_lg_hdr(L, 0, _LG_EXPIRY_A), g, 1, _LG_PUT470, Short, 3, 468.0, CashSettled)])
     @test _lg_snapshot(L) == snap
     @test open_lots(book) == [Lot(g, _LG_PUT470, Short, 1, 2, 0.85)]
 end
@@ -234,17 +252,37 @@ end
     o = Fill(_lg_hdr(L, 0, _LG_T_OPEN),  g, 1, 1, _LG_PUT470, Short, Open,  1, 0.85, :cross_spread)
     c = Fill(_lg_hdr(L, 1, _LG_T_CLOSE), g, 2, 2, _LG_PUT470, Long,  Close, 1, 0.40, :cross_spread)
     m = Match(_lg_hdr(L, 2, _LG_T_CLOSE), g, event_id(o), event_id(c), 1)
-    commit!(L, book, LedgerEvent[o, c, m], _LG_SPEC)
+    commit!(L, book, LedgerEvent[o, c, m])
     @test length(L) == 3
-    @test book.cash ≈ 45.0
+    @test book.cash == 4500                      # 8500 - 4000
     @test isempty(open_lots(book))
     @test L.next_execution == 3
-    commit!(L, book, LedgerEvent[], _LG_SPEC)
+    commit!(L, book, LedgerEvent[])
     @test _lg_snapshot(L) == (3, 4, 4, 2, 3)
     # a hand-built fill with a stale execution id does not move the counter backwards
     late = Fill(_lg_hdr(L, 0, _LG_T_CLOSE), g, 3, 1, _LG_PUT470, Short, Open, 1, 0.85, :cross_spread)
-    commit!(L, book, LedgerEvent[late], _LG_SPEC)
+    commit!(L, book, LedgerEvent[late])
     @test L.next_execution == 3
+end
+
+@testset "append: NonIntegralCash refuses a batch whose cash is not whole cents" begin
+    L, book = Ledger(), Book()
+    g = mint_group!(L)
+    snap = _lg_snapshot(L)
+    # 0.123456 per share on SPY is 0.123456 * 100 * 100 = 1234.56 cents per contract
+    f = Fill(_lg_hdr(L, 0, _LG_T_OPEN), g, 1, 1, _LG_PUT470, Short, Open, 1, 0.123456, :cross_spread)
+    @test_throws NonIntegralCash commit!(L, book, LedgerEvent[f])
+    @test_throws NonIntegralCash _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.123456, g)
+    @test _lg_snapshot(L) == snap
+    @test book == Book()
+    err = try commit!(L, book, LedgerEvent[f]); nothing catch e; e end
+    @test err isa NonIntegralCash && err.value ≈ 1234.56
+    # the batch is refused whole: a valid fill ahead of the bad one does not land
+    ok  = Fill(_lg_hdr(L, 0, _LG_T_OPEN), g, 1, 1, _LG_PUT470,  Short, Open, 1, 0.85,     :cross_spread)
+    bad = Fill(_lg_hdr(L, 1, _LG_T_OPEN), g, 2, 2, _LG_CALL490, Short, Open, 1, 0.123456, :cross_spread)
+    @test_throws NonIntegralCash commit!(L, book, LedgerEvent[ok, bad])
+    @test _lg_snapshot(L) == snap
+    @test book == Book()
 end
 
 @testset "append: NonPositiveQuantity is a named failure" begin
@@ -261,7 +299,8 @@ end
 @testset "append: every error is an Exception that prints its name" begin
     for err in (NothingToClose(1, _LG_PUT470), ExceedsOpen(1, _LG_PUT470, 3, 2),
                 FillAfterExpiry(1, _LG_T_OPEN, _LG_EXPIRY_A), DanglingReference(:open_fill_id, 9),
-                MatchMismatch(4, "why"), SequenceGap(:sequence, 4, 6), NonPositiveQuantity(0))
+                MatchMismatch(4, "why"), SequenceGap(:sequence, 4, 6), NonPositiveQuantity(0),
+                NonIntegralCash(1234.56))
         @test err isa Exception
         @test occursin(string(nameof(typeof(err))), sprint(showerror, err))
     end

@@ -58,10 +58,16 @@ end
 """
     MatchMismatch
 
-The matches following a `Close` fill do not reference it and exhaust it
-exactly, a match pairs a lot of the wrong group, contract or side, or the
-contract, side or group copied onto an `Expiry` differ from its opening
-fill's. `id` is the offending event.
+A batch whose shape the invariants forbid, for one of these reasons: the
+matches following a `Close` fill do not reference it and exhaust it
+exactly; a match pairs a lot of the wrong group, contract or side, or
+skips an older open lot (FIFO); the contract, side or group copied onto
+an `Expiry` differ from its opening fill's, the expiry settles less than
+the lot's remaining, or it is effective before its contract's expiry; or
+an event is effective before an event it references (a match or an
+expiry before its opening fill, a match at an instant other than its
+closing fill's, a fee before its source fill). `id` is the offending
+event and `reason` says which.
 """
 struct MatchMismatch <: Exception
     id::Int
@@ -90,6 +96,19 @@ struct NonPositiveQuantity <: Exception
     quantity::Int
 end
 
+"""
+    NonIntegralCash
+
+A price (or an intrinsic value) whose cash per contract,
+`price * multiplier * 100`, is not a whole number of cents; `value` is
+the offending product. Thrown by [`contract_cents`](@ref). `commit!`
+computes every event's cash before anything lands, so no such event
+reaches the ledger.
+"""
+struct NonIntegralCash <: Exception
+    value::Float64
+end
+
 Base.showerror(io::IO, e::NothingToClose) =
     print(io, "NothingToClose: group ", e.group, " holds nothing to close on ", e.contract)
 Base.showerror(io::IO, e::ExceedsOpen) =
@@ -107,6 +126,8 @@ Base.showerror(io::IO, e::SequenceGap) =
     print(io, "SequenceGap: expected ", e.counter, " ", e.expected, ", got ", e.got)
 Base.showerror(io::IO, e::NonPositiveQuantity) =
     print(io, "NonPositiveQuantity: quantity must be a positive integer, got ", e.quantity)
+Base.showerror(io::IO, e::NonIntegralCash) =
+    print(io, "NonIntegralCash: ", e.value, " cents per contract is not a whole number of cents")
 
 # ---- writers ---------------------------------------------------------
 
@@ -141,7 +162,6 @@ appended.
 function record_fill!(L::Ledger, book::Book, leg::Leg, group::Int;
                       price::Real, effective_at::DateTime, recorded_at::DateTime,
                       order_leg_id::Int, fill_rule::Symbol)::Vector{LedgerEvent}
-    spec = contract_spec(leg.contract.underlying)
     fill = Fill(_header(L, 0, effective_at, recorded_at), group, order_leg_id,
                 L.next_execution, leg.contract, leg.side, leg.intent, leg.quantity,
                 price, fill_rule)
@@ -161,7 +181,7 @@ function record_fill!(L::Ledger, book::Book, leg::Leg, group::Int;
             left -= q
         end
     end
-    commit!(L, book, batch, spec)
+    commit!(L, book, batch)
     return batch
 end
 
@@ -170,56 +190,61 @@ end
 
 Settle the whole remaining quantity of `lot` at `settlement_price`. The
 outcome is `Worthless` when intrinsic is zero and `CashSettled`
-otherwise. `effective_at` is the settlement instant, `recorded_at` the
-tick that booked it.
+otherwise. `effective_at` is the settlement instant, at or after the
+contract's expiry; `recorded_at` the tick that booked it.
 """
 function record_expiry!(L::Ledger, book::Book, lot::Lot;
                         settlement_price::Real, effective_at::DateTime,
                         recorded_at::DateTime)::Expiry
-    spec = contract_spec(lot.contract.underlying)
     outcome = intrinsic(lot.contract, settlement_price) == 0.0 ? Worthless : CashSettled
     e = Expiry(_header(L, 0, effective_at, recorded_at), lot.group, lot.open_fill_id,
                lot.contract, lot.side, lot.remaining, settlement_price, outcome)
-    commit!(L, book, LedgerEvent[e], spec)
+    commit!(L, book, LedgerEvent[e])
     return e
 end
 
 """
-    record_fee!(L, book, source_id::Int, amount; effective_at, recorded_at) -> Fee
+    record_fee!(L, book, source_id::Int, amount::Integer; effective_at, recorded_at) -> Fee
 
-Book a signed cash `amount` (a cost is negative) caused by the fill
-`source_id`. Throws [`DanglingReference`](@ref) when `source_id` is not
-a fill in `L`.
+Book a signed `amount` of whole USD cents (a cost is negative) caused by
+the fill `source_id`. Throws [`DanglingReference`](@ref) when `source_id`
+is not a fill in `L`.
 """
-function record_fee!(L::Ledger, book::Book, source_id::Int, amount::Real;
+function record_fee!(L::Ledger, book::Book, source_id::Int, amount::Integer;
                      effective_at::DateTime, recorded_at::DateTime)::Fee
-    source = _fill_ref(L, nothing, source_id, :source_id)
     e = Fee(_header(L, 0, effective_at, recorded_at), source_id, amount)
-    commit!(L, book, LedgerEvent[e], contract_spec(source.contract.underlying))
+    commit!(L, book, LedgerEvent[e])
     return e
 end
 
 """
-    commit!(L, book, batch::AbstractVector{<:LedgerEvent}, spec::ContractSpec) -> nothing
+    commit!(L, book, batch::AbstractVector{<:LedgerEvent}) -> nothing
 
 The single validated write path. Checks `batch` against `L` and `book`,
-then appends it as one unit and applies it to `book`. The checks, each
-with its named failure:
+then appends it as one unit and applies it to `book`; every event's
+contract facts come from the table, so the incremental book and the
+replays fold the same numbers. The checks, each with its named failure:
 
 - `id` and `sequence` continue the ledger's counters ([`SequenceGap`](@ref));
+- every event's cash is whole cents ([`NonIntegralCash`](@ref); an
+  unlisted underlying is [`UnknownContract`](@ref));
 - a fill is effective at or before its contract's expiry ([`FillAfterExpiry`](@ref));
 - every reference points to an earlier event of the right kind ([`DanglingReference`](@ref));
+- every reference points backward in effective time: a match's opening
+  fill is effective at or before its closing fill and the match at the
+  closing fill's instant, an expiry's opening fill at or before the
+  expiry, a fee's source fill at or before the fee ([`MatchMismatch`](@ref));
 - the matches immediately following a `Close` fill reference it, pair
-  lots of its group and contract on the opposite side, and sum to its
-  quantity; an `Expiry`'s copied contract, side and group equal its
-  opening fill's ([`MatchMismatch`](@ref));
+  lots of its group and contract on the opposite side, each consume the
+  oldest still-eligible lot (FIFO), and sum to its quantity; an
+  `Expiry`'s copied contract, side and group equal its opening fill's,
+  it settles the whole remaining lot, and it is effective at or after
+  the contract's expiry ([`MatchMismatch`](@ref));
 - consumption never exceeds a lot's remaining ([`ExceedsOpen`](@ref)).
 
-`spec` is the contract spec every event of the batch is booked under.
 Nothing is appended if any check fails.
 """
-function commit!(L::Ledger, book::Book, batch::AbstractVector{<:LedgerEvent},
-                 spec::ContractSpec)::Nothing
+function commit!(L::Ledger, book::Book, batch::AbstractVector{<:LedgerEvent})::Nothing
     isempty(batch) && return nothing
     _validate(L, book, batch)
     for e in batch
@@ -230,7 +255,7 @@ function commit!(L::Ledger, book::Book, batch::AbstractVector{<:LedgerEvent},
         if e isa Fill
             L.next_execution = max(L.next_execution, e.execution_id + 1)
         end
-        apply!(book, e, spec)
+        apply!(book, e)
     end
     return nothing
 end
@@ -257,15 +282,30 @@ function _opening_fill(L::Ledger, seen, id::Int, field::Symbol)::Fill
     return f
 end
 
-# Consumption of one opening fill's lot by this batch, against what the
-# book holds plus what the batch itself opened, minus what it consumed.
-function _consume_check!(book::Book, opened::Dict{Int,Int}, consumed::Dict{Int,Int},
-                         o::Fill, quantity::Int)::Nothing
+# What this batch may still consume of the lot opened by `o`: the whole
+# fill when this batch opened it, else the book's remaining, minus what
+# earlier events of the batch already consumed.
+function _available(book::Book, opened::Vector{Fill}, consumed::Dict{Int,Int}, o::Fill)::Int
     oid = event_id(o)
-    held = _remaining(book, o.group, o.contract, oid) + get(opened, oid, 0)
-    available = held - get(consumed, oid, 0)
-    quantity <= available || throw(ExceedsOpen(o.group, o.contract, quantity, available))
-    consumed[oid] = get(consumed, oid, 0) + quantity
+    held = any(f -> event_id(f) == oid, opened) ? o.quantity :
+           _remaining(book, o.group, o.contract, oid)
+    return held - get(consumed, oid, 0)
+end
+
+# The lot a close of `c` must consume next, FIFO: the book's lots for its
+# (group, contract) in their order, then the fills this batch opened, in
+# batch order; opposite side, with something left after what the batch
+# already consumed. `nothing` when no lot is eligible.
+function _first_eligible(book::Book, opened::Vector{Fill}, consumed::Dict{Int,Int},
+                         c::Fill)::Union{Nothing,Int}
+    for l in _lots_at(book, c.group, c.contract)
+        l.side != c.side || continue
+        l.remaining - get(consumed, l.open_fill_id, 0) > 0 && return l.open_fill_id
+    end
+    for f in opened
+        (f.group == c.group && f.contract == c.contract && f.side != c.side) || continue
+        f.quantity - get(consumed, event_id(f), 0) > 0 && return event_id(f)
+    end
     return nothing
 end
 
@@ -276,7 +316,38 @@ function _check_match(L::Ledger, book::Book, seen, opened, consumed, m::Match, c
     (o.group == c.group && o.contract == c.contract && o.side != c.side) ||
         throw(MatchMismatch(event_id(m), "opening fill $(event_id(o)) is not an " *
                             "opposite-side lot of the closing fill's group and contract"))
-    _consume_check!(book, opened, consumed, o, m.quantity)
+    effective_at(o) <= effective_at(c) ||
+        throw(MatchMismatch(event_id(m), "opening fill $(event_id(o)) is effective after " *
+                            "closing fill $(event_id(c))"))
+    effective_at(m) == effective_at(c) ||
+        throw(MatchMismatch(event_id(m), "match is not effective at the instant of " *
+                            "closing fill $(event_id(c))"))
+    available = _available(book, opened, consumed, o)
+    m.quantity <= available ||
+        throw(ExceedsOpen(o.group, o.contract, m.quantity, available))
+    _first_eligible(book, opened, consumed, c) == event_id(o) ||
+        throw(MatchMismatch(event_id(m), "match skips an older open lot"))
+    consumed[event_id(o)] = get(consumed, event_id(o), 0) + m.quantity
+    return nothing
+end
+
+function _check_expiry(L::Ledger, book::Book, seen, opened, consumed, e::Expiry)::Nothing
+    o = _opening_fill(L, seen, e.open_fill_id, :open_fill_id)
+    (e.contract == o.contract && e.side == o.side && e.group == o.group) ||
+        throw(MatchMismatch(event_id(e),
+            "copied contract, side or group differ from opening fill $(event_id(o))"))
+    effective_at(o) <= effective_at(e) ||
+        throw(MatchMismatch(event_id(e),
+            "expiry is effective before its opening fill $(event_id(o))"))
+    effective_at(e) >= e.contract.expiry ||
+        throw(MatchMismatch(event_id(e), "expiry effective before the contract's expiry"))
+    available = _available(book, opened, consumed, o)
+    e.quantity <= available ||
+        throw(ExceedsOpen(o.group, o.contract, e.quantity, available))
+    e.quantity == available ||
+        throw(MatchMismatch(event_id(e),
+            "expiry of $(e.quantity) leaves $(available - e.quantity) open"))
+    consumed[event_id(o)] = get(consumed, event_id(o), 0) + e.quantity
     return nothing
 end
 
@@ -287,8 +358,11 @@ function _validate(L::Ledger, book::Book, batch::AbstractVector{<:LedgerEvent}):
         event_id(e) == want_id || throw(SequenceGap(:id, want_id, event_id(e)))
         sequence(e) == want_seq || throw(SequenceGap(:sequence, want_seq, sequence(e)))
     end
+    # Every event's cash must resolve to whole cents before anything lands
+    # (NonIntegralCash; UnknownContract for an unlisted underlying).
+    foreach(cash, batch)
     seen     = Dict{Int,LedgerEvent}()   # batch events validated so far
-    opened   = Dict{Int,Int}()           # lots opened by this batch
+    opened   = Fill[]                    # Open fills of this batch, in batch order
     consumed = Dict{Int,Int}()           # consumption by this batch, per opening fill
     n = length(batch)
     k = 1
@@ -300,7 +374,7 @@ function _validate(L::Ledger, book::Book, batch::AbstractVector{<:LedgerEvent}):
             seen[event_id(e)] = e
             k += 1
             if e.intent == Open
-                opened[event_id(e)] = e.quantity
+                push!(opened, e)
             else
                 total = 0
                 while k <= n && batch[k] isa Match && batch[k].close_fill_id == event_id(e)
@@ -317,15 +391,14 @@ function _validate(L::Ledger, book::Book, batch::AbstractVector{<:LedgerEvent}):
             _fill_ref(L, seen, e.close_fill_id, :close_fill_id)
             throw(MatchMismatch(event_id(e), "match does not immediately follow its closing fill"))
         elseif e isa Expiry
-            o = _opening_fill(L, seen, e.open_fill_id, :open_fill_id)
-            (e.contract == o.contract && e.side == o.side && e.group == o.group) ||
-                throw(MatchMismatch(event_id(e),
-                    "copied contract, side or group differ from opening fill $(event_id(o))"))
-            _consume_check!(book, opened, consumed, o, e.quantity)
+            _check_expiry(L, book, seen, opened, consumed, e)
             seen[event_id(e)] = e
             k += 1
         else                                       # Fee
-            _fill_ref(L, seen, e.source_id, :source_id)
+            source = _fill_ref(L, seen, e.source_id, :source_id)
+            effective_at(source) <= effective_at(e) ||
+                throw(MatchMismatch(event_id(e),
+                    "fee is effective before its source fill $(event_id(source))"))
             seen[event_id(e)] = e
             k += 1
         end

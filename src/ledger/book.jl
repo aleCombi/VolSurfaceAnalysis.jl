@@ -25,16 +25,17 @@ end
 """
     Book
 
-Lots per `(group, contract)`, FIFO within each vector, plus `cash`.
-Built by folding events with [`apply!`](@ref). Two books are equal when
-their open lots and their cash are.
+Lots per `(group, contract)`, FIFO within each vector, plus `cash` in
+whole USD cents. Built by folding events with [`apply!`](@ref). Two
+books are equal when their open lots and their cash are; cash is an
+integer, so the comparison is exact.
 """
 mutable struct Book
     lots::Dict{Tuple{Int,ContractKey},Vector{Lot}}
-    cash::Float64
+    cash::Int
 end
 
-Book() = Book(Dict{Tuple{Int,ContractKey},Vector{Lot}}(), 0.0)
+Book() = Book(Dict{Tuple{Int,ContractKey},Vector{Lot}}(), 0)
 
 Base.:(==)(a::Book, b::Book) = a.cash == b.cash && open_lots(a) == open_lots(b)
 
@@ -155,23 +156,19 @@ function book_as_known(L::Ledger, boundary::Int)::Book
     return book
 end
 
-# Lifecycle (an `Expiry`) folds before everything else booked at the
-# same effective instant.
-_priority(::Expiry) = 0
-_priority(::LedgerEvent) = 1
-
 """
     book_effective(L::Ledger, t::DateTime) -> Book
 
 What was true at `t`: the fold over events with `effective_at <= t`,
-ordered by `(effective_at, priority, sequence)`, where priority puts an
-`Expiry` before every other event at an equal instant. Differs from
-[`book_as_known`](@ref) only by lifecycle booked at the tick after its
-instant.
+ordered by `(effective_at, sequence)`, so events at an equal instant
+fold in journal order. Every reference points backward in effective
+time (checked on append), so the fold never meets a lot it has not yet
+opened. Differs from [`book_as_known`](@ref) only by lifecycle booked at
+the tick after its instant.
 """
 function book_effective(L::Ledger, t::DateTime)::Book
     due = LedgerEvent[e for e in L.events if effective_at(e) <= t]
-    sort!(due; by = e -> (effective_at(e), _priority(e), sequence(e)))
+    sort!(due; by = e -> (effective_at(e), sequence(e)))
     book = Book()
     for e in due
         apply!(book, e)

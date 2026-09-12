@@ -24,14 +24,14 @@
 Facts about one underlying's listed option contracts.
 
 # Fields
-- `multiplier::Float64` -- shares per contract; cash per contract is the
-  price per share times this.
+- `multiplier::Int` -- shares per contract; cash per contract is the
+  price per share times this (in whole cents through `contract_cents`).
 - `exercise::ExerciseStyle` -- `American` or `European`.
 - `settlement::SettlementStyle` -- `AMSettled` or `PMSettled`.
 - `delivery::Delivery` -- `Physical` or `Cash`.
 """
 struct ContractSpec
-    multiplier::Float64
+    multiplier::Int
     exercise::ExerciseStyle
     settlement::SettlementStyle
     delivery::Delivery
@@ -51,9 +51,9 @@ Base.showerror(io::IO, e::UnknownContract) =
     print(io, "UnknownContract: no contract spec for ", e.underlying)
 
 const _CONTRACT_TABLE = Dict{String,ContractSpec}(
-    "SPY" => ContractSpec(100.0, American, PMSettled, Physical),
-    "QQQ" => ContractSpec(100.0, American, PMSettled, Physical),
-    "IWM" => ContractSpec(100.0, American, PMSettled, Physical),
+    "SPY" => ContractSpec(100, American, PMSettled, Physical),
+    "QQQ" => ContractSpec(100, American, PMSettled, Physical),
+    "IWM" => ContractSpec(100, American, PMSettled, Physical),
 )
 
 """

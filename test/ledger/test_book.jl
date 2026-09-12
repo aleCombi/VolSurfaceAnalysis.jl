@@ -1,8 +1,10 @@
 # The book: apply! per kind, the accessors, both replays. Cases 4, 7, 8.
+# Cash literals are whole USD cents (0.85 per share is 8500 per contract).
 
 @testset "book: a fresh book is empty" begin
     b = Book()
-    @test b.cash == 0.0
+    @test b.cash == 0
+    @test b.cash isa Int
     @test isempty(open_lots(b))
     @test isempty(open_groups(b))
     @test isempty(lots(b, 1))
@@ -14,24 +16,24 @@ end
     hdr(i, t=_LG_T_OPEN) = EventHeader(i, t, t, i)
     f_open = Fill(hdr(1), 1, 1, 1, _LG_PUT470, Short, Open, 3, 0.85, :cross_spread)
     @test apply!(b, f_open, _LG_SPEC) === b
-    @test b.cash ≈ 255.0
+    @test b.cash == 25500                                            # 3 * 8500
     @test open_lots(b) == [Lot(1, _LG_PUT470, Short, 1, 3, 0.85)]
     @test open_groups(b) == [1]
 
     f_close = Fill(hdr(2, _LG_T_CLOSE), 1, 2, 2, _LG_PUT470, Long, Close, 1, 0.40, :cross_spread)
     apply!(b, f_close, _LG_SPEC)
-    @test b.cash ≈ 215.0
+    @test b.cash == 21500                                            # 25500 - 4000
     @test open_lots(b) == [Lot(1, _LG_PUT470, Short, 1, 3, 0.85)]   # a close fill touches no lot
 
     apply!(b, Match(hdr(3, _LG_T_CLOSE), 1, 1, 2, 1), _LG_SPEC)
-    @test b.cash ≈ 215.0                                             # a match moves no cash
+    @test b.cash == 21500                                            # a match moves no cash
     @test open_lots(b) == [Lot(1, _LG_PUT470, Short, 1, 2, 0.85)]
 
-    apply!(b, Fee(hdr(4, _LG_T_CLOSE), 2, -1.30), _LG_SPEC)
-    @test b.cash ≈ 213.70
+    apply!(b, Fee(hdr(4, _LG_T_CLOSE), 2, -130), _LG_SPEC)          # 1.30 USD
+    @test b.cash == 21370                                            # 21500 - 130
 
     apply!(b, Expiry(hdr(5, _LG_EXPIRY_A), 1, 1, _LG_PUT470, Short, 2, 468.0, CashSettled), _LG_SPEC)
-    @test b.cash ≈ -186.30                       # 213.70 - 2 * 2 * 100
+    @test b.cash == -18630                       # 21370 - 2 * 20000 (intrinsic 2.00 per share)
     @test isempty(open_lots(b))
     @test isempty(open_groups(b))
     @test isempty(b.lots)                        # the emptied key is dropped
@@ -41,9 +43,9 @@ end
     b = Book()
     f = Fill(EventHeader(1, _LG_T_OPEN, _LG_T_OPEN, 1), 1, 1, 1, _LG_PUT470, Short, Open, 1, 0.85, :cross_spread)
     @test apply!(b, f) === b
-    @test b.cash ≈ 85.0
-    apply!(b, Fee(EventHeader(2, _LG_T_OPEN, _LG_T_OPEN, 2), 1, -0.65))
-    @test b.cash ≈ 84.35
+    @test b.cash == 8500
+    apply!(b, Fee(EventHeader(2, _LG_T_OPEN, _LG_T_OPEN, 2), 1, -65))   # 0.65 USD
+    @test b.cash == 8435                                                 # 8500 - 65
 end
 
 @testset "book: consuming a lot the book does not hold is a named failure" begin
@@ -79,7 +81,7 @@ end
 
 @testset "book: case 4, mixed expiries in one group" begin
     L, book = _lg_case_mixed_expiries()
-    @test book.cash ≈ 35.0
+    @test book.cash == 3500                                          # 8500 + 15000 - 20000
     @test open_lots(book) == [Lot(1, _LG_PUT465B, Short, 2, 1, 1.50)]
     x = L.events[end]
     @test x isa Expiry
@@ -87,12 +89,12 @@ end
     @test x.quantity == 1
 
     before = book_effective(L, _LG_EXPIRY_A - Second(1))
-    @test before.cash ≈ 235.0
+    @test before.cash == 23500                                       # 8500 + 15000
     @test open_lots(before) == [Lot(1, _LG_PUT470, Short, 1, 1, 0.85),
                                 Lot(1, _LG_PUT465B, Short, 2, 1, 1.50)]
 
     at = book_effective(L, _LG_EXPIRY_A)
-    @test at.cash ≈ 35.0
+    @test at.cash == 3500
     @test open_lots(at) == [Lot(1, _LG_PUT465B, Short, 2, 1, 1.50)]
     @test at == book
 end
@@ -103,22 +105,14 @@ end
     @test recorded_at(x) > effective_at(x)
     known = book_as_known(L, sequence(x) - 1)       # the sequence just before it
     @test length(open_lots(known)) == 2
-    @test known.cash ≈ 235.0
+    @test known.cash == 23500                                        # 8500 + 15000
     @test book_as_known(L, sequence(x)) == book
     true_at = book_effective(L, effective_at(x))    # its effective instant
     @test length(open_lots(true_at)) == 1
-    @test true_at.cash ≈ 35.0
+    @test true_at.cash == 3500                                       # 23500 - 20000
     @test book_effective(L, recorded_at(x)) == book
     @test book_effective(L, _LG_T_OPEN) == book_as_known(L, 1)
     @test book_as_known(L, 0) == Book()
-end
-
-@testset "book: lifecycle sorts before fills at an equal effective time" begin
-    x = Expiry(EventHeader(9, _LG_EXPIRY_A, _LG_T_NEXT, 9), 1, 1, _LG_PUT470, Short, 1, 468.0, CashSettled)
-    f = Fill(EventHeader(8, _LG_EXPIRY_A, _LG_EXPIRY_A, 8), 1, 1, 1, _LG_CALL490, Short, Open, 1, 1.10, :cross_spread)
-    @test VolSurfaceAnalysis._priority(x) < VolSurfaceAnalysis._priority(f)
-    @test VolSurfaceAnalysis._priority(Fee(EventHeader(1, _LG_T_OPEN, _LG_T_OPEN, 1), 1, -1.0)) ==
-          VolSurfaceAnalysis._priority(f)
 end
 
 @testset "book: case 7, incremental equals replay in every case" begin
@@ -131,6 +125,6 @@ end
             apply!(stepped, e)
         end
         @test stepped == book
-        @test book.cash ≈ sum(cash(e) for e in L.events)
+        @test book.cash == sum(cash(e) for e in L.events)
     end
 end

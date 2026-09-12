@@ -2,7 +2,7 @@
 
 @testset "contracts: the table resolves the listed ETFs" begin
     spec = contract_spec(Underlying("SPY"))
-    @test spec.multiplier == 100.0
+    @test spec.multiplier === 100
     @test spec.exercise == American
     @test spec.settlement == PMSettled
     @test spec.delivery == Physical

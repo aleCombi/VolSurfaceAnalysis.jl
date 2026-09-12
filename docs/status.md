@@ -151,10 +151,22 @@ failed.** What the review deferred is in the backlog below.
   match) and there is no structure-level atomic writer; the driver's
   review added that book equality is exact float while the two replays
   add in different orders. Every finding is pinned as a failing testset
-  in `test/ledger/test_review_findings.jl`, so **the gate is red on
-  purpose**: 1630 passed, 15 failed, 1 errored, all in that file. Next:
-  turn them green (the atomicity test waits for slice 2's
-  `record_order!`), then slice 2.
+  in `test/ledger/test_review_findings.jl`, so the gate went red on
+  purpose: 1630 passed, 15 failed, 1 errored, all in that file. **Fix
+  round landed 2026-09-12**
+  ([ledger-slice1-fix.md](proposals/ledger-slice1-fix.md)): `commit!`
+  resolves contract facts from the table itself, with no caller-supplied
+  spec; every reference must point backward in effective time and the
+  effective replay folds equal instants in sequence order; FIFO is
+  checked on append; an expiry settles the whole remaining lot at or
+  after the contract's expiry; cash is whole USD cents everywhere inside
+  the ledger, with `contract_cents` as the one rounding point
+  (`NonIntegralCash` refuses a price that is not whole cents per
+  contract) and fee shares by cumulative rounding, so book equality and
+  the trips-to-cash reconciliation are exact. **Gate: 1673 passed, 0
+  failed, 1 broken.** The one Broken is the structure-atomicity testset,
+  known-broken until slice 2's `record_order!` lands (it then records an
+  unexpected pass, the signal to flip it to `@test`). Next: slice 2.
 
 ## Backlog
 

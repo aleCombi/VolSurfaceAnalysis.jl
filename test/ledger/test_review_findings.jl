@@ -8,9 +8,9 @@
 #   expiry consumes the whole remaining lot                   -> finding 7.2
 #   expiry cannot be effective before contract expiry         -> finding 7.3
 #   incremental and effective books are exactly equal         -> finding 7.4
-# The atomic-order test is intentionally red with UndefVarError until slice 2
-# adds record_order!. The exact-equality test may be fixed either by comparing
-# cash with a tolerance or by storing cash in integer cents; that choice is open.
+# The fix round of 2026-09-12 turned seven of them green. The atomic-order
+# test is @test_broken until slice 2 adds record_order!. Cash is whole cents
+# inside the ledger, so the exact-equality test holds by construction.
 
 # Keep hand-built batch tests valid after commit!'s pinned-spec overload is
 # removed as proposed by finding 6.1.
@@ -45,7 +45,7 @@ end
     record_expiry!(L, book, lot; settlement_price=468.0,
                    effective_at=_LG_EXPIRY_A, recorded_at=_LG_T_NEXT)
     @test book_effective(L, _LG_EXPIRY_A) == book
-    @test book.cash == -115.0 # +0.85*100 - (470-468)*100 = 85 - 200
+    @test book.cash == -11500 # +0.85*100 - (470-468)*100 = 85 - 200
 end
 
 @testset "ledger promise: validated batches enforce FIFO" begin
@@ -65,19 +65,23 @@ end
 end
 
 @testset "ledger promise: a structure lands whole or not at all" begin
+    # Known broken until slice 2 adds record_order!; flip @test_broken to @test then.
     L, book = Ledger(), Book()
     before_group = L.next_group
     order = Order(:invalid_structure, [
         Leg(_LG_PUT470, Short, 1, Open),
         Leg(_LG_CALL490, Long, 1, Close),
     ])
-    @test_throws NothingToClose record_order!(
-        L, book, order; prices=[0.85, 0.40], effective_at=_LG_T_OPEN,
-        recorded_at=_LG_T_OPEN, order_leg_ids=[1, 2],
-        fill_rule=:cross_spread)
-    @test length(L) == 0
-    @test book == Book()
-    @test L.next_group == before_group
+    @test_broken begin
+        threw_right = try
+            record_order!(L, book, order; prices=[0.85, 0.40], effective_at=_LG_T_OPEN,
+                          recorded_at=_LG_T_OPEN, order_leg_ids=[1, 2], fill_rule=:cross_spread)
+            false                                   # it must throw
+        catch e
+            e isa NothingToClose
+        end
+        threw_right && length(L) == 0 && book == Book() && L.next_group == before_group
+    end
 end
 
 @testset "ledger promise: consumption is not effective before its open" begin

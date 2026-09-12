@@ -252,9 +252,10 @@ Each changes stored results; settle them together with the id break the
 settlement item already budgeted.
 
 1. Quantity is an integer number of contracts, price per share, cash
-   in USD, multiplier from the contract spec.
+   in whole USD cents, multiplier from the contract spec.
 2. `Match` is an event; matching is within the named group; matches
-   exhaust the closing fill; fees are shared pro rata by quantity.
+   exhaust the closing fill; fees are shared by quantity in whole cents,
+   by cumulative rounding, so the shares sum to the fee exactly.
 3. Bitemporal header: effective time, recorded time, sequence. A
    decision's view is cut by sequence, not by recorded time.
 4. Closed union container.

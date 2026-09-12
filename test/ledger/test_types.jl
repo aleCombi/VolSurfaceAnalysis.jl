@@ -55,7 +55,7 @@ end
     f   = Fill(h, 2, 5, 9, _LG_PUT470, Short, Open, 1, 0.85, :cross_spread)
     m   = Match(h, 2, 1, 6, 1)
     x   = Expiry(h, 2, 1, _LG_PUT470, Short, 1, 468.0, CashSettled)
-    fee = Fee(h, 6, -1.30)
+    fee = Fee(h, 6, -130)                       # 1.30 USD in cents
     for e in (f, m, x, fee)
         @test e isa LedgerEvent
         @test header(e) === h

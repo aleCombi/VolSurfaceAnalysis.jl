@@ -1,10 +1,12 @@
 # Shared fixtures for the ledger suites. Constants are prefixed `_LG_` and
 # helpers `_lg_` because runtests.jl includes every suite into one module.
 # Every scenario is a hand-built ledger; the expected numbers in the
-# suites are literals worked out by hand from the inputs listed here.
+# suites are literals worked out by hand from the inputs listed here, in
+# whole USD cents: one contract at a per-share price p moves p * 100 * 100
+# cents, so 0.85 per share is 8500 cents.
 
 const _LG_SPY  = Underlying("SPY")
-const _LG_SPEC = ContractSpec(100.0, American, PMSettled, Physical)
+const _LG_SPEC = ContractSpec(100, American, PMSettled, Physical)
 
 const _LG_EXPIRY_A = DateTime(2024, 1, 19, 21, 0)   # Fri 2024-01-19, 16:00 ET
 const _LG_EXPIRY_B = DateTime(2024, 1, 26, 21, 0)   # Fri 2024-01-26, 16:00 ET
@@ -30,7 +32,7 @@ function _lg_fill!(L, book, contract, side, intent, qty, price, group;
 end
 
 # Case 1. Short 1 put at 0.85, buy to close at 0.40.
-#   cash = +85 - 40 = 45; one match; one round trip of +45; book empty.
+#   cash = +8500 - 4000 = 4500; one match; one round trip of +4500; book empty.
 function _lg_case_round_trip()
     L, book = Ledger(), Book()
     g = mint_group!(L)
@@ -41,7 +43,8 @@ end
 
 # Case 2. Lots of 2 at 0.85 and 1 at 0.90 on one contract in one group;
 # close 3 at 0.40.
-#   cash = 170 + 90 - 120 = 140; matches of 2 and 1; trips +90 and +50.
+#   cash = 17000 + 9000 - 12000 = 14000; matches of 2 and 1;
+#   trips (8500 - 4000) * 2 = +9000 and (9000 - 4000) * 1 = +5000.
 function _lg_case_split()
     L, book = Ledger(), Book()
     g = mint_group!(L)
@@ -53,7 +56,7 @@ end
 
 # Case 3. Groups 1 and 2 each short 1 of the same call (at 1.10 and
 # 1.20); close group 2 only, at 0.70.
-#   cash = 110 + 120 - 70 = 160; group 1 untouched; one trip of +50.
+#   cash = 11000 + 12000 - 7000 = 16000; group 1 untouched; one trip of +5000.
 function _lg_case_two_groups()
     L, book = Ledger(), Book()
     g1 = mint_group!(L)
@@ -66,9 +69,9 @@ end
 
 # Case 4. One group, two lots with different expiries: short 1 put 470
 # (expiry A) at 0.85 and short 1 put 465 (expiry B) at 1.50. Expire the
-# first at settlement 468 (intrinsic 2), effective at expiry A and
-# recorded at the next tick.
-#   cash = 85 + 150 - 200 = 35; the put-465 lot stays open.
+# first at settlement 468 (intrinsic 2.00 per share, 20000 per contract),
+# effective at expiry A and recorded at the next tick.
+#   cash = 8500 + 15000 - 20000 = 3500; the put-465 lot stays open.
 function _lg_case_mixed_expiries()
     L, book = Ledger(), Book()
     g = mint_group!(L)
@@ -80,19 +83,20 @@ function _lg_case_mixed_expiries()
     return (L, book)
 end
 
-# Case 5. Case 2 plus a fee of -1.30 on the closing fill.
-#   shares by quantity: -1.30 * 2/3 = -0.8667 and -1.30 * 1/3 = -0.4333;
-#   trips 89.1333 and 49.5667; cash = 140 - 1.30 = 138.70.
+# Case 5. Case 2 plus a fee of -130 (1.30 USD) on the closing fill.
+#   shares by cumulative rounding over the matches of 2 then 1:
+#   round(-130 * 2/3) = -87, then -130 - (-87) = -43;
+#   trips 9000 - 87 = 8913 and 5000 - 43 = 4957; cash = 14000 - 130 = 13870.
 function _lg_case_fees()
     L, book = _lg_case_split()
     close_id = event_id(only(e for e in L.events if e isa Fill && e.intent == Close))
-    record_fee!(L, book, close_id, -1.30; effective_at=_LG_T_CLOSE, recorded_at=_LG_T_CLOSE)
+    record_fee!(L, book, close_id, -130; effective_at=_LG_T_CLOSE, recorded_at=_LG_T_CLOSE)
     return (L, book)
 end
 
 # Case 6. One group: short 1 put 470 at 0.85, never closed, and short 1
 # call 490 at 1.10, closed at 0.60.
-#   cash = 85 + 110 - 60 = 135; one trip of +50; the put lot stays open.
+#   cash = 8500 + 11000 - 6000 = 13500; one trip of +5000; the put lot stays open.
 function _lg_case_open_at_end()
     L, book = Ledger(), Book()
     g = mint_group!(L)
