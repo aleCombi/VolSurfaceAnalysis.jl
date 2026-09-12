@@ -143,7 +143,18 @@ failed.** What the review deferred is in the backlog below.
   the `pnl_series(::Ledger)` adapter so today's metrics read a ledger
   unchanged -- with its tests on hand-built ledgers. The engine still
   runs on `positions` until slice 2. Gate after slice 1: 1626
-  passed, 0 failed.
+  passed, 0 failed. **Review 2026-09-12**
+  ([ledger-slice1-review.md](proposals/ledger-slice1-review.md)): not
+  mergeable. The write path accepts batches the invariants forbid (a
+  caller-supplied spec at `commit!` that the replays ignore, consumption
+  effective before its open, a partial or early expiry, a non-FIFO
+  match) and there is no structure-level atomic writer; the driver's
+  review added that book equality is exact float while the two replays
+  add in different orders. Every finding is pinned as a failing testset
+  in `test/ledger/test_review_findings.jl`, so **the gate is red on
+  purpose**: 1630 passed, 15 failed, 1 errored, all in that file. Next:
+  turn them green (the atomicity test waits for slice 2's
+  `record_order!`), then slice 2.
 
 ## Backlog
 
