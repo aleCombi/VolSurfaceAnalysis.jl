@@ -159,9 +159,11 @@ tick after its instant.
    close. Only then is anything written: the journal, then `Fill`, its
    `Match`es and any `Fee`, as one batch. A leg that fails validation
    is an error before the batch, so no partial structure reaches the
-   ledger. The assumption that a structure fills whole at its resolved
-   quotes is named `AllOrNone` in the execution model; partial execution
-   is a later model.
+   ledger. That a structure fills whole at its resolved quotes is the
+   venue's behaviour, not a simplification: a guaranteed combo order at
+   Interactive Brokers fills in whole units and never as a lone leg.
+   The execution model names it `GuaranteedCombo`; partial fills in
+   whole units are a later model.
 4. **Window end.** Lifecycle once more, at the evaluation endpoint
    `exp.to`, not at the last policy tick, which may be earlier. Lots
    still open stay open and are marked; that is the unrealised line.
@@ -180,11 +182,24 @@ decision into cash. They are different in kind and are kept apart.
   live in code. An unknown underlying is a loud error. The engine
   projects the *resolved* values into identity, so a correction to the
   table is a new run id, never a silent change to old results.
-- **`ExecutionModel`: the simulated venue.** How a resolved quote becomes
-  a price (`CrossSpread`, the current behaviour), whether a structure
-  fills whole (`AllOrNone`), and what a fill costs (zero by default).
-  Choices. The live loop replaces it with the broker, whose fills carry
-  `BrokerExecution` in place of a rule.
+- **`ExecutionModel`: the simulated venue, shaped like Interactive
+  Brokers.** Three parts, each a choice. *Structure:* a combo order
+  fills in whole units or not at all (`GuaranteedCombo`), as IBKR
+  guarantees for all-option combos on one underlying; partial fills in
+  whole units are a later model, and a lone leg never happens. *Price:*
+  how resolved quotes become leg prices. `CrossSpread` (buy at the ask,
+  sell at the bid, per leg) is the current behaviour and a conservative
+  one; IBKR fills a combo at one net price on the exchange's complex
+  order book, often inside the legs' spreads, and allocates leg prices
+  from it, so a net-price rule with a stated fraction of the combined
+  spread is a later model. *Cost:* a per-contract commission booked as
+  a `Fee` on each fill, with a per-order minimum, defaulting to IBKR's
+  published fixed-rate schedule for US options (the numbers are cited
+  from their page when the model lands); zero stays selectable. Margin
+  checks and order rejections are not modelled: there is no capital
+  base. The live loop replaces the whole model with the broker, whose
+  fills carry `BrokerExecution` in place of a rule and whose
+  commissions arrive as their own reports.
 - **`LifecycleModel`: stated departures from the facts.** Where the data
   or the scope cannot support the real mechanic, the simplification is
   named: SPY cash-settles at intrinsic instead of delivering shares; the
@@ -256,8 +271,9 @@ settlement item already budgeted.
 9. SPY settles at intrinsic against the session-close print, standing
    in for the official close. Sessions from the spot tree, validated
    against an exchange calendar; a gap is a named failure.
-10. A structure fills whole or not at all; a leg that cannot be priced
-    is an error before anything is written.
+10. A structure fills whole or not at all, as a guaranteed combo does
+    at IBKR; a leg that cannot be priced is an error before anything is
+    written. Commissions are per-contract `Fee` events on each fill.
 11. `Expiry` copies side and contract from its opening fill, checked on
     append, so every event's cash is local.
 12. Assignment and exercise deferred under the named assumption, as
@@ -302,7 +318,8 @@ Moves to the module doc when code lands (design rule 5).
 |---|---|---|
 | Append-only journal; corrections are new entries | Double-entry practice | events immutable, never edited |
 | Orders declare intent; a close with nothing to close is rejected | US broker tickets; OCC position reporting | `Leg.intent`; engine errors |
-| Positions are the net of fills; lot pairing is recorded under a named rule | Broker statements; IRS FIFO default | `Book` by replay; `Match` event |
+| Positions are the net of fills; lot pairing is recorded under a named rule | IBKR statements (positions per contract, FIFO default lot method); IRS FIFO default | `Book` by replay; `Match` event |
+| A multi-leg option order fills in whole units, one execution report per leg, commissions per contract | Interactive Brokers: combo orders (guaranteed vs non-guaranteed), TWS API execution reports, US options commission schedule | `GuaranteedCombo`; one `Fill` per leg; `Fee` per fill |
 | An execution report carries ids, quantity, price and time, not the quote the client saw | Broker execution reports | `Fill` is execution only; the order journal holds the quote |
 | Prices per share, cash per contract times 100; style, settlement and delivery are listed per product | OCC contract spec | `ContractSpec` table in code, per underlying |
 | Exercise by exception at expiry; PM settlement against the official close | OCC Rule 805; Cboe procedures | `Expiry` outcome; `LifecycleModel` names where it departs |

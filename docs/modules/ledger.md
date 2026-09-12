@@ -129,13 +129,13 @@ the later slices of the proposal.
 
 | Convention | Source | Consequence |
 |---|---|---|
-| Append-only journal; corrections are new entries | Double-entry practice | events immutable, never edited |
-| Orders declare intent; a close with nothing to close is rejected | US broker tickets; OCC position reporting | `Leg.intent`; `NothingToClose` |
-| Positions are the net of fills; lot pairing is recorded under a named rule | Broker statements; IRS FIFO default | `Book` by replay; `Match` event, FIFO within group and contract |
-| An execution report carries ids, quantity, price and time, not the quote the client saw | Broker execution reports | `Fill` is execution only; the order journal holds the quote |
+| Append-only journal; corrections are new entries | Fowler, [Event Sourcing](https://martinfowler.com/eaaDev/EventSourcing.html): every state change stored as an event, never edited | events immutable, never edited |
+| Orders declare intent; a close with nothing to close is rejected | FIX `PositionEffect` (tag 77, O/C); IBKR TWS API [`Order.OpenClose`](https://interactivebrokers.github.io/tws-api/classIBApi_1_1Order.html), O/C | `Leg.intent`; `NothingToClose` |
+| Positions are the net of fills; lot pairing is recorded under a named rule | IBKR [Lot Matching Methods](https://www.ibkrguides.com/traderworkstation/lot-matching-methods.htm), FIFO is the default; [IRS Publication 550](https://www.irs.gov/publications/p550), FIFO unless shares are identified | `Book` by replay; `Match` event, FIFO within group and contract |
+| An execution report carries ids, quantity, price and time, not the quote the client saw | FIX [ExecutionReport (35=8)](https://www.onixs.biz/fix-dictionary/4.4/msgtype_8_8.html): `ExecID`, `LastQty`, `LastPx`, `TransactTime`, no quote fields | `Fill` is execution only; the order journal holds the quote |
 | Prices per share, cash per contract times 100; style, settlement and delivery are listed per product | OCC contract specifications | `ContractSpec` table in code, per underlying |
 | Exercise by exception at expiry; PM settlement against the official close | OCC Rule 805; Cboe procedures | `Expiry` outcome; the lifecycle model names where it departs |
-| Realised and unrealised are separate lines | Fund reporting | `round_trips` now; the equity curve later |
+| Realised and unrealised are separate lines | IBKR activity statement, [Realized and Unrealized Performance Summary](https://www.ibkrguides.com/reportingreference/reportguide/realized_unrealizedperformancesummary_default.htm): realised by FIFO at the close, open positions marked to market | `round_trips` now; the equity curve later |
 | Composition plus accessor methods, not inherited fields | Julia manual, Interfaces | shared `EventHeader`; `header`, `event_id`, `effective_at`, `recorded_at`, `sequence`, `group` |
 | Avoid abstract-element containers; small closed unions are the idiom | Julia manual, Performance Tips | `Vector{LedgerEvent}` over a closed union |
 | Content-based `hash` and `==` for value types used as dictionary keys | Julia manual, `Base.hash` docstring; `data.md` on `Underlying` | `ContractKey` |
