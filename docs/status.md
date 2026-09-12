@@ -163,8 +163,26 @@ failed.** What the review deferred is in the backlog below.
   the ledger, with `contract_cents` as the one rounding point
   (`NonIntegralCash` refuses a price that is not whole cents per
   contract) and fee shares by cumulative rounding, so book equality and
-  the trips-to-cash reconciliation are exact. **Gate: 1673 passed, 0
-  failed, 1 broken.** The one Broken is the structure-atomicity testset,
+  the trips-to-cash reconciliation are exact. Gate after the fix round:
+  1673 passed, 0 failed, 1 broken. **Hardening round landed 2026-09-12**
+  ([ledger-slice1-hardening.md](proposals/ledger-slice1-hardening.md);
+  the inventory is
+  [ledger-slice1-coverage.md](proposals/ledger-slice1-coverage.md)):
+  every invariant and named failure the module documents is mapped to
+  its enforcing code and its test; `test_review_findings.jl` is
+  dissolved into the suites beside the behaviour they check; documented
+  promises the code did not enforce now are (an expiry's outcome agrees
+  with its intrinsic value; recorded time is at or after effective time
+  and nondecreasing along sequence, `RecordedOutOfOrder`; prices are
+  finite, `InvalidPrice`; an unminted id at `event` and a non-positive
+  join id are `DanglingReference`). The rule additions are listed in the
+  coverage document for veto. Codex's review of the round
+  ([ledger-slice1-hardening-review.md](proposals/ledger-slice1-hardening-review.md))
+  found the fill review's construction-time post-expiry check missing:
+  `FillAfterExpiry` is now thrown by the `Fill` constructor too, and
+  every rejection in every failure testset checks the ledger snapshot
+  and the book. **Gate: 2306 passed, 0 failed,
+  1 broken.** The one Broken is the structure-atomicity testset,
   known-broken until slice 2's `record_order!` lands (it then records an
   unexpected pass, the signal to flip it to `@test`). Next: slice 2.
 

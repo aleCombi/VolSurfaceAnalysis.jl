@@ -119,3 +119,21 @@ const _LG_CASES = [
 # writers mint theirs; and the ledger state a failed batch must leave.
 _lg_hdr(L, k, t=_LG_T_CLOSE) = EventHeader(L.next_id + k, t, t, L.next_sequence + k)
 _lg_snapshot(L) = (length(L), L.next_id, L.next_sequence, L.next_group, L.next_execution)
+
+# The structural promises of a book, checked after any fold: a lot with
+# nothing remaining is gone (and so is an emptied key), every lot sits
+# under the key of its own group and contract, and the lots of one key
+# are in opening order (opening fill ids are minted in sequence, so
+# ascending id is FIFO order). Records into the enclosing testset.
+function _lg_check_book(book::Book)
+    for ((g, c), v) in book.lots
+        @test !isempty(v)
+        for l in v
+            @test l.remaining > 0
+            @test l.group == g && l.contract == c
+        end
+        ids = [l.open_fill_id for l in v]
+        @test issorted(ids) && allunique(ids)
+    end
+    return nothing
+end

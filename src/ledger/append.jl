@@ -34,7 +34,10 @@ end
 """
     FillAfterExpiry
 
-A fill whose effective time is after its contract's expiry.
+A fill whose effective time is after its contract's expiry. Thrown by
+the `Fill` constructor, so no such value exists, and checked again on
+append so that an event which bypasses the constructor (one loaded from
+storage) is refused too.
 """
 struct FillAfterExpiry <: Exception
     id::Int
@@ -45,10 +48,13 @@ end
 """
     DanglingReference
 
-A reference (`field`, holding `id`) that does not point to an earlier
-event of the right kind: an `Open` fill for `open_fill_id`, a fill for
-`close_fill_id` or `source_id`. Also thrown by a fold that cannot find
-the lot an event consumes.
+A reference (`field`, holding `id`) that points to nothing: not to an
+earlier event of the right kind (an `Open` fill for `open_fill_id`, a
+fill for `close_fill_id` or `source_id`); an id the ledger never minted,
+asked of [`event`](@ref) (`:event_id`); or, at construction, a `Fill`
+whose `order_leg_id` or `execution_id` is not positive, since no order
+leg or execution report carries such an id. Also thrown by a fold that
+cannot find the lot an event consumes.
 """
 struct DanglingReference <: Exception
     field::Symbol
@@ -62,16 +68,43 @@ A batch whose shape the invariants forbid, for one of these reasons: the
 matches following a `Close` fill do not reference it and exhaust it
 exactly; a match pairs a lot of the wrong group, contract or side, or
 skips an older open lot (FIFO); the contract, side or group copied onto
-an `Expiry` differ from its opening fill's, the expiry settles less than
-the lot's remaining, or it is effective before its contract's expiry; or
-an event is effective before an event it references (a match or an
-expiry before its opening fill, a match at an instant other than its
-closing fill's, a fee before its source fill). `id` is the offending
+an `Expiry` differ from its opening fill's, its `outcome` disagrees with
+the intrinsic value at its settlement price, the expiry settles less
+than the lot's remaining, or it is effective before its contract's
+expiry; or an event is effective before an event it references (a match
+or an expiry before its opening fill, a match at an instant other than
+its closing fill's, a fee before its source fill). `id` is the offending
 event and `reason` says which.
 """
 struct MatchMismatch <: Exception
     id::Int
     reason::String
+end
+
+"""
+    InvalidPrice
+
+A `Fill` whose `price` is not finite and positive, or an `Expiry` whose
+`settlement_price` is not finite and non-negative; `value` is the price
+supplied. Thrown by the constructors, so no such value exists.
+"""
+struct InvalidPrice <: Exception
+    value::Float64
+end
+
+"""
+    RecordedOutOfOrder
+
+An event recorded before it could have been: its `recorded_at` is
+before its own effective time (a fact cannot be recorded before it is
+true) or before the recorded time of the event preceding it in sequence
+(the journal learns things in order, across batches and within one).
+`bound` is the time `recorded_at` fell short of, whichever of the two.
+"""
+struct RecordedOutOfOrder <: Exception
+    id::Int
+    recorded_at::DateTime
+    bound::DateTime
 end
 
 """
@@ -118,8 +151,8 @@ Base.showerror(io::IO, e::FillAfterExpiry) =
     print(io, "FillAfterExpiry: fill ", e.id, " effective at ", e.effective_at,
           " is after its contract's expiry ", e.expiry)
 Base.showerror(io::IO, e::DanglingReference) =
-    print(io, "DanglingReference: ", e.field, " = ", e.id,
-          " is not an earlier event of the right kind")
+    print(io, "DanglingReference: ", e.field, " = ", e.id, " points to nothing ",
+          "(no earlier event of the right kind, no minted id, or no positive join id)")
 Base.showerror(io::IO, e::MatchMismatch) =
     print(io, "MatchMismatch: event ", e.id, ": ", e.reason)
 Base.showerror(io::IO, e::SequenceGap) =
@@ -128,6 +161,12 @@ Base.showerror(io::IO, e::NonPositiveQuantity) =
     print(io, "NonPositiveQuantity: quantity must be a positive integer, got ", e.quantity)
 Base.showerror(io::IO, e::NonIntegralCash) =
     print(io, "NonIntegralCash: ", e.value, " cents per contract is not a whole number of cents")
+Base.showerror(io::IO, e::InvalidPrice) =
+    print(io, "InvalidPrice: ", e.value, " is not a finite price ",
+          "(positive for a fill, non-negative for a settlement)")
+Base.showerror(io::IO, e::RecordedOutOfOrder) =
+    print(io, "RecordedOutOfOrder: event ", e.id, " is recorded at ", e.recorded_at,
+          ", before ", e.bound, " (its effective time, or the recorded time of the event before it)")
 
 # ---- writers ---------------------------------------------------------
 
@@ -185,6 +224,12 @@ function record_fill!(L::Ledger, book::Book, leg::Leg, group::Int;
     return batch
 end
 
+# The outcome an expiry carries: `Worthless` when intrinsic is zero,
+# `CashSettled` otherwise. The writer derives it here and `_validate`
+# checks a hand-built expiry against the same rule.
+_outcome(contract::ContractKey, settlement_price::Real)::ExpiryOutcome =
+    intrinsic(contract, settlement_price) == 0.0 ? Worthless : CashSettled
+
 """
     record_expiry!(L, book, lot::Lot; settlement_price, effective_at, recorded_at) -> Expiry
 
@@ -196,7 +241,7 @@ contract's expiry; `recorded_at` the tick that booked it.
 function record_expiry!(L::Ledger, book::Book, lot::Lot;
                         settlement_price::Real, effective_at::DateTime,
                         recorded_at::DateTime)::Expiry
-    outcome = intrinsic(lot.contract, settlement_price) == 0.0 ? Worthless : CashSettled
+    outcome = _outcome(lot.contract, settlement_price)
     e = Expiry(_header(L, 0, effective_at, recorded_at), lot.group, lot.open_fill_id,
                lot.contract, lot.side, lot.remaining, settlement_price, outcome)
     commit!(L, book, LedgerEvent[e])
@@ -226,9 +271,13 @@ contract facts come from the table, so the incremental book and the
 replays fold the same numbers. The checks, each with its named failure:
 
 - `id` and `sequence` continue the ledger's counters ([`SequenceGap`](@ref));
+- every event is recorded at or after its effective time, and recorded
+  times are nondecreasing along sequence, across the batch boundary and
+  within the batch ([`RecordedOutOfOrder`](@ref));
 - every event's cash is whole cents ([`NonIntegralCash`](@ref); an
   unlisted underlying is [`UnknownContract`](@ref));
-- a fill is effective at or before its contract's expiry ([`FillAfterExpiry`](@ref));
+- a fill is effective at or before its contract's expiry ([`FillAfterExpiry`](@ref),
+  already refused by the `Fill` constructor);
 - every reference points to an earlier event of the right kind ([`DanglingReference`](@ref));
 - every reference points backward in effective time: a match's opening
   fill is effective at or before its closing fill and the match at the
@@ -238,6 +287,7 @@ replays fold the same numbers. The checks, each with its named failure:
   lots of its group and contract on the opposite side, each consume the
   oldest still-eligible lot (FIFO), and sum to its quantity; an
   `Expiry`'s copied contract, side and group equal its opening fill's,
+  its outcome agrees with the intrinsic value at its settlement price,
   it settles the whole remaining lot, and it is effective at or after
   the contract's expiry ([`MatchMismatch`](@ref));
 - consumption never exceeds a lot's remaining ([`ExceedsOpen`](@ref)).
@@ -336,6 +386,10 @@ function _check_expiry(L::Ledger, book::Book, seen, opened, consumed, e::Expiry)
     (e.contract == o.contract && e.side == o.side && e.group == o.group) ||
         throw(MatchMismatch(event_id(e),
             "copied contract, side or group differ from opening fill $(event_id(o))"))
+    e.outcome == _outcome(e.contract, e.settlement_price) ||
+        throw(MatchMismatch(event_id(e),
+            "outcome $(e.outcome) disagrees with an intrinsic value of " *
+            "$(intrinsic(e.contract, e.settlement_price)) at settlement $(e.settlement_price)"))
     effective_at(o) <= effective_at(e) ||
         throw(MatchMismatch(event_id(e),
             "expiry is effective before its opening fill $(event_id(o))"))
@@ -352,11 +406,19 @@ function _check_expiry(L::Ledger, book::Book, seen, opened, consumed, e::Expiry)
 end
 
 function _validate(L::Ledger, book::Book, batch::AbstractVector{<:LedgerEvent})::Nothing
+    last_recorded = isempty(L) ? typemin(DateTime) : recorded_at(L.events[end])
     for (k, e) in enumerate(batch)
         want_id  = L.next_id + k - 1
         want_seq = L.next_sequence + k - 1
         event_id(e) == want_id || throw(SequenceGap(:id, want_id, event_id(e)))
         sequence(e) == want_seq || throw(SequenceGap(:sequence, want_seq, sequence(e)))
+        # A fact cannot be recorded before it is true, and the journal
+        # learns things in sequence order: recorded time never steps back.
+        recorded_at(e) >= effective_at(e) ||
+            throw(RecordedOutOfOrder(event_id(e), recorded_at(e), effective_at(e)))
+        recorded_at(e) >= last_recorded ||
+            throw(RecordedOutOfOrder(event_id(e), recorded_at(e), last_recorded))
+        last_recorded = recorded_at(e)
     end
     # Every event's cash must resolve to whole cents before anything lands
     # (NonIntegralCash; UnknownContract for an unlisted underlying).

@@ -77,14 +77,16 @@ and every amount is an integer.
 Two replays answer two questions. *What was known* cuts by sequence,
 everything appended up to a boundary: the view a decision could have
 seen. Recorded time is not a safe cut for it, because fills booked at
-the same tick after the decision share its recorded time. *What was
-true* at an instant cuts by effective time and folds in (effective
-time, sequence) order: events at an equal instant fold in journal
-order. That is safe because every reference points backward in
-effective time (below), so the fold never meets a lot it has not yet
-opened. The two differ only by expiries booked at the tick after their
-instant: an expiry booked on Monday's first tick is already true at
-Friday's settlement.
+the same tick after the decision share its recorded time. Recorded time
+is nondecreasing along sequence and never precedes an event's effective
+time (both checked on append), so a cut by sequence is also a cut by
+recorded time, only finer. *What was true* at an instant cuts by
+effective time and folds in (effective time, sequence) order: events at
+an equal instant fold in journal order. That is safe because every
+reference points backward in effective time (below), so the fold never
+meets a lot it has not yet opened. The two differ only by expiries
+booked at the tick after their instant: an expiry booked on Monday's
+first tick is already true at Friday's settlement.
 
 ## Invariants
 
@@ -93,10 +95,15 @@ against the ledger and the book; nothing is appended if any check
 fails, and each failure has a name:
 
 - sequence and id continue the ledger's counters -- `SequenceGap`;
+- every event is recorded at or after its effective time: a fact is not
+  recorded before it is true -- `RecordedOutOfOrder`;
+- recorded time is nondecreasing along sequence, across batches and
+  within one -- `RecordedOutOfOrder`;
 - every event's cash is whole cents -- `NonIntegralCash` (an unlisted
   underlying is `UnknownContract`);
 - a fill is effective at or before its contract's expiry --
-  `FillAfterExpiry`;
+  `FillAfterExpiry`, thrown at construction so no such value exists and
+  checked again on append;
 - every reference points backward to an event of the right kind --
   `DanglingReference`;
 - every reference points backward in effective time: a match's opening
@@ -107,19 +114,29 @@ fails, and each failure has a name:
   own group and contract on the opposite side, each take the oldest
   lot still eligible (FIFO is checked on append, not only produced by
   the writer), and exhaust it exactly -- `MatchMismatch`;
-- an expiry's copied fields equal its opening fill's, it settles the
-  whole remaining lot, and it is effective at or after the contract's
-  expiry -- `MatchMismatch`;
+- an expiry's copied fields equal its opening fill's, its outcome is
+  `Worthless` when intrinsic is zero and `CashSettled` otherwise, it
+  settles the whole remaining lot, and it is effective at or after the
+  contract's expiry -- `MatchMismatch`;
 - consumption never exceeds a lot's remaining -- `ExceedsOpen`; a close
   with nothing to close -- `NothingToClose`;
 - quantities are positive integers -- `NonPositiveQuantity`, thrown at
-  construction so no such value exists.
+  construction so no such value exists;
+- prices are finite, a fill's positive and a settlement's non-negative
+  -- `InvalidPrice`, thrown at construction;
+- a fill's join ids (`order_leg_id`, `execution_id`) are positive --
+  `DanglingReference`, thrown at construction; and an id the ledger
+  never minted, asked of `event`, is `DanglingReference` too, never a
+  bare `KeyError`.
 
 A close matches only within its own group and contract, FIFO among the
 open lots of the opposite side, so two groups on one contract never
 touch each other's lots. Effective time need not be monotone in
 sequence; ids and sequence are separate counters that coincide in a
-fresh ledger and are never used for each other.
+fresh ledger and are never used for each other. Every failure prints
+its name. The inventory of these promises against their enforcing code
+and tests is
+[ledger-slice1-coverage.md](../proposals/ledger-slice1-coverage.md).
 
 ## Responsibility boundaries
 

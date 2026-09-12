@@ -29,7 +29,6 @@ using Dates
     include("ledger/test_book.jl")
     include("ledger/test_append.jl")
     include("ledger/test_round_trips.jl")
-    include("ledger/test_review_findings.jl")
     include("policies/test_policy.jl")
     include("agents/test_agent.jl")
     include("backtest/test_engine.jl")

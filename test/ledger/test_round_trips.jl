@@ -114,6 +114,70 @@ end
     end
 end
 
+# The three parts of cash while lots are still open: the trips' pnl, the
+# opening cash still tied up in open lots (-side * contract_cents(unit_price)
+# * remaining per lot), and the fee not yet allocated to any trip (per fill
+# with a fee, F - round(F * consumed // Q)). Returns the triple.
+function _lg_reconciliation(L, book)
+    cents = VolSurfaceAnalysis.contract_cents
+    trips = round_trips(L)
+    tied_up = sum((-side_sign(l.side) * cents(l.unit_price, _LG_SPEC) * l.remaining
+                   for l in open_lots(book)); init=0)
+    consumed = Dict{Int,Int}()                    # per fill, quantity consumed by trips
+    for r in trips
+        consumed[r.open_id] = get(consumed, r.open_id, 0) + r.quantity
+        r.kind == :closed && (consumed[r.close_id] = get(consumed, r.close_id, 0) + r.quantity)
+    end
+    fees = Dict{Int,Int}()                        # total fee per source fill
+    for e in L.events
+        e isa Fee && (fees[e.source_id] = get(fees, e.source_id, 0) + e.amount)
+    end
+    unallocated = 0
+    for (fid, F) in fees
+        Q = VolSurfaceAnalysis.event(L, fid).quantity
+        unallocated += F - round(Int, F * get(consumed, fid, 0) // Q)
+    end
+    return (sum((r.pnl for r in trips); init=0), tied_up, unallocated)
+end
+
+@testset "round_trips: partial reconciliation, trips plus open lots plus unallocated fees equal cash" begin
+    expected = Dict(
+        "full round trip"             => (4500, 0, 0),         # nothing open, no fee
+        "close split across lots"     => (14000, 0, 0),
+        "two groups on one contract"  => (5000, 11000, 0),     # group 1's short call: +1.10 * 10000 * 1
+        "mixed expiries in one group" => (-11500, 15000, 0),   # the short put 465: +1.50 * 10000 * 1
+        "fees across a partial close" => (13870, 0, 0),        # the close's fee is fully allocated
+        "open at window end"          => (5000, 8500, 0),      # the short put 470: +0.85 * 10000 * 1
+    )
+    for (name, build) in _LG_CASES
+        L, book = build()
+        parts = _lg_reconciliation(L, book)
+        @test parts == expected[name]
+        @test sum(parts) == book.cash
+    end
+    # a fee on an opening fill consumed only in part: 3 short at 0.85 (25500),
+    # fee -90, one closed at 0.40 (-4000): cash 21410; the trip is 4500 - 30 =
+    # 4470, two lots remain (17000), and -90 - round(-90 * 1/3) = -60 is unallocated
+    L, book = Ledger(), Book()
+    g = mint_group!(L)
+    _lg_fill!(L, book, _LG_PUT470, Short, Open, 3, 0.85, g; leg_id=1)
+    record_fee!(L, book, 1, -90; effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN)
+    _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, 0.40, g; at=_LG_T_CLOSE, leg_id=2)
+    @test book.cash == 21410                                   # 25500 - 90 - 4000
+    @test _lg_reconciliation(L, book) == (4470, 17000, -60)
+    @test sum(_lg_reconciliation(L, book)) == book.cash
+    # one more closed at 0.30 (-3000): its share is round(-90 * 2/3) - (-30) =
+    # -30, so the trip is 5500 - 30 = 5470; one lot remains (8500); -30 unallocated
+    _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, 0.30, g; at=_LG_T_CLOSE + Hour(1), leg_id=3)
+    @test book.cash == 18410                                   # 21410 - 3000
+    @test _lg_reconciliation(L, book) == (4470 + 5470, 8500, -30)
+    @test sum(_lg_reconciliation(L, book)) == book.cash
+    # the last one at 0.30: the remainder lands on it, nothing is open, exact
+    _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, 0.30, g; at=_LG_T_CLOSE + Hour(2), leg_id=4)
+    @test _lg_reconciliation(L, book) == (4470 + 5470 + 5470, 0, 0)   # 5500 - 30 again: -90 - (-60)
+    @test sum(r.pnl for r in round_trips(L)) == book.cash == 15410  # 25500 - 90 - 4000 - 3000 - 3000
+end
+
 @testset "round_trips: a pinned spec overrides the table" begin
     L, _ = _lg_case_round_trip()
     @test round_trips(L, ContractSpec(1, American, PMSettled, Physical))[1].pnl == 45   # multiplier 1: 85 - 40 cents

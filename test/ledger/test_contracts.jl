@@ -16,4 +16,6 @@ end
     @test err isa UnknownContract
     @test err.underlying == Underlying("XYZ")
     @test occursin("XYZ", sprint(showerror, err))
+    @test occursin("UnknownContract", sprint(showerror, err))     # it prints its name
+    @test err isa Exception
 end

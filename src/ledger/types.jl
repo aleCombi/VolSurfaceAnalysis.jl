@@ -6,8 +6,9 @@
 # cut: a ledger is built and replayed from its own events, which is what
 # keeps the module testable on hand-built ledgers.
 #
-# `NonPositiveQuantity`, thrown by the constructors below, is defined
-# with the other named failures in `append.jl`.
+# `NonPositiveQuantity`, `InvalidPrice`, `DanglingReference` and
+# `FillAfterExpiry`, thrown by the constructors and by `event` below, are
+# defined with the other named failures in `append.jl`.
 
 @enum Side Long Short
 @enum Intent Open Close
@@ -100,11 +101,16 @@ end
 """
     Fill
 
-One execution. `order_leg_id` and `execution_id` join it to the order
-journal; `contract`, `side`, `intent`, a positive `quantity` of
-contracts, a positive `price` per share, and the `fill_rule` that
-produced the price (`:cross_spread`, `:broker_execution`, ...). Carries
-nothing about the market it was filled against.
+One execution, effective at or before its contract's expiry.
+`order_leg_id` and `execution_id` join it to the order journal and to
+the execution report, so both are positive; `contract`, `side`,
+`intent`, a positive `quantity` of contracts, a finite positive `price`
+per share, and the `fill_rule` that produced the price
+(`:cross_spread`, `:broker_execution`, ...). Carries nothing about the
+market it was filled against. The constructor throws
+[`NonPositiveQuantity`](@ref), [`InvalidPrice`](@ref),
+[`DanglingReference`](@ref) (a non-positive join id) or
+[`FillAfterExpiry`](@ref) otherwise, so no such value exists.
 """
 struct Fill
     header::EventHeader
@@ -122,7 +128,11 @@ struct Fill
                   execution_id::Integer, contract::ContractKey, side::Side,
                   intent::Intent, quantity::Integer, price::Real, fill_rule::Symbol)
         quantity > 0 || throw(NonPositiveQuantity(Int(quantity)))
-        price > 0 || throw(ArgumentError("fill price must be positive, got $price"))
+        (isfinite(price) && price > 0) || throw(InvalidPrice(Float64(price)))
+        order_leg_id > 0 || throw(DanglingReference(:order_leg_id, Int(order_leg_id)))
+        execution_id > 0 || throw(DanglingReference(:execution_id, Int(execution_id)))
+        header.effective_at <= contract.expiry ||
+            throw(FillAfterExpiry(header.id, header.effective_at, contract.expiry))
         new(header, group, order_leg_id, execution_id, contract, side, intent,
             Int(quantity), Float64(price), fill_rule)
     end
@@ -154,9 +164,11 @@ end
     Expiry
 
 One remaining lot reaching settlement: `quantity` of the lot opened by
-`open_fill_id` settles at `settlement_price` with `outcome`. `contract`
+`open_fill_id` settles at `settlement_price` (finite and non-negative,
+else [`InvalidPrice`](@ref) at construction) with `outcome`. `contract`
 and `side` are copied from the opening fill and checked against it on
-append, so the event's cash is local to the event.
+append, so the event's cash is local to the event; `outcome` is derived
+from the intrinsic value and checked on append too.
 """
 struct Expiry
     header::EventHeader
@@ -172,6 +184,8 @@ struct Expiry
                     contract::ContractKey, side::Side, quantity::Integer,
                     settlement_price::Real, outcome::ExpiryOutcome)
         quantity > 0 || throw(NonPositiveQuantity(Int(quantity)))
+        (isfinite(settlement_price) && settlement_price >= 0) ||
+            throw(InvalidPrice(Float64(settlement_price)))
         new(header, group, open_fill_id, contract, side, Int(quantity),
             Float64(settlement_price), outcome)
     end
@@ -224,10 +238,14 @@ Base.show(io::IO, L::Ledger) = print(io, "Ledger(", length(L), " events)")
 """
     event(L::Ledger, id::Int) -> LedgerEvent
 
-The event with `id`. Throws `KeyError` for an id the ledger never
-minted.
+The event with `id`. Throws [`DanglingReference`](@ref) (`:event_id`)
+for an id the ledger never minted; a sequence number is not an id.
 """
-event(L::Ledger, id::Int)::LedgerEvent = L.events[L.index[id]]
+function event(L::Ledger, id::Int)::LedgerEvent
+    i = get(L.index, id, nothing)
+    i === nothing && throw(DanglingReference(:event_id, id))
+    return L.events[i]
+end
 
 # Accessors on the shared header. `group` is the one field a kind lacks:
 # it sits on lifecycle events only, so a `Fee` answers `nothing`.
