@@ -123,16 +123,27 @@ failed.** What the review deferred is in the backlog below.
 
 ## In flight
 
-- **Ledger rebuild (proposal).** Review of the fill-vector ledger found
-  the lifecycle split over three layers (engine fills, `pnl_series`
-  matches, `run_experiment` settles) with no shared record, plus a
-  FIFO float-residue defect, per-share units labelled USD, and per-leg
-  sampling that inflates the annualised ratios. The plan -- typed event
-  ledger booked inside the run, `Order` with intent and structure id out
-  of `decide`, a `Book` view in, lifecycle rules in core identity,
-  metrics over `round_trips` and an equity curve -- is in
-  [docs/proposals/ledger.md](proposals/ledger.md). Decisions in its
-  section 4 are open; no code yet.
+- **Ledger rebuild (proposal).** The fill-vector ledger splits the
+  lifecycle over three layers (engine fills, `pnl_series` matches,
+  `run_experiment` settles) with no shared record, plus a FIFO
+  float-residue defect, per-share units labelled USD, and per-leg
+  sampling that inflates the annualised ratios. The plan is an event
+  journal booked inside the run: `Order` with intent out of `decide`, a
+  `Book` view in, `Fill` / `Match` / `Expiry` / `Fee` events with a
+  bitemporal header, an order journal outside the ledger holding the
+  quotes decisions saw, contract facts / simulated venue / named
+  simplifications as three identity-bearing config values, ratios on a
+  daily equity curve. Revised after four reviews; see
+  [docs/proposals/ledger.md](proposals/ledger.md), whose section 3
+  decisions are being settled slice by slice. **Slice 1 landed
+  2026-09-11**: the pure
+  `ledger` module ([docs/modules/ledger.md](modules/ledger.md)) -- the
+  order and event vocabulary, the contract table, the cash rules, the
+  validated write path, the book with both replays, `round_trips`, and
+  the `pnl_series(::Ledger)` adapter so today's metrics read a ledger
+  unchanged -- with its tests on hand-built ledgers. The engine still
+  runs on `positions` until slice 2. Gate after slice 1: 1626
+  passed, 0 failed.
 
 ## Backlog
 
