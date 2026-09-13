@@ -237,3 +237,51 @@ end
     @test VolSurfaceAnalysis.to_dict(p_day)["expiry_interval"] !=
           VolSurfaceAnalysis.to_dict(p_week)["expiry_interval"]
 end
+
+@testset "identity: a strangle quantity of 1 and of 1.0 is one experiment" begin
+    # the loader builds an Int either way and the canonical form collapses
+    # 1 and 1.0, so no run id moves with the integer quantity
+    strangle(q) = """
+        name = "q"
+        from = 2024-01-15T15:30:00
+        to = 2024-01-15T15:31:00
+        clock = { kind = "option_quote", underlying = "SPY" }
+        [data.option_bar]
+        type = "parquet_option_bars"
+        root = "/nonexistent/opts"
+        [data.option_quote]
+        type = "from_bars"
+        synthesizer = { type = "ohlcv_spread", lambda = 0.7 }
+        [data.spot_price]
+        type = "parquet_spots"
+        root = "/nonexistent/spot"
+        [data.rate_curve]
+        type = "constant"
+        currency = "USD"
+        value = 0.04
+        [data.div_curve]
+        type = "constant"
+        underlying = "SPY"
+        value = 0.015
+        [data.vol_surface]
+        type = "surface_from"
+        currency = "USD"
+        [agent]
+        type = "static"
+        [agent.policy]
+        type = "daily_short_strangle"
+        underlying = "SPY"
+        entry_time = 15:45:00
+        expiry_days = 1
+        put_delta = 0.20
+        call_delta = 0.20
+        $q
+        """
+    a = load_experiment_str(strangle("quantity = 1"))
+    b = load_experiment_str(strangle("quantity = 1.0"))
+    c = load_experiment_str(strangle(""))                 # the default is 1
+    @test a.agent.policy.quantity === b.agent.policy.quantity === c.agent.policy.quantity === 1
+    @test full_hash(a) == full_hash(b) == full_hash(c)
+    @test core_hash(a) == core_hash(b) == core_hash(c)
+    @test full_hash(a) != full_hash(load_experiment_str(strangle("quantity = 2")))
+end

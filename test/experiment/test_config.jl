@@ -66,7 +66,20 @@ end
     @test p.expiry_interval == Day(1)
     @test p.put_delta == 0.20
     @test p.call_delta == 0.20
-    @test p.quantity == 2.0
+    @test p.quantity == 2                       # an integral float builds an Int
+    @test p.quantity isa Int
+end
+
+@testset "build_policy: daily_short_strangle quantity is a whole number of contracts" begin
+    base = Dict{String,Any}("type" => "daily_short_strangle", "underlying" => "SPY",
+                            "entry_time" => Time(15, 45), "expiry_days" => 1,
+                            "put_delta" => 0.20, "call_delta" => 0.20)
+    @test build_policy(merge(base, Dict("quantity" => 3))).quantity === 3
+    @test build_policy(merge(base, Dict("quantity" => 1.0))).quantity === 1
+    err = try build_policy(merge(base, Dict("quantity" => 1.5))); nothing catch e; e end
+    @test err isa ErrorException
+    @test occursin("whole number", err.msg) && occursin("1.5", err.msg)
+    @test_throws ErrorException build_policy(merge(base, Dict("quantity" => "two")))
 end
 
 @testset "build_policy: daily_short_strangle accepts string entry_time" begin
@@ -79,7 +92,8 @@ end
         "call_delta"  => 0.20,
     ))
     @test p.entry_time == Time(15, 45)
-    @test p.quantity == 1.0
+    @test p.quantity == 1                       # the default is one contract per leg
+    @test p.quantity isa Int
 end
 
 @testset "build_policy: daily_short_strangle parses TOML literal" begin
@@ -443,10 +457,11 @@ end
         @test entry(exp.data, DivCurve).record.underlying == Underlying("SPY")
 
         res = run_experiment(exp)               # opens and closes the readers itself
-        @test isempty(res.positions)
+        @test isempty(res.ledger)
+        @test isempty(res.ledger.orders)
         @test res.metrics.total_pnl == 0.0
         @test res.experiment === exp
-        @test res.pnl_series.window_end_spot == 480.0
+        @test isnan(res.pnl_series.window_end_spot)   # a placeholder until slice 5
         exp = nothing
         res = nothing
         GC.gc()
@@ -454,11 +469,10 @@ end
 end
 
 @testset "Base.show(ExperimentResult): renders header + metrics" begin
-    # Reuse the experiment-module fixture for a result with one trade.
+    # Reuse the experiment-module fixture for a result with one order.
     f = _ex_fixture()
-    trd = Trade(_EX_UND, 480.0, f.expiry, Call)
     exp = Experiment(name="show-test",
-                     agent=StaticAgent(_ExOpenOnceAt(f.ts2, trd)),
+                     agent=StaticAgent(_ExOpenOnceAt(f.ts2, _ex_long(f.call))),
                      data=f.data, clock=_EX_CLOCK, from=f.ts1, to=f.ts3,
                      outputs=OutputSpec(metrics=[:sharpe]))
     res = run_experiment(exp)
@@ -471,5 +485,9 @@ end
     @test occursin("Metrics:", s)
     @test occursin("total_pnl", s)
     @test occursin("sharpe", s)
-    @test occursin("Window-end spot", s)
+    @test occursin("events", s) && occursin("1 fills", s) && occursin("1 fees", s)
+    @test occursin("orders", s)
+    @test occursin("1 open lots in 1 open groups", s)
+    @test occursin("cash USD -511.00", s)          # -51000 - 100 cents
+    @test !occursin("Window-end spot", s)
 end

@@ -12,24 +12,25 @@ window.
 ```mermaid
 flowchart LR
     Exp[Experiment] -->|open_data| RB([run_backtest])
-    RB -->|positions| PS([pnl_series])
-    Exp -->|spot at last clock tick| PS
+    RB -->|Ledger| PS([pnl_series])
     PS -->|PnLSeries| CM([compute_metrics])
     Exp -->|requested| CM
     CM -->|NamedTuple| ER[ExperimentResult]
     PS -->|series| ER
-    RB -->|positions| ER
+    RB -->|Ledger| ER
     Exp -->|provenance| ER
 ```
 
 Per call to `run_experiment`: open the data (`with_data`), tick the
-engine on the clock, resolve the **last clock tick** `<= exp.to` and the
-clock underlying's spot there, aggregate the ledger into a `PnLSeries`
-(each residual lot settled from its own trade), compute
-always-on plus requested optional metrics, close the data, and pack
-everything (including the originating `Experiment`) into one
+engine on the clock with the venue's defaults, check that the window
+holds a clock tick, build the `PnLSeries` from the ledger's round trips,
+compute always-on plus requested optional metrics, close the data, and
+pack everything (including the originating `Experiment`) into one
 `ExperimentResult`. Everything that touches readers runs inside
-`with_data`; the `Experiment` itself holds specs only.
+`with_data`; the `Experiment` itself holds specs only. Open lots at the
+window end stay open and contribute nothing until the equity curve of
+slice 5 marks them; nothing is force-settled, and expiries inside the
+window are booked by the engine's lifecycle step.
 
 ## The abstraction
 
@@ -55,7 +56,7 @@ Experiment(; name, agent, data, clock, from, to, outputs=OutputSpec())
 
 struct ExperimentResult
     experiment :: Experiment
-    positions  :: Vector{Position}
+    ledger     :: Ledger          # events and the order journal
     pnl_series :: PnLSeries
     metrics    :: NamedTuple
 end
@@ -102,22 +103,22 @@ the current tick is blocked.
 |---|---|
 | **`run_experiment`, not `run`** | `Base.run` is exported and dispatches on `Cmd`; shadowing it for a domain verb is exactly the convention warning every Julia style guide gives. `run_experiment` also reads as a peer of `run_backtest`. |
 | **Result carries the full `Experiment`, not just `name`** | Rerun is the primary use case for provenance. `run_experiment(result.experiment)` is the obvious primitive; a bare `name` would force a sidecar registry to look up the rest. The cost is one cheap struct reference. |
-| **Window end = last clock tick** | The window end is the timestamp of `asof` on the clock's kind and selector at `exp.to` (one partition walk, no scan). A spot after the last tick, or a `tick_times` candidate past the data, can never move the residual mark. |
-| **Settlement follows the trade, not the clock** | Each residual lot settles at the spot of **its own trade's underlying**, at `min(trade.expiry, window_end)`: held-to-expiry legs use their expiration spot, legs still open past the window mark at the window end, and both resolve for the leg's own selector -- the same one the engine priced its fill against. A clock is a tick grid; its selector answers *when* to step, not *whose price*. A leg whose spot is missing at that instant counts in `n_unmarked` rather than silently substituting a wrong number. A `spot_for` remap on the surface provider prices the surface, not fills or settlement. |
-| **The clock underlying and a declared policy underlying must agree** | One experiment, one underlying is the real invariant here, and `load_experiment` asserts it rather than assuming it: it errors when `declared_underlyings(agent)` is non-empty and does not contain the clock selector. That is what makes settling past the window end safe by construction. A policy that chooses its underlying per tick declares nothing and is not checked at load; comparing at fill time is a follow-up. |
+| **The result carries the ledger, not a fill vector** | The ledger is the run: events with declared intent and recorded lineage, plus what every decision saw. The series and the metrics are derived from it and can be recomputed; nothing in the result is a second copy that could disagree with it. |
+| **Open lots at the window end stay open** | Proposal decision 8: nothing is force-settled at `exp.to`. A lot still open contributes nothing to the realized series until the equity curve marks it at the evaluation endpoint (slice 5); expiries inside the window are lifecycle events, booked in the tick loop. The window-end spot lookup and its error are gone with the settle closure. |
+| **The venue's values are the engine's defaults, not keywords here** | `fill_rule`, `cost_model` and `tick_cents` change results, so they must be in the run id before they are configurable; `run_experiment` takes none until slice 4 makes them `Experiment` fields. |
+| **The clock underlying and a declared policy underlying must agree** | One experiment, one underlying is the real invariant here, and `load_experiment` asserts it rather than assuming it: it errors when `declared_underlyings(agent)` is non-empty and does not contain the clock selector. A clock is a tick grid; its selector answers *when* to step, not *whose price*: fills resolve per leg against the leg's own underlying. A policy that chooses its underlying per tick declares nothing and is not checked at load. |
 | **Specs in, readers scoped to the run** | `Experiment.data` holds pure spec values (hashable, persistable); `run_experiment` opens them with `with_data` and closes them on every exit path. Rehydrating a saved run needs no data on disk until it is actually run. |
 | **Always-on metrics not in the output spec** | They are computed unconditionally and cost nothing extra. Listing them in `outputs.metrics` would force every experiment to repeat a boilerplate list and would imply they were opt-in, which they are not. |
 | **`metrics::Vector{Symbol}`, not `Vector{Function}`** | Symbols survive serialization to disk (now exercised by the TOML config loader), read cleanly in config dumps, and let `compute_metrics` carry the per-symbol default kwargs in one place ([`compute_metrics`](metrics.md)). Function references would skip the table at the cost of looking less like a config artifact. |
 | **Per-metric kwargs on `OutputSpec.metric_params`** | Non-default conventions (e.g. Sharpe at a different `risk_free`) ride in `OutputSpec.metric_params` (`Dict{Symbol,NamedTuple}`) and flow through `compute_metrics`'s `kwargs`. They are outputs, so they are part of `full_hash` but not `core_hash` -- a parameter change is a new run over the same backtest. |
 | **Identity from the resolved experiment, not config bytes** | `full_hash` / `core_hash` are computed from `to_dict(exp)` over the *resolved* experiment (`identity.jl`), so identity is insensitive to how the config was spelled and separates outputs from the backtest. The [`persistence`](persistence.md) layer records them; it does not compute them. |
-| **`run_experiment` errors loudly on missing data** | No clock tick in the window, a missing settlement spot, or a clock whose selector is not an `Underlying` all indicate the experiment is mis-specified or the data has gaps the caller did not expect. Silent zeros would invent a "result" that doesn't exist. |
+| **`run_experiment` errors loudly on a mis-specified run** | No clock tick in the window, or a clock whose selector is not an `Underlying` (an experiment ticks on an underlying's grid), indicates the experiment is mis-specified. Silent zeros would invent a "result" that doesn't exist. A leg the venue cannot price is the engine's named failure. |
 
 ## Responsibility boundaries
 
 **Owns:** the `Experiment` / `OutputSpec` structs, the
-`ExperimentResult` wrapper, the `run_experiment` entry point, the
-per-leg settlement policy, and run identity (`core_hash` / `full_hash`
-via `identity.jl`).
+`ExperimentResult` wrapper, the `run_experiment` entry point, and run
+identity (`core_hash` / `full_hash` via `identity.jl`).
 
 **Does NOT own:**
 
@@ -138,14 +139,13 @@ via `identity.jl`).
 | Condition | Behavior |
 |---|---|
 | No clock tick in `[from, to]` | `run_experiment` errors with the window and experiment name. |
-| Clock underlying's spot missing at the last clock tick | `run_experiment` errors with the timestamp and experiment name. |
-| A residual lot's underlying is served but has no spot at `min(expiry, window_end)` | The lot counts in `pnl_series.n_unmarked` and is excluded from realized PnL. |
-| A residual lot's underlying is served by nothing | `at` throws `UnservedSelector`, naming `SpotPrice` and that underlying. |
+| The clock's selector is not an `Underlying` | `run_experiment` errors: an experiment ticks on an underlying's grid. |
+| A leg the venue cannot honestly price (no quote, no executable side, no spot at the tick) | `UnpriceableLeg` from the engine before anything is written; nothing serving an underlying is `UnservedSelector`. |
 | A declared policy underlying differs from the clock selector | `load_experiment` errors naming both. |
 | Data root missing on this machine | `open_data` throws `ArgumentError` at the start of the run; loading the config succeeds. |
 | `exp.outputs.metrics` contains an unknown symbol | `compute_metrics` errors with the offending symbol and the known list. |
-| Agent / Policy never trades | `result.positions` and `result.pnl_series.pnl` are empty; always-on metrics are `0.0` / `0` / `NaN` per their empty-series conventions. |
-| Spot present but no fills happened | `window_end_spot` is recorded on `pnl_series` even when unused -- it is provenance, and the field stays non-optional. |
+| Agent / Policy never trades | `result.ledger` is empty with no orders and `result.pnl_series.pnl` is empty; always-on metrics are `0.0` / `0` / `NaN` per their empty-series conventions. |
+| Lots still open at the window end | They stay open in `book_effective(result.ledger, exp.to)` and contribute no sample; `window_end_spot` is `NaN` and `n_unmarked` is `0` until slice 5 retires both. |
 
 ## Config loading
 

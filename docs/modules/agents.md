@@ -19,32 +19,31 @@ fit itself* live on the Agent.
 flowchart LR
     Engine[Backtest engine] --> Clock[t]
     Engine --> Cut[TimeCut]
-    Engine --> Ledger[positions]
+    Engine --> Book[Book]
 
     Agent[Agent] --> CP([current_policy])
     Clock --> CP
     Cut --> CP
-    Ledger --> CP
+    Book --> CP
     CP -->|Policy| D([decide])
 
     Cut --> D
-    Ledger --> D
+    Book --> D
     Clock --> D
-    D --> Orders[Vector Trade]
+    D --> Orders[Vector Order]
     Orders --> Engine
 ```
 
 Per tick: the engine asks the Agent for the current Policy, then
-calls `decide` on it. The same `(t, cut, positions)` triple is
-visible to both calls.
+calls `decide` on it. The same `(t, cut, book)` triple is visible to
+both calls.
 
 ## The abstraction
 
 ```julia
 abstract type Agent end
 
-current_policy(a::Agent, t::DateTime, data::TimeCut,
-               positions::AbstractVector{Position}) -> Policy
+current_policy(a::Agent, t::DateTime, data::TimeCut, book::Book) -> Policy
 
 tick_times(a::Agent, data::MarketData, from, to) -> Union{Nothing, Vector{DateTime}}
 
@@ -56,7 +55,10 @@ One method, four arguments, one Policy returned; plus the optional
 its policy's), where a multi-policy agent unions its policies'
 schedules. Concrete agents
 subtype `Agent` and implement `current_policy`. The returned Policy
-must be valid for at least the current tick.
+must be valid for at least the current tick. `book` is the engine's own
+fold of the ledger as known at this tick (open lots per group and
+contract, plus cash); like the policy, an agent reads it and must not
+mutate it.
 
 `declared_underlyings` mirrors the [policy-level trait](policies.md) at
 this layer: default empty, `StaticAgent` delegates to its one policy, and
@@ -83,7 +85,7 @@ one-line wrapper around the Agent overload.
 | Decision | Why |
 |---|---|
 | **Per-tick query, not per-event callback** | The engine calls `current_policy` on every tick rather than asking the Agent to push policy-change events. This keeps the engine loop one-shape (mirrors the per-tick `decide` call) and means a "refit on schedule" Agent is a trivial calendar check inside `current_policy`. Cost on minute-data over a year for a no-op `current_policy`: dwarfed by data IO. |
-| **`current_policy` sees `(t, cut, positions)`** | Same arguments as `decide`. A refit-on-month-boundary Agent needs `t`; an Agent that retrains on a lookback window reads it through `cut` (history before `from` is visible, anything after `t` is not, derived data included); an Agent that adapts position sizing to current exposure needs `positions`. |
+| **`current_policy` sees `(t, cut, book)`** | Same arguments as `decide`. A refit-on-month-boundary Agent needs `t`; an Agent that retrains on a lookback window reads it through `cut` (history before `from` is visible, anything after `t` is not, derived data included); an Agent that adapts position sizing to current exposure reads the `book`. |
 | **Agent is not itself a Policy** | The two have different responsibilities (evolve over time vs. decide for one tick) and different invariants (mutable cadence/state vs. frozen for the tick). Conflating them collapses the split that motivates the abstraction in the first place. An Agent that *never* changes its Policy is a `StaticAgent`, not a Policy worn as an Agent. |
 | **Engine accepts both `Agent` and `Policy`** | `run_backtest(policy, ...)` is a one-line wrapper around `run_backtest(StaticAgent(policy), ...)`. The bare-policy form is the natural primitive for training/evaluation code that wants to score a single candidate Policy over a window without constructing an Agent. |
 | **No refit-schedule protocol** | The engine does not have a separate `refit_times(agent, source)` hook. Anything an Agent wants to schedule it gates inside `current_policy`, the same way policies gate inside `decide`. One uniform query model, no engine-side knowledge of how an Agent is structured internally. |
@@ -112,17 +114,15 @@ each month looks like:
 
 ```julia
 mutable struct MonthlyRefitAgent{F,P<:Policy} <: Agent
-    fit::F                       # (t, cut, positions) -> Policy
+    fit::F                       # (t, cut, book) -> Policy
     current::P
     last_refit_month::Tuple{Int,Int}   # (year, month)
 end
 
-function current_policy(a::MonthlyRefitAgent, t::DateTime,
-                        cut::TimeCut,
-                        positions::AbstractVector{Position})
+function current_policy(a::MonthlyRefitAgent, t::DateTime, cut::TimeCut, book::Book)
     ym = (year(t), month(t))
     if ym != a.last_refit_month
-        a.current = a.fit(t, cut, positions)
+        a.current = a.fit(t, cut, book)
         a.last_refit_month = ym
     end
     return a.current

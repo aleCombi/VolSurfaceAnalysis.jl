@@ -1,10 +1,10 @@
 # Policy abstraction.
 #
 # A policy is a stateless decision function over (current timestamp,
-# time-cut data view, current ledger). It emits trade *deltas* -- new
-# orders to fill -- not a replacement portfolio. Closes are expressed as
-# counter-trades (opposite direction, same contract); the engine appends
-# every fill to the ledger and "net open" is a computed view.
+# time-cut data view, the book). It emits orders -- structure-level
+# instructions with declared intent -- not a replacement portfolio. A
+# close is a `Close` leg naming the group it closes; the engine books
+# every order into the ledger and the book is the fold the policy reads.
 #
 # Higher-level evolution (refit cadence, parameter learning, swapping
 # one policy for another over time) is the [`Agent`](@ref) layer's job;
@@ -22,11 +22,14 @@ duration of that tick.
 abstract type Policy end
 
 """
-    decide(policy::Policy, t::DateTime, data::TimeCut,
-           positions::AbstractVector{Position}) -> Vector{Trade}
+    decide(policy::Policy, t::DateTime, data::TimeCut, book::Book) -> Vector{Order}
 
-Return the trades the policy wants to fire at time `t`. An empty vector
-means "no action this tick." Closes are emitted as counter-trades.
+Return the orders the policy wants to fire at time `t`. An empty vector
+means "no action this tick." Each `Order` declares its intent per leg:
+an opening order leaves `group` as `nothing` and the ledger mints one; a
+close is a `Close` leg in an order naming the group it closes
+(`open_groups(book)`, `lots(book, g)`), never a counter-trade. The engine
+books every order whole or not at all.
 
 `data` is a [`TimeCut`](@ref) of the market data at `t`; the type
 signature makes the supported data interface no-lookahead by
@@ -35,11 +38,12 @@ after `t`, including reads made by derived providers on the policy's
 behalf. Policies name kinds and selectors (`at(data, OptionQuote,
 underlying, t)`), never storage.
 
-`positions` is the full ledger of fills so far (open *and* offsetting
-closes). Policies that want only currently-open net positions can
-derive that view by netting `direction * quantity` per contract.
+`book` is the engine's own fold of the ledger as known at this tick
+(open lots per group and contract, plus cash); it equals
+`book_as_known(L, known_to)` for the order records this tick produces. A
+policy reads it and must not mutate it.
 """
-function decide(::Policy, ::DateTime, ::TimeCut, ::AbstractVector{Position})::Vector{Trade}
+function decide(::Policy, ::DateTime, ::TimeCut, ::Book)::Vector{Order}
     error("decide not implemented for this Policy")
 end
 
@@ -51,7 +55,7 @@ and as a base case in tests.
 """
 struct NoOpPolicy <: Policy end
 
-decide(::NoOpPolicy, ::DateTime, ::TimeCut, ::AbstractVector{Position}) = Trade[]
+decide(::NoOpPolicy, ::DateTime, ::TimeCut, ::Book) = Order[]
 
 """
     declared_underlyings(policy::Policy) -> Tuple of Underlying
@@ -63,8 +67,8 @@ default covers.
 
 `load_experiment` uses it to enforce the real invariant of this codebase:
 one experiment, one underlying. The clock selector answers *when* to step,
-not *whose price*, and settlement resolves per trade; asserting the two
-agree is what makes that safe by construction rather than by assumption.
+not *whose price*, and fills resolve per leg; asserting the two agree is
+what makes that safe by construction rather than by assumption.
 """
 declared_underlyings(::Policy) = ()
 
@@ -83,7 +87,7 @@ entirely.
 Implementations are not required to filter against the data's
 timestamps -- the engine treats the returned vector as candidates and
 tolerates timestamps where no chain exists (`decide` sees an empty
-result and returns `Trade[]`). The experiment's window end is still the
+result and returns `Order[]`). The experiment's window end is still the
 last *clock* tick, never a candidate emitted here.
 
 **Contract** (the engine trusts the return verbatim -- no sort, dedupe, or

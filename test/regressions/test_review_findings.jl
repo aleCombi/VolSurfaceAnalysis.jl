@@ -1,5 +1,6 @@
-# Known-red regression specifications for the confirmed PR #9 review findings.
-# This file is intentionally excluded from the main test gate.
+# Regression specifications for the confirmed PR #9 review findings. Each was
+# red when it was written and all of them pass now; the file runs inside the
+# main test gate (`test/runtests.jl`) so they stay that way.
 
 using VolSurfaceAnalysis
 using Test
@@ -13,29 +14,29 @@ const _RF_SPY = Underlying("SPY")
 const _RF_QQQ = Underlying("QQQ")
 const _RF_USD = Currency("USD")
 
+# One opening order per contract at one instant, and nothing else.
 struct _RF_OpenOnceAt <: Policy
     when::DateTime
-    trades::Vector{Trade}
+    contracts::Vector{ContractKey}
 end
 
 function VolSurfaceAnalysis.decide(p::_RF_OpenOnceAt, t::DateTime,
-                                   ::TimeCut,
-                                   ::AbstractVector{Position})::Vector{Trade}
-    t == p.when ? copy(p.trades) : Trade[]
+                                   ::TimeCut, ::Book)::Vector{Order}
+    t == p.when ? Order[Order(:leg, [Leg(c, Long, 1, Open)]) for c in p.contracts] : Order[]
 end
 
 @testset "PR #9 known-red review findings" begin
 
-# src/experiment/experiment.jl:126 settles every residual lot from the clock's
-# SPY spot: the in-window leg is marked at SPY's expiry spot instead of QQQ's,
-# and the past-the-window leg at the SPY window-end spot instead of QQQ's.
-# Both cases presume settlement follows each lot's own trade underlying.
+# The finding: every residual lot was settled from the clock's SPY spot, so a
+# QQQ leg under a SPY clock filled against QQQ and settled against SPY. The
+# engine now prices each leg against its own underlying and records what it
+# saw, and settlement is a lifecycle event booked in the tick loop.
 @testset "settlement uses trade underlying" begin
     t1 = DateTime(2024, 1, 15, 15, 30)
     expiry = DateTime(2024, 1, 15, 15, 31)       # inside the window (= the window end)
     far_expiry = DateTime(2024, 1, 15, 15, 35)   # past the window end
-    inside = Trade(_RF_QQQ, 100.0, expiry, Call)
-    past   = Trade(_RF_QQQ, 110.0, far_expiry, Call)
+    inside = ContractKey(_RF_QQQ, 100.0, expiry, Call)
+    past   = ContractKey(_RF_QQQ, 110.0, far_expiry, Call)
     qqq_quotes = [
         OptionQuote("QQQ-in", _RF_QQQ, expiry, 100.0, Call,
                     0.90, 1.00, 0.95, missing, missing, missing, t1),
@@ -61,11 +62,32 @@ end
                      outputs=OutputSpec(metrics=Symbol[], artifacts=Symbol[]))
 
     result = run_experiment(exp)
+    L = result.ledger
 
-    # In-window leg: QQQ spot at its own expiry is 120, so max(120-100,0) - 1.00.
-    # Past-the-window leg: QQQ spot at the window end is 120, so max(120-110,0) - 1.00.
-    # Stamped at `expiry` and `far_expiry`, so the series is in that order.
-    @test result.pnl_series.pnl == [19.0, 9.0]
+    # Both fills are QQQ's ask (1.00, not SPY's) and their observations hold
+    # QQQ's spot at t1 (100, not SPY's 90).
+    fills = [e for e in L.events if e isa Fill]
+    @test length(fills) == 2 && length(L.orders) == 2
+    @test all(f.price == 1.00 for f in fills)
+    @test [f.contract for f in fills] == [inside, past]
+    @test all(only(r.observations).spot == 100.0 for r in L.orders)
+    @test all(only(r.observations).spot_at == t1 for r in L.orders)
+    @test all(only(r.observations).bid == 0.90 && only(r.observations).ask == 1.00 for r in L.orders)
+
+    # Lifecycle in the tick loop settles the in-window leg by an Expiry against
+    # QQQ's own spot at its expiry (120, not SPY's 90), a round trip of
+    # (20.00 - 1.00) * 100 * 100 - 100 = 189900 cents, the 100 being the
+    # commission on its opening fill (a lone contract raised to the USD 1.00
+    # minimum).
+    @test any(e isa Expiry && e.settlement_price == 120.0 && e.contract == inside for e in L.events) &&
+          [r.pnl for r in round_trips(L)] == [189900]
+
+    # The finding's second assertion, a window-end mark of the past-the-window
+    # leg as a PnL sample of 9.00, is dropped: under proposal decision 8 an open
+    # lot at the window end is marked at the evaluation endpoint by the equity
+    # curve (slice 5), never force-settled into the realized series. The
+    # in-window leg settles now, so the past-the-window lot is what is left.
+    @test [l.contract for l in open_lots(book_effective(L, exp.to))] == [past]
 end
 
 # src/experiment/config.jl:212 checks only input kinds, not Constant selectors;

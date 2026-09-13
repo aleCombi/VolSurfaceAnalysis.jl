@@ -3,28 +3,33 @@
 # point makes the REPL, `display`, and `print(stdout, ...)` all do the
 # right thing without a separate verb.
 
+# Whole cents as a USD amount with two decimals, sign first.
+function _usd(cents::Integer)::String
+    sign = cents < 0 ? "-" : ""
+    a = abs(cents)
+    return string(sign, a ÷ 100, ".", lpad(a % 100, 2, '0'))
+end
+
 function Base.show(io::IO, ::MIME"text/plain", r::ExperimentResult)
     e = r.experiment
+    L = r.ledger
     s = r.pnl_series
-    nfills = s.n_opens + s.n_closes
-    nrts   = length(s.pnl)
+    kinds = ((Fill, "fills"), (Match, "matches"), (Expiry, "expiries"), (Fee, "fees"))
+    per_kind = join(("$(count(x -> x isa T, L.events)) $name" for (T, name) in kinds), ", ")
+    book = book_as_known(L, last_sequence(L))
     println(io, "ExperimentResult: ", e.name)
     println(io, "  window      ", e.from, "  to  ", e.to)
     println(io, "  data        ", join((kind_name(kind(p)) for p in e.data.entries), ", "))
     println(io, "  clock       ", kind_name(kind(e.clock)), " / ", e.clock.sel)
     println(io, "  agent       ", typeof(e.agent))
-    println(io, "  positions   ", length(r.positions),
-                "  (fills: ", nfills,
-                ", round trips: ", nrts,
-                ", unmarked: ", s.n_unmarked, ")")
+    println(io, "  events      ", length(L), "  (", per_kind, ")")
+    println(io, "  orders      ", length(L.orders), "  (round trips: ", length(s.pnl), ")")
+    println(io, "  book        ", length(open_lots(book)), " open lots in ",
+                length(open_groups(book)), " open groups, cash USD ", _usd(book.cash))
     println(io)
     println(io, "Metrics:")
     width = isempty(keys(r.metrics)) ? 0 : maximum(length(string(k)) for k in keys(r.metrics))
     for k in keys(r.metrics)
         println(io, "  ", rpad(string(k), width), "  ", r.metrics[k])
-    end
-    if nrts > 0 || s.n_unmarked > 0
-        println(io)
-        println(io, "Window-end spot: ", s.window_end_spot)
     end
 end

@@ -245,7 +245,7 @@ price and a fee (the engine and its venue: the ledger records what a
 decision saw, the engine resolves it); checking that a research fill's
 price is the rule applied to its observation (`check_join`, in the
 engine, since the rule lives there); when and at what price a lot
-settles (the lifecycle model, slice 3); marks, the equity curve and
+settles (the settlement rule, in the engine); marks, the equity curve and
 valuation failures (outside the journal); persistence.
 
 ## Key decisions

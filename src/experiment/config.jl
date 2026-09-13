@@ -277,20 +277,28 @@ function _parse_entry_time(v)::Time
           "literal or \"HH:MM:SS\" string, got $(typeof(v))")
 end
 
+# A number of contracts: an integer, or a float that is one (`1.0` is how
+# TOML spells a whole number written with a decimal point). `1.5` is not.
+function _whole_contracts(v)::Int
+    v isa Integer && return Int(v)
+    (v isa AbstractFloat && isfinite(v) && isinteger(v)) && return Int(v)
+    error("policy(daily_short_strangle): quantity must be a whole number of contracts, got $v")
+end
+
 function _build_daily_short_strangle(d::AbstractDict)::Policy
     underlying  = _require(d, "underlying",  "policy(daily_short_strangle)")
     entry_raw   = _require(d, "entry_time",  "policy(daily_short_strangle)")
     expiry_days = _require(d, "expiry_days", "policy(daily_short_strangle)")
     put_delta   = _require(d, "put_delta",   "policy(daily_short_strangle)")
     call_delta  = _require(d, "call_delta",  "policy(daily_short_strangle)")
-    quantity    = get(d, "quantity", 1.0)
+    quantity    = _whole_contracts(get(d, "quantity", 1))
     return DailyShortStrangle(
         Underlying(String(underlying)),
         _parse_entry_time(entry_raw),
         Day(Int(expiry_days)),
         Float64(put_delta),
         Float64(call_delta),
-        Float64(quantity),
+        quantity,
     )
 end
 
@@ -420,7 +428,7 @@ entry_time  = 15:45:00
 expiry_days = 1
 put_delta   = 0.20
 call_delta  = 0.20
-quantity    = 1.0    # optional, defaults to 1.0
+quantity    = 1      # optional, defaults to 1 contract per leg (1.0 is accepted, 1.5 is not)
 ```
 
 Errors loudly on missing required keys or unknown `type` discriminators.
@@ -459,9 +467,9 @@ function _experiment_from_cfg(cfg::AbstractDict)::Experiment
         "load_experiment: clock kind \"$(kind_name(kind(clock)))\" has no [data.*] table")
     agent = build_agent(Dict{String,Any}(agent_tbl))
     # One experiment, one underlying. The clock selector says *when* to
-    # step; settlement and fills both resolve prices per trade. Asserting
-    # the two agree is what makes that safe by construction -- a policy
-    # that declares nothing statically cannot be checked here, and is not.
+    # step; fills resolve prices per leg. Asserting the two agree is what
+    # makes that safe by construction -- a policy that declares nothing
+    # statically cannot be checked here, and is not.
     declared = declared_underlyings(agent)
     isempty(declared) || clock.sel in declared || error(
         "load_experiment: the agent declares $(join(string.(declared), ", ")) " *

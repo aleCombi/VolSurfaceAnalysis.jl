@@ -1,4 +1,8 @@
 # Tests for the Experiment orchestrator, on in-memory MarketData maps.
+# Quotes in the fixture are whole cents (5.00/5.10 call, 4.80/4.90 put,
+# spot 480), so cash literals are whole cents: one contract at 5.10 is
+# 51000, and IBKR's commission on a lone contract is 65 cents raised to
+# the USD 1.00 minimum.
 
 const _EX_UND = Underlying("SPY")
 const _EX_USD = Currency("USD")
@@ -28,31 +32,23 @@ function _ex_fixture()
         push!(quotes, mk_quote(ts, 480.0, Put,  4.80, 4.90))
         push!(spots, SpotPrice(_EX_UND, spot, ts))
     end
-    (data=_ex_map(quotes, spots), ts1=ts1, ts2=ts2, ts3=ts3, expiry=expiry, spot=spot)
+    call = ContractKey(_EX_UND, 480.0, expiry, Call)
+    put  = ContractKey(_EX_UND, 480.0, expiry, Put)
+    (data=_ex_map(quotes, spots), ts1=ts1, ts2=ts2, ts3=ts3, expiry=expiry, spot=spot,
+     call=call, put=put)
 end
 
-# Policy that opens one long call at a chosen tick and does nothing else.
+# Policy that emits one order at a chosen tick and does nothing else.
 struct _ExOpenOnceAt <: Policy
     when::DateTime
-    trade::Trade
+    order::Order
 end
 
-function VolSurfaceAnalysis.decide(s::_ExOpenOnceAt, t::DateTime,
-                                   ::TimeCut,
-                                   ::AbstractVector{Position})::Vector{Trade}
-    return t == s.when ? Trade[s.trade] : Trade[]
-end
+VolSurfaceAnalysis.decide(s::_ExOpenOnceAt, t::DateTime, ::TimeCut, ::Book)::Vector{Order} =
+    t == s.when ? Order[s.order] : Order[]
 
-# Same, but its tick_times emits a candidate *after* the last quote, to
-# show the window end stays on the clock.
-struct _ExLateTicks <: Policy
-    when::DateTime
-    trade::Trade
-end
-VolSurfaceAnalysis.decide(s::_ExLateTicks, t::DateTime, ::TimeCut, ::AbstractVector{Position}) =
-    t == s.when ? Trade[s.trade] : Trade[]
-VolSurfaceAnalysis.tick_times(s::_ExLateTicks, ::MarketData, from::DateTime, to::DateTime) =
-    [s.when, to]
+# An opening order for one long contract.
+_ex_long(contract::ContractKey) = Order(:long, [Leg(contract, Long, 1, Open)])
 
 @testset "Experiment: kwarg constructor round-trips fields" begin
     f = _ex_fixture()
@@ -83,36 +79,40 @@ end
                      data=f.data, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
     res = run_experiment(exp)
     @test res.experiment === exp
-    @test isempty(res.positions)
+    @test res.ledger isa Ledger
+    @test isempty(res.ledger)
+    @test isempty(res.ledger.orders)
     @test isempty(res.pnl_series.pnl)
     @test res.metrics.total_pnl == 0.0
     @test res.metrics.n_round_trips == 0
+    @test res.metrics.n_opens == 0 && res.metrics.n_closes == 0
     @test isnan(res.metrics.hit_rate)
 end
 
-@testset "run_experiment: leg past the window end marks at the window end" begin
-    # The leg's expiry (Feb 16) is past the window end (ts3 = Jan 15), so
-    # settlement resolves the spot for this leg's own underlying at the
-    # window end. The entry is still stamped at the leg's expiry.
+@testset "run_experiment: an open lot at the window end stays open" begin
+    # The leg's expiry (Feb 16) is past the window end (Jan 15). Nothing is
+    # force-settled: the lot is open in the book at exp.to, the series is
+    # empty, and the cash is the premium paid plus the commission.
     f = _ex_fixture()
-    trd = Trade(_EX_UND, 480.0, f.expiry, Call)
-    exp = Experiment(name="case1-mark",
-                     agent=StaticAgent(_ExOpenOnceAt(f.ts2, trd)),
+    exp = Experiment(name="open-at-end",
+                     agent=StaticAgent(_ExOpenOnceAt(f.ts2, _ex_long(f.call))),
                      data=f.data, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
     res = run_experiment(exp)
-    @test length(res.positions) == 1
-    @test length(res.pnl_series.pnl) == 1
-    # ATM payoff at window-end spot 480 = 0; cost = ask 5.10. PnL = -5.10.
-    @test res.pnl_series.pnl[1] ≈ -5.10
-    @test res.metrics.total_pnl ≈ -5.10
-    @test res.pnl_series.timestamps[1] == f.expiry   # stamped at leg's own expiry
-    @test res.pnl_series.window_end_spot == f.spot
+    @test length(res.ledger.orders) == 1
+    @test [typeof(e) for e in res.ledger.events] == [Fill, Fee]
+    book = book_effective(res.ledger, exp.to)
+    @test length(open_lots(book)) == 1
+    @test only(open_lots(book)).contract == f.call
+    @test book.cash == -51000 - 100                     # 5.10 paid, 65 cents raised to USD 1.00
+    @test isempty(res.pnl_series.pnl)
+    @test res.metrics.total_pnl == 0.0
+    @test res.metrics.n_opens == 1 && res.metrics.n_closes == 0
     @test res.pnl_series.n_unmarked == 0
+    @test isnan(res.pnl_series.window_end_spot)          # a placeholder until slice 5
 end
 
-@testset "run_experiment: held-to-expiry leg inside window settles at its expiry spot" begin
-    # A map with a real spot at the leg's expiry, so the lookup at
-    # min(expiry, window_end) == expiry returns a record.
+@testset "run_experiment: an expiry inside the window is booked" begin
+    # A map with a real spot at the leg's expiry, which is the window end.
     ts1 = DateTime(2024, 1, 15, 15, 30)
     ts2 = DateTime(2024, 1, 15, 15, 31)
     ts3 = DateTime(2024, 1, 15, 15, 32)
@@ -122,24 +122,19 @@ end
                               5.00, 5.10, 5.05, missing, missing, missing, ts)
     data = _ex_map([mk_q(ts1, 480.0), mk_q(ts2, 480.0), mk_q(ts3, 480.0)],
                    [SpotPrice(_EX_UND, spot, ts) for ts in (ts1, ts2, ts3)])
-    trd = Trade(_EX_UND, 480.0, expiry, Call)
+    call = ContractKey(_EX_UND, 480.0, expiry, Call)
     exp = Experiment(name="held-to-expiry",
-                     agent=StaticAgent(_ExOpenOnceAt(ts2, trd)),
+                     agent=StaticAgent(_ExOpenOnceAt(ts2, _ex_long(call))),
                      data=data, clock=_EX_CLOCK, from=ts1, to=ts3)
     res = run_experiment(exp)
-    @test length(res.positions) == 1
-    @test length(res.pnl_series.pnl) == 1
-    @test res.pnl_series.timestamps[1] == expiry
-    @test res.pnl_series.pnl[1] ≈ -5.10                # ATM 480 payoff = 0; cost = 5.10
-    @test res.pnl_series.n_unmarked == 0
+    @test length(res.ledger.orders) == 1
+    @test count(e -> e isa Fill, res.ledger.events) == 1
+    @test any(e isa Expiry for e in res.ledger.events)
 end
 
-@testset "run_experiment: settlement follows the trade, not the clock" begin
-    # A QQQ leg under a SPY clock. The engine has priced fills per trade
-    # since the data-kinds rewrite; settlement now agrees with it. QQQ is
-    # served but has no spot at the window end, so the lot is unmarked --
-    # a state the old past-the-window branch could not reach, because it
-    # returned a scalar computed once from the clock underlying.
+@testset "run_experiment: a QQQ leg under a SPY clock fills against QQQ" begin
+    # The clock says when to step, not whose price: the fill and its
+    # observation are QQQ's own quote and spot at the tick.
     ts1 = DateTime(2024, 1, 15, 15, 30)
     ts3 = DateTime(2024, 1, 15, 15, 32)
     qqq = Underlying("QQQ")
@@ -150,48 +145,20 @@ end
                         1.00, 1.10, 1.05, missing, missing, missing, ts1)
     data = _ex_map([spy_q(ts1), spy_q(ts3), qqq_q],
                    [SpotPrice(_EX_UND, 480.0, ts1), SpotPrice(_EX_UND, 480.0, ts3),
-                    SpotPrice(qqq, 400.0, ts1)])      # QQQ served, absent at ts3
+                    SpotPrice(qqq, 400.0, ts1)])
+    qqq_call = ContractKey(qqq, 400.0, far, Call)
     exp = Experiment(name="foreign-leg",
-                     agent=StaticAgent(_ExOpenOnceAt(ts1, Trade(qqq, 400.0, far, Call))),
+                     agent=StaticAgent(_ExOpenOnceAt(ts1, _ex_long(qqq_call))),
                      data=data, clock=_EX_CLOCK, from=ts1, to=ts3)
     res = run_experiment(exp)
-    @test length(res.positions) == 1
-    @test res.pnl_series.n_unmarked == 1               # QQQ has no spot at the window end
+    fill = only(e for e in res.ledger.events if e isa Fill)
+    @test fill.price == 1.10                            # QQQ's ask, not SPY's
+    @test fill.contract == qqq_call
+    obs = only(only(res.ledger.orders).observations)
+    @test obs.spot == 400.0 && obs.spot_at == ts1        # QQQ's spot at the tick
+    @test obs.bid == 1.00 && obs.ask == 1.10
+    @test length(open_lots(book_effective(res.ledger, exp.to))) == 1
     @test isempty(res.pnl_series.pnl)
-    @test res.pnl_series.window_end_spot == 480.0      # the clock underlying, provenance only
-end
-
-@testset "run_experiment: expiry inside the window without a spot -> unmarked" begin
-    ts1 = DateTime(2024, 1, 15, 15, 30)
-    ts3 = DateTime(2024, 1, 15, 15, 32)
-    expiry = DateTime(2024, 1, 15, 15, 31)             # no spot row at this instant
-    mk_q(ts) = OptionQuote("X", _EX_UND, expiry, 480.0, Call,
-                           5.00, 5.10, 5.05, missing, missing, missing, ts)
-    data = _ex_map([mk_q(ts1), mk_q(ts3)], [SpotPrice(_EX_UND, 480.0, ts) for ts in (ts1, ts3)])
-    trd = Trade(_EX_UND, 480.0, expiry, Call)
-    exp = Experiment(name="case2-unmarked",
-                     agent=StaticAgent(_ExOpenOnceAt(ts1, trd)),
-                     data=data, clock=_EX_CLOCK, from=ts1, to=ts3)
-    res = run_experiment(exp)
-    @test res.pnl_series.n_unmarked == 1
-    @test isempty(res.pnl_series.pnl)
-end
-
-@testset "run_experiment: window end is the last clock tick, not a later candidate or spot" begin
-    f = _ex_fixture()
-    later = f.ts3 + Hour(1)
-    # A spot exists after the last quote; tick_times also emits `to` as a
-    # candidate. The residual must still mark at the spot of the last
-    # *clock* tick (480), not the later spot (481).
-    spots = vcat([s for s in entry(f.data, SpotPrice).rows], [SpotPrice(_EX_UND, 481.0, later)])
-    data = _ex_map(entry(f.data, OptionQuote).rows, spots)
-    trd = Trade(_EX_UND, 480.0, f.expiry, Call)
-    exp = Experiment(name="window-end",
-                     agent=StaticAgent(_ExLateTicks(f.ts2, trd)),
-                     data=data, clock=_EX_CLOCK, from=f.ts1, to=later)
-    res = run_experiment(exp)
-    @test length(res.positions) == 1
-    @test res.pnl_series.window_end_spot == 480.0
 end
 
 @testset "run_experiment: requested optional metric appears in result" begin
@@ -227,40 +194,32 @@ end
     after = Experiment(name="after-data", agent=StaticAgent(NoOpPolicy()),
                        data=f.data, clock=_EX_CLOCK, from=f.ts3 + Hour(1), to=f.ts3 + Hour(2))
     @test_throws ErrorException run_experiment(after)
-    # window-end spot missing at the last clock tick: SPY is served, but has
-    # no row at ts3, so this is the loud temporal error
-    thin_spots = _ex_map(entry(f.data, OptionQuote).rows,
-                         [SpotPrice(_EX_UND, f.spot, f.ts1)])
-    exp2 = Experiment(name="no-spot", agent=StaticAgent(NoOpPolicy()),
-                      data=thin_spots, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
-    @test_throws ErrorException run_experiment(exp2)
-    # nothing serves SpotPrice for SPY at all: structural, so it is named
-    no_spots = _ex_map(entry(f.data, OptionQuote).rows, SpotPrice[])
-    exp2b = Experiment(name="unserved-spot", agent=StaticAgent(NoOpPolicy()),
-                       data=no_spots, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
-    @test_throws UnservedSelector run_experiment(exp2b)
-    # a clock whose selector is not an Underlying cannot settle
+    # a clock whose selector is not an Underlying: an experiment ticks on an underlying's grid
     exp3 = Experiment(name="ccy-clock", agent=StaticAgent(NoOpPolicy()),
                       data=f.data, clock=Clock{RateCurve}(_EX_USD), from=f.ts1, to=f.ts3)
     @test_throws ErrorException run_experiment(exp3)
+    err = try run_experiment(exp3); nothing catch e; e end
+    @test occursin("underlying's grid", err.msg)
 end
 
 @testset "run_experiment: provenance allows rerun via result.experiment" begin
     f = _ex_fixture()
-    trd = Trade(_EX_UND, 480.0, f.expiry, Call)
     exp = Experiment(name="rerun",
-                     agent=StaticAgent(_ExOpenOnceAt(f.ts2, trd)),
+                     agent=StaticAgent(_ExOpenOnceAt(f.ts2, _ex_long(f.call))),
                      data=f.data, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
     res1 = run_experiment(exp)
     res2 = run_experiment(res1.experiment)
     @test res1.metrics.total_pnl == res2.metrics.total_pnl
-    @test length(res1.positions) == length(res2.positions)
+    @test length(res1.ledger) == length(res2.ledger) == 2
+    @test length(res1.ledger.orders) == length(res2.ledger.orders) == 1
+    @test book_as_known(res1.ledger, 2) == book_as_known(res2.ledger, 2)
 end
 
 # ---- DailyShortStrangle e2e ------------------------------------------------
 
 # Multi-strike, two-expiry fixture priced from flat 20% BS so the surface
-# inverts cleanly and `invert_delta` has a wide observed bracket.
+# inverts cleanly and `invert_delta` has a wide observed bracket. The
+# quotes are not on the tick; the venue rounds the fills onto it.
 function _strangle_ex_fixture()
     entry_ts = DateTime(2024, 6, 3, 15, 45)             # the entry tick
     pre_ts   = DateTime(2024, 6, 3, 15, 44)             # one minute before
@@ -291,28 +250,48 @@ function _strangle_ex_fixture()
      spot=spot, e_target=e_target)
 end
 
-@testset "run_experiment: DailyShortStrangle opens two legs at entry tick" begin
+@testset "run_experiment: DailyShortStrangle books one two-leg order at the entry tick" begin
     f = _strangle_ex_fixture()
     policy = DailyShortStrangle(; underlying=_EX_UND,
                                 entry_time=Time(15, 45),
                                 expiry_interval=Day(1),
                                 put_delta=0.20, call_delta=0.20,
-                                quantity=1.0)
+                                quantity=1)
     exp = Experiment(name="strangle-e2e",
                      agent=StaticAgent(policy),
                      data=f.data, clock=_EX_CLOCK, from=f.pre_ts, to=f.end_ts)
     res = run_experiment(exp)
+    L = res.ledger
 
-    # The gate fires exactly once over [pre_ts, end_ts] -> 2 short legs opened.
-    @test length(res.positions) == 2
-    @test all(p.trade.direction == -1 for p in res.positions)
-    @test all(p.trade.expiry == f.e_target for p in res.positions)
+    # The gate fires exactly once over [pre_ts, end_ts]: one order, two legs.
+    @test length(L.orders) == 1
+    rec = only(L.orders)
+    @test rec.order.label == :daily_short_strangle
+    @test length(rec.order.legs) == 2 && length(rec.observations) == 2
+    @test rec.decided_at == f.entry_ts && rec.known_to == 0
+    fills = [e for e in L.events if e isa Fill]
+    @test length(fills) == 2
+    @test all(x.side == Short && x.intent == Open && x.group == 1 for x in fills)
+    @test all(effective_at(x) == f.entry_ts for x in fills)      # one structure, one instant
+    @test all(x.contract.expiry == f.e_target for x in fills)
+    @test all(x.fill_rule == :cross_spread for x in fills)
+    # the fills are on the tick, at or below the bid the venue saw
+    for (x, obs) in zip(fills, rec.observations)
+        @test x.price * 100 ≈ round(x.price * 100)
+        @test x.price <= obs.bid
+        @test x.price == fill_price(:cross_spread, obs.bid, obs.ask, Short, 1)
+        @test obs.spot == f.spot && obs.spot_at == f.entry_ts && obs.quote_at == f.entry_ts
+    end
+    # both premiums are in IBKR's 65-cent tier, so the order costs 130, above the minimum
+    @test all(x.price >= 0.10 for x in fills)
+    fees = [e for e in L.events if e isa Fee]
+    @test [x.amount for x in fees] == [-65, -65]
+    @test [x.source_id for x in fees] == [event_id(x) for x in fills]
 
-    # e_target = 2024-06-04 is past end_ts = 2024-06-03 -> case 1 (mark at
-    # window-end spot). Both legs settle to a finite PnL, stamped at their
-    # own expiry, and n_unmarked stays 0.
-    @test res.pnl_series.n_unmarked == 0
-    @test length(res.pnl_series.pnl) == 2
-    @test all(ts == f.e_target for ts in res.pnl_series.timestamps)
-    @test isfinite(res.metrics.total_pnl)
+    # nothing closes in this slice: an empty series, two opens, one open group
+    @test isempty(res.pnl_series.pnl)
+    @test res.metrics.n_opens == 2
+    @test res.metrics.n_closes == 0
+    @test open_groups(book_effective(L, exp.to)) == [1]
+    @test length(lots(book_effective(L, exp.to), 1)) == 2
 end

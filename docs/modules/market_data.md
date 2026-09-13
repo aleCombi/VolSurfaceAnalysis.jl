@@ -31,17 +31,32 @@ on the runtime path knows a name. Every kind carries:
   quotes). Every kind defines it. It is what lets a reader apply the
   duplicate rule below without knowing the kind.
 
-One non-kind type also implements `selector`: `Trade`, in
-[`positions`](positions.md), whose selector is its underlying. It has no
-`timestamp` and no provider serves it, so `selector_type` stays a trait on
-kinds only — but the engine and the settlement closure both ask "the spot
-for this leg", and this is the vocabulary for that question.
+No non-kind type implements `selector`. The engine asks "the spot for
+this leg" by naming the leg's contract's underlying directly
+(`at(cut, SpotPrice, contract.underlying, t)`), so `selector_type` stays
+a trait on kinds only.
 
 *Bar-time allowance.* Polygon minute bars are stamped at the bar open
 while their close, high and low are knowable only at bar end. The open
 stamp is kept as the visibility time, so a decision at `t` sees the
 `[t, t+1min)` bar. This is a stated one-minute simplification, not a
 shift; a bar-end stamp option on the parquet spec is backlog.
+
+*Regular-session contract (`SpotPrice`).* A provider serving
+`SpotPrice` for an underlying serves that underlying's **regular-session
+prints only** -- no pre-market, no post-close, no extended-hours
+session. Nothing in the protocol enforces it and nothing in a
+`SpotPrice` records which session a print came from: the parquet spot
+reader selects every row its partitions hold and `InMemory` serves
+whatever vector it was handed, so this is a contract on the tree and on
+whoever builds that vector, not a property a consumer can check. It is
+what makes "the last print in a window" mean "that session's closing
+print". [`backtest`](backtest.md)'s `:session_close` settlement rule
+reads exactly that, over a window ending at 16:00 ET; on an early-close
+day (13:00 ET) a single extended-hours print between 13:00 and 16:00 is
+inside the window and silently becomes the settlement price. Narrowing
+the window cannot rescue it -- a 15:59 print is regular-hours-shaped --
+so the requirement is on the data.
 
 ## The protocol
 

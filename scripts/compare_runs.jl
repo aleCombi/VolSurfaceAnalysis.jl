@@ -8,15 +8,20 @@ using DuckDB: DBInterface
 #
 #   julia --project=. scripts/compare_runs.jl <store_root> <run_id_a> <run_id_b>
 #
-# Reads `<store_root>/runs/run_id=<id>/{manifest,metrics,positions,pnl_series}.parquet`
-# straight through DuckDB, deliberately *without* `load_run`, so runs written
-# under an older manifest schema stay comparable across the data-kinds
-# migration (the reproduction gate between the step-0 baseline and every later
-# run). Nothing from VolSurfaceAnalysis is loaded.
+# Reads `<store_root>/runs/run_id=<id>/{manifest,metrics,events,orders,order_legs,pnl_series}.parquet`
+# straight through DuckDB, deliberately *without* `load_run`, so two runs are
+# compared as written (the reproduction gate between a baseline and every
+# later run). Nothing from VolSurfaceAnalysis is loaded. Runs written under
+# manifest schema version 2 or earlier (`positions.parquet`) are no longer
+# comparable: the ledger replaced positions in slice 2 of the ledger rebuild.
 #
 # What is compared (`run_id` and `written_at` are ignored everywhere):
-# - positions.parquet   joined on `leg_idx`; strings / timestamps / integers
-#                       exactly, doubles within TOL (NULL == NULL).
+# - events.parquet      joined on `sequence`; exact on every column but
+#                       `strike`, `price` and `settlement_price`, which are
+#                       within TOL (NULL == NULL).
+# - orders.parquet      joined on `order_id`; every column exactly.
+# - order_legs.parquet  joined on `order_leg_id`; doubles within TOL, the
+#                       rest exactly (NULL == NULL).
 # - pnl_series.parquet  in canonical order (rank over `timestamp, pnl`), not
 #                       on the stored `idx`: runs written before the
 #                       canonical order landed (metrics.md) ordered samples
@@ -27,8 +32,8 @@ using DuckDB: DBInterface
 #                       except `max_drawdown`, which is path-dependent: it is
 #                       recomputed from each run's canonical series and those
 #                       are compared (stored values are printed).
-# - manifest.parquet    `n_opens`, `n_closes`, `n_unmarked` exactly,
-#                       `window_end_spot` within TOL.
+# - manifest.parquet    `n_events`, `n_orders`, `n_opens`, `n_closes`,
+#                       `n_unmarked` exactly, `window_end_spot` within TOL.
 # A row present on one side only is a difference.
 
 const TOL = 1e-9
@@ -49,7 +54,7 @@ _pq(path) = "read_parquet('" * replace(path, "\\" => "/", "'" => "''") * "')"
 const dir_a = _run_dir(store_root, id_a)
 const dir_b = _run_dir(store_root, id_b)
 
-for d in (dir_a, dir_b), f in ("manifest", "metrics", "positions", "pnl_series")
+for d in (dir_a, dir_b), f in ("manifest", "metrics", "events", "orders", "order_legs", "pnl_series")
     p = joinpath(d, f * ".parquet")
     if !isfile(p)
         println(stderr, "compare_runs: missing $p")
@@ -135,7 +140,7 @@ function compare_drawdown()
 end
 
 function compare_manifest()
-    fields = ["n_opens", "n_closes", "n_unmarked", "window_end_spot"]
+    fields = ["n_events", "n_orders", "n_opens", "n_closes", "n_unmarked", "window_end_spot"]
     ra = _rows("SELECT $(join(fields, ", ")) FROM $(_pq(joinpath(dir_a, "manifest.parquet")))")
     rb = _rows("SELECT $(join(fields, ", ")) FROM $(_pq(joinpath(dir_b, "manifest.parquet")))")
     if length(ra) != 1 || length(rb) != 1
@@ -144,7 +149,7 @@ function compare_manifest()
     end
     a, b = first(ra), first(rb)
     bad = String[]
-    for f in ("n_opens", "n_closes", "n_unmarked")
+    for f in ("n_events", "n_orders", "n_opens", "n_closes", "n_unmarked")
         getproperty(a, Symbol(f)) == getproperty(b, Symbol(f)) ||
             push!(bad, "$f: $(getproperty(a, Symbol(f))) vs $(getproperty(b, Symbol(f)))")
     end
@@ -162,9 +167,17 @@ end
 
 println("comparing $id_a vs $id_b under $(abspath(store_root))")
 n_bad = 0
-n_bad += compare_table("positions", "leg_idx",
-    ["underlying", "expiry", "option_type", "direction", "entry_timestamp"],
-    ["strike", "quantity", "entry_price", "entry_spot", "entry_bid", "entry_ask"])
+n_bad += compare_table("events", "sequence",
+    ["id", "kind", "effective_at", "recorded_at", "group_id", "order_leg_id", "execution_id",
+     "underlying", "expiry", "option_type", "side", "intent", "quantity", "fill_rule",
+     "open_fill_id", "close_fill_id", "outcome", "source_id", "amount"],
+    ["strike", "price", "settlement_price"])
+n_bad += compare_table("orders", "order_id",
+    ["first_leg_id", "label", "group_id", "operation", "decided_at", "known_to"], String[])
+n_bad += compare_table("order_legs", "order_leg_id",
+    ["order_id", "leg_idx", "underlying", "expiry", "option_type", "side", "intent", "quantity",
+     "quote_at", "spot_at"],
+    ["strike", "bid", "ask", "spot"])
 n_bad += compare_table("pnl_series", "rk", ["timestamp"], ["pnl"]; source = _canonical_series)
 n_bad += compare_table("metrics", "metric_name", String[], ["value"]; source = _metrics_no_dd)
 n_bad += compare_drawdown()
