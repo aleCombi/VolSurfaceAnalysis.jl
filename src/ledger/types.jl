@@ -212,6 +212,36 @@ exhaustive; the container is a vector over it.
 """
 const LedgerEvent = Union{Fill,Match,Expiry,Fee}
 
+"""
+    Lot
+
+An open lot: `remaining` contracts of the fill `open_fill_id`, opened at
+`unit_price` per share on `contract` and `side`, inside `group`.
+"""
+struct Lot
+    group::Int
+    contract::ContractKey
+    side::Side
+    open_fill_id::Int
+    remaining::Int
+    unit_price::Float64
+end
+
+"""
+    Book
+
+Lots per `(group, contract)`, FIFO within each vector, plus `cash` in
+whole USD cents. Built by folding events with [`apply!`](@ref). Two
+books are equal when their open lots and their cash are; cash is an
+integer, so the comparison is exact.
+"""
+mutable struct Book
+    lots::Dict{Tuple{Int,ContractKey},Vector{Lot}}
+    cash::Int
+end
+
+Book() = Book(Dict{Tuple{Int,ContractKey},Vector{Lot}}(), 0)
+
 # ---- the order journal -----------------------------------------------
 #
 # What a decision saw, recorded beside the events it produced. The
@@ -259,6 +289,7 @@ end
 
 """
     Ledger
+    Ledger(events)
 
 The append-only journal of economic facts. `events` is in sequence
 order; `orders` is the order journal, one record per order in order-id
@@ -267,10 +298,20 @@ nothing that folds cash. The counters are private to the writers in
 `append.jl`. `id` and `sequence` are separate counters that coincide in
 a fresh ledger and are never used for each other: events are looked up
 by id through [`event`](@ref), not by index.
+
+`Ledger(events)` validates and folds the events into its owned book. It
+derives the next event id, sequence, and execution id, plus the next group
+and order-leg id from the maxima represented by those events. Events carry
+order-leg ids but no order ids, so this constructor cannot reconstruct
+`next_order_id`; nor can it recover a group minted by [`mint_group!`](@ref)
+but never used by an event. Continuing to write an events-only ledger is
+therefore sound only when the events are the whole story. [`load_run`](@ref)
+restores the order records and resets the remaining counters.
 """
 mutable struct Ledger
     events::Vector{LedgerEvent}
     orders::Vector{OrderRecord}
+    book::Book
     next_id::Int
     next_sequence::Int
     next_group::Int
@@ -280,11 +321,22 @@ mutable struct Ledger
     index::Dict{Int,Int}   # event id -> position in `events`
 end
 
-Ledger() = Ledger(LedgerEvent[], OrderRecord[], 1, 1, 1, 1, 1, 1, Dict{Int,Int}())
+Ledger() = Ledger(LedgerEvent[], OrderRecord[], Book(), 1, 1, 1, 1, 1, 1, Dict{Int,Int}())
+
+function Ledger(events::AbstractVector{<:LedgerEvent})
+    L = Ledger()
+    commit!(L, events)
+    groups = Int[group(e) for e in L.events if !(e isa Fee)]
+    L.next_group = isempty(groups) ? 1 : maximum(groups) + 1
+    leg_ids = Int[e.order_leg_id for e in L.events if e isa Fill]
+    L.next_leg_id = isempty(leg_ids) ? 1 : maximum(leg_ids) + 1
+    return L
+end
 
 Base.length(L::Ledger) = length(L.events)
 Base.isempty(L::Ledger) = isempty(L.events)
-Base.show(io::IO, L::Ledger) = print(io, "Ledger(", length(L), " events, ", length(L.orders), " orders)")
+Base.show(io::IO, L::Ledger) = print(io, "Ledger(", length(L), " events, ", length(L.orders),
+                                     " orders, ", length(open_lots(L.book)), " open lots)")
 
 """
     last_sequence(L::Ledger) -> Int

@@ -7,36 +7,6 @@
 # `append.jl`; `commit!` checks the same conditions before anything is
 # applied.
 
-"""
-    Lot
-
-An open lot: `remaining` contracts of the fill `open_fill_id`, opened at
-`unit_price` per share on `contract` and `side`, inside `group`.
-"""
-struct Lot
-    group::Int
-    contract::ContractKey
-    side::Side
-    open_fill_id::Int
-    remaining::Int
-    unit_price::Float64
-end
-
-"""
-    Book
-
-Lots per `(group, contract)`, FIFO within each vector, plus `cash` in
-whole USD cents. Built by folding events with [`apply!`](@ref). Two
-books are equal when their open lots and their cash are; cash is an
-integer, so the comparison is exact.
-"""
-mutable struct Book
-    lots::Dict{Tuple{Int,ContractKey},Vector{Lot}}
-    cash::Int
-end
-
-Book() = Book(Dict{Tuple{Int,ContractKey},Vector{Lot}}(), 0)
-
 Base.:(==)(a::Book, b::Book) = a.cash == b.cash && open_lots(a) == open_lots(b)
 
 _by_open(v::Vector{Lot}) = sort!(v; by = l -> l.open_fill_id)

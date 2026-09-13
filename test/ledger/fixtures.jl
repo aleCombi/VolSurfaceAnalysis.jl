@@ -26,15 +26,17 @@ const _LG_PUT465B = _lg_put(465.0; expiry=_LG_EXPIRY_B)
 # Book one leg, recorded when it is effective.
 function _lg_fill!(L, book, contract, side, intent, qty, price, group;
                    at=_LG_T_OPEN, leg_id=1, rule=:cross_spread)
-    record_fill!(L, book, Leg(contract, side, qty, intent), group;
-                 price=price, effective_at=at, recorded_at=at,
-                 order_leg_id=leg_id, fill_rule=rule)
+    batch = record_fill!(L, Leg(contract, side, qty, intent), group;
+                         price=price, effective_at=at, recorded_at=at,
+                         order_leg_id=leg_id, fill_rule=rule)
+    @test L.book == book_as_known(L, last_sequence(L))
+    return batch
 end
 
 # Case 1. Short 1 put at 0.85, buy to close at 0.40.
 #   cash = +8500 - 4000 = 4500; one match; one round trip of +4500; book empty.
 function _lg_case_round_trip()
-    L, book = Ledger(), Book()
+    L = Ledger(); book = L.book
     g = mint_group!(L)
     _lg_fill!(L, book, _LG_PUT470, Short, Open,  1, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
     _lg_fill!(L, book, _LG_PUT470, Long,  Close, 1, 0.40, g; at=_LG_T_CLOSE, leg_id=2)
@@ -46,7 +48,7 @@ end
 #   cash = 17000 + 9000 - 12000 = 14000; matches of 2 and 1;
 #   trips (8500 - 4000) * 2 = +9000 and (9000 - 4000) * 1 = +5000.
 function _lg_case_split()
-    L, book = Ledger(), Book()
+    L = Ledger(); book = L.book
     g = mint_group!(L)
     _lg_fill!(L, book, _LG_PUT470, Short, Open,  2, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
     _lg_fill!(L, book, _LG_PUT470, Short, Open,  1, 0.90, g; at=_LG_T_OPEN2, leg_id=2)
@@ -58,7 +60,7 @@ end
 # 1.20); close group 2 only, at 0.70.
 #   cash = 11000 + 12000 - 7000 = 16000; group 1 untouched; one trip of +5000.
 function _lg_case_two_groups()
-    L, book = Ledger(), Book()
+    L = Ledger(); book = L.book
     g1 = mint_group!(L)
     g2 = mint_group!(L)
     _lg_fill!(L, book, _LG_CALL490, Short, Open,  1, 1.10, g1; at=_LG_T_OPEN,  leg_id=1)
@@ -73,13 +75,14 @@ end
 # effective at expiry A and recorded at the next tick.
 #   cash = 8500 + 15000 - 20000 = 3500; the put-465 lot stays open.
 function _lg_case_mixed_expiries()
-    L, book = Ledger(), Book()
+    L = Ledger(); book = L.book
     g = mint_group!(L)
     _lg_fill!(L, book, _LG_PUT470,  Short, Open, 1, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
     _lg_fill!(L, book, _LG_PUT465B, Short, Open, 1, 1.50, g; at=_LG_T_OPEN2, leg_id=2)
     lot = only(l for l in lots(book, g) if l.contract == _LG_PUT470)
-    record_expiry!(L, book, lot; settlement_price=468.0,
+    record_expiry!(L, lot; settlement_price=468.0,
                    effective_at=_LG_EXPIRY_A, recorded_at=_LG_T_NEXT)
+    @test L.book == book_as_known(L, last_sequence(L))
     return (L, book)
 end
 
@@ -90,7 +93,8 @@ end
 function _lg_case_fees()
     L, book = _lg_case_split()
     close_id = event_id(only(e for e in L.events if e isa Fill && e.intent == Close))
-    record_fee!(L, book, close_id, -130; effective_at=_LG_T_CLOSE, recorded_at=_LG_T_CLOSE)
+    record_fee!(L, close_id, -130; effective_at=_LG_T_CLOSE, recorded_at=_LG_T_CLOSE)
+    @test L.book == book_as_known(L, last_sequence(L))
     return (L, book)
 end
 
@@ -98,7 +102,7 @@ end
 # call 490 at 1.10, closed at 0.60.
 #   cash = 8500 + 11000 - 6000 = 13500; one trip of +5000; the put lot stays open.
 function _lg_case_open_at_end()
-    L, book = Ledger(), Book()
+    L = Ledger(); book = L.book
     g = mint_group!(L)
     _lg_fill!(L, book, _LG_PUT470,  Short, Open,  1, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
     _lg_fill!(L, book, _LG_CALL490, Short, Open,  1, 1.10, g; at=_LG_T_OPEN,  leg_id=2)
@@ -123,11 +127,12 @@ _lg_seen(price; at=_LG_T_OPEN) = LegObservation(at, price, price, 480.0, at)
 # at 0.85 and short 1 call 490 at 1.10, a 65-cent commission on each leg.
 #   events Fill, Fill, Fee, Fee; cash = 8500 + 11000 - 130 = 19370; group 1.
 function _lg_case_strangle_order()
-    L, book = Ledger(), Book()
+    L = Ledger(); book = L.book
     order = Order(:strangle, [Leg(_LG_PUT470, Short, 1, Open), Leg(_LG_CALL490, Short, 1, Open)])
-    record_order!(L, book, order; prices=[0.85, 1.10], fees=[-65, -65],
+    record_order!(L, order; prices=[0.85, 1.10], fees=[-65, -65],
                   observations=[_lg_seen(0.85), _lg_seen(1.10)],
                   effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN, fill_rule=:cross_spread)
+    @test L.book == book_as_known(L, last_sequence(L))
     return (L, book)
 end
 
@@ -138,9 +143,10 @@ end
 function _lg_case_strangle_closed()
     L, book = _lg_case_strangle_order()
     order = Order(:close, [Leg(_LG_PUT470, Long, 1, Close), Leg(_LG_CALL490, Long, 1, Close)]; group=1)
-    record_order!(L, book, order; prices=[0.40, 0.60], fees=[-65, -65],
+    record_order!(L, order; prices=[0.40, 0.60], fees=[-65, -65],
                   observations=[_lg_seen(0.40; at=_LG_T_CLOSE), _lg_seen(0.60; at=_LG_T_CLOSE)],
                   effective_at=_LG_T_CLOSE, recorded_at=_LG_T_CLOSE, fill_rule=:cross_spread)
+    @test L.book == book_as_known(L, last_sequence(L))
     return (L, book)
 end
 

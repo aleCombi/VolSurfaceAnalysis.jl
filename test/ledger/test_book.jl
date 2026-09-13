@@ -11,28 +11,46 @@
     @test b == Book()
 end
 
+@testset "book: Ledger owns its fold" begin
+    empty = Ledger()
+    @test empty.book == Book()
+    @test occursin("0 open lots", sprint(show, empty))
+
+    built, expected = _lg_case_split()
+    replayed = Ledger(copy(built.events))
+    @test replayed.events == built.events
+    @test replayed.book == expected
+    @test replayed.book == book_as_known(replayed, last_sequence(replayed))
+
+    @test !hasmethod(commit!, Tuple{Ledger,Book,Vector{LedgerEvent}})
+    @test !hasmethod(record_fill!, Tuple{Ledger,Book,Leg,Int})
+    @test !hasmethod(record_expiry!, Tuple{Ledger,Book,Lot})
+    @test !hasmethod(record_fee!, Tuple{Ledger,Book,Int,Int})
+    @test !hasmethod(record_order!, Tuple{Ledger,Book,Order})
+end
+
 @testset "book: apply! per kind" begin
     b = Book()
     hdr(i, t=_LG_T_OPEN) = EventHeader(i, t, t, i)
     f_open = Fill(hdr(1), 1, 1, 1, _LG_PUT470, Short, Open, 3, 0.85, :cross_spread)
-    @test apply!(b, f_open, _LG_SPEC) === b
+    @test VolSurfaceAnalysis.apply!(b, f_open, _LG_SPEC) === b
     @test b.cash == 25500                                            # 3 * 8500
     @test open_lots(b) == [Lot(1, _LG_PUT470, Short, 1, 3, 0.85)]
     @test open_groups(b) == [1]
 
     f_close = Fill(hdr(2, _LG_T_CLOSE), 1, 2, 2, _LG_PUT470, Long, Close, 1, 0.40, :cross_spread)
-    apply!(b, f_close, _LG_SPEC)
+    VolSurfaceAnalysis.apply!(b, f_close, _LG_SPEC)
     @test b.cash == 21500                                            # 25500 - 4000
     @test open_lots(b) == [Lot(1, _LG_PUT470, Short, 1, 3, 0.85)]   # a close fill touches no lot
 
-    apply!(b, Match(hdr(3, _LG_T_CLOSE), 1, 1, 2, 1), _LG_SPEC)
+    VolSurfaceAnalysis.apply!(b, Match(hdr(3, _LG_T_CLOSE), 1, 1, 2, 1), _LG_SPEC)
     @test b.cash == 21500                                            # a match moves no cash
     @test open_lots(b) == [Lot(1, _LG_PUT470, Short, 1, 2, 0.85)]
 
-    apply!(b, Fee(hdr(4, _LG_T_CLOSE), 2, -130), _LG_SPEC)          # 1.30 USD
+    VolSurfaceAnalysis.apply!(b, Fee(hdr(4, _LG_T_CLOSE), 2, -130), _LG_SPEC)          # 1.30 USD
     @test b.cash == 21370                                            # 21500 - 130
 
-    apply!(b, Expiry(hdr(5, _LG_EXPIRY_A), 1, 1, _LG_PUT470, Short, 2, 468.0, CashSettled), _LG_SPEC)
+    VolSurfaceAnalysis.apply!(b, Expiry(hdr(5, _LG_EXPIRY_A), 1, 1, _LG_PUT470, Short, 2, 468.0, CashSettled), _LG_SPEC)
     @test b.cash == -18630                       # 21370 - 2 * 20000 (intrinsic 2.00 per share)
     @test isempty(open_lots(b))
     @test isempty(open_groups(b))
@@ -42,20 +60,20 @@ end
 @testset "book: the one-argument apply! resolves the spec from the contract" begin
     b = Book()
     f = Fill(EventHeader(1, _LG_T_OPEN, _LG_T_OPEN, 1), 1, 1, 1, _LG_PUT470, Short, Open, 1, 0.85, :cross_spread)
-    @test apply!(b, f) === b
+    @test VolSurfaceAnalysis.apply!(b, f) === b
     @test b.cash == 8500
-    apply!(b, Fee(EventHeader(2, _LG_T_OPEN, _LG_T_OPEN, 2), 1, -65))   # 0.65 USD
+    VolSurfaceAnalysis.apply!(b, Fee(EventHeader(2, _LG_T_OPEN, _LG_T_OPEN, 2), 1, -65))   # 0.65 USD
     @test b.cash == 8435                                                 # 8500 - 65
 end
 
 @testset "book: consuming a lot the book does not hold is a named failure" begin
     b = Book()
-    @test_throws DanglingReference apply!(b, Match(EventHeader(1, _LG_T_CLOSE, _LG_T_CLOSE, 1), 1, 99, 98, 1), _LG_SPEC)
+    @test_throws DanglingReference VolSurfaceAnalysis.apply!(b, Match(EventHeader(1, _LG_T_CLOSE, _LG_T_CLOSE, 1), 1, 99, 98, 1), _LG_SPEC)
     @test b == Book()
-    apply!(b, Fill(EventHeader(2, _LG_T_OPEN, _LG_T_OPEN, 2), 1, 1, 1, _LG_PUT470, Short, Open, 1, 0.85, :cross_spread), _LG_SPEC)
+    VolSurfaceAnalysis.apply!(b, Fill(EventHeader(2, _LG_T_OPEN, _LG_T_OPEN, 2), 1, 1, 1, _LG_PUT470, Short, Open, 1, 0.85, :cross_spread), _LG_SPEC)
     before = deepcopy(b)
-    @test_throws ExceedsOpen apply!(b, Match(EventHeader(3, _LG_T_CLOSE, _LG_T_CLOSE, 3), 1, 2, 98, 2), _LG_SPEC)
-    @test_throws DanglingReference apply!(b, Match(EventHeader(3, _LG_T_CLOSE, _LG_T_CLOSE, 3), 2, 2, 98, 1), _LG_SPEC)  # wrong group
+    @test_throws ExceedsOpen VolSurfaceAnalysis.apply!(b, Match(EventHeader(3, _LG_T_CLOSE, _LG_T_CLOSE, 3), 1, 2, 98, 2), _LG_SPEC)
+    @test_throws DanglingReference VolSurfaceAnalysis.apply!(b, Match(EventHeader(3, _LG_T_CLOSE, _LG_T_CLOSE, 3), 2, 2, 98, 1), _LG_SPEC)  # wrong group
     @test b == before
     @test open_lots(b) == [Lot(1, _LG_PUT470, Short, 2, 1, 0.85)]
 end
@@ -71,7 +89,7 @@ end
     @test open_lots(book) == [Lot(1, _LG_PUT470, Short, 1, 1, 0.85)]
 
     # several groups and contracts: ascending groups, lots by opening fill
-    L, book = Ledger(), Book()
+    L = Ledger(); book = L.book
     g1 = mint_group!(L); g2 = mint_group!(L); g3 = mint_group!(L)
     _lg_fill!(L, book, _LG_CALL490, Short, Open, 1, 1.10, g3; leg_id=1)
     _lg_fill!(L, book, _LG_PUT470,  Short, Open, 1, 0.85, g1; leg_id=2)
@@ -126,7 +144,7 @@ end
         @test book == book_as_known(L, sequence(L.events[end]))
         stepped = Book()
         for e in L.events
-            apply!(stepped, e)
+            VolSurfaceAnalysis.apply!(stepped, e)
         end
         @test stepped == book
         @test book.cash == sum(cash(e) for e in L.events)
@@ -152,7 +170,7 @@ end
         _lg_check_book(stepped)
         for (k, e) in enumerate(L.events)
             @test sequence(e) == k
-            apply!(stepped, e)
+            VolSurfaceAnalysis.apply!(stepped, e)
             _lg_check_book(stepped)                     # after every event
             @test book_as_known(L, k) == stepped        # not only the last k
             _lg_check_book(book_as_known(L, k))
@@ -182,10 +200,10 @@ end
     # The pinned-spec commit! overload is gone (finding 6.1): every write
     # resolves contract facts from the table, so the book a batch was
     # applied to equals both replays. A hand-built batch through commit!:
-    L, book = Ledger(), Book()
+    L = Ledger(); book = L.book
     g = mint_group!(L)
     fill = Fill(_lg_hdr(L, 0, _LG_T_OPEN), g, 1, 1, _LG_PUT470, Short, Open, 1, 0.85, :cross_spread)
-    commit!(L, book, LedgerEvent[fill])
+    commit!(L, LedgerEvent[fill])
     @test book.cash == 8500                                          # 0.85 * 100 * 100
     @test book == book_effective(L, _LG_FAR) && book == book_as_known(L, 1)
     @test !hasmethod(commit!, Tuple{Ledger,Book,Vector{LedgerEvent},ContractSpec})
@@ -194,9 +212,9 @@ end
         L, book = build()
         f = first(e for e in L.events if e isa Fill)
         t = maximum(recorded_at(e) for e in L.events)
-        record_fee!(L, book, event_id(f), -65; effective_at=t, recorded_at=t)
+        record_fee!(L, event_id(f), -65; effective_at=t, recorded_at=t)
         for lot in open_lots(book)
-            record_expiry!(L, book, lot; settlement_price=480.0,
+            record_expiry!(L, lot; settlement_price=480.0,
                            effective_at=lot.contract.expiry, recorded_at=_LG_FAR)
         end
         @test book == book_effective(L, _LG_FAR)
@@ -208,12 +226,12 @@ end
 @testset "ledger promise: accepted equal-time lifecycle events replay safely" begin
     # a fill at its contract's expiry instant, then that lot's expiry at the
     # same instant: equal instants fold in sequence order (finding 6.2)
-    L, book = Ledger(), Book()
+    L = Ledger(); book = L.book
     g = mint_group!(L)
     _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.85, g;
               at=_LG_EXPIRY_A, leg_id=1)
     lot = only(open_lots(book))
-    record_expiry!(L, book, lot; settlement_price=468.0,
+    record_expiry!(L, lot; settlement_price=468.0,
                    effective_at=_LG_EXPIRY_A, recorded_at=_LG_T_NEXT)
     @test book_effective(L, _LG_EXPIRY_A) == book
     @test book.cash == -11500 # +0.85*100 - (470-468)*100 = 85 - 200, in cents
@@ -225,7 +243,7 @@ end
     # is effective on Jan 19, before the fill of event 2 on Jan 22; the two
     # replays add in different orders and still agree exactly, cash being
     # integer cents (finding 7.4)
-    L, book = Ledger(), Book()
+    L = Ledger(); book = L.book
     g = mint_group!(L)
     later_put = _lg_put(470.0; expiry=_LG_T_NEXT + Day(4))
     _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.07, g;
@@ -233,7 +251,7 @@ end
     _lg_fill!(L, book, later_put, Short, Open, 1, 0.07, g;
               at=_LG_T_NEXT, leg_id=2)
     lot = only(l for l in open_lots(book) if l.contract == _LG_PUT470)
-    record_expiry!(L, book, lot; settlement_price=469.83,
+    record_expiry!(L, lot; settlement_price=469.83,
                    effective_at=_LG_EXPIRY_A,
                    recorded_at=_LG_T_NEXT + Minute(1))
     @test !issorted([effective_at(e) for e in L.events])

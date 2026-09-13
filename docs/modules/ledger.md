@@ -40,7 +40,8 @@ order journal holds plain numbers and timestamps for the same reason.
   events only. This slice retains one `LegObservation` per leg under
   `:broker_execution`, though its quote sides may be `missing` and the
   observation is not consulted; absent observations wait for the live adapter.
-- `Ledger` -- the container; `Book` and `Lot` -- the view by replay;
+- `Ledger` -- the container, including its incrementally folded `book`;
+  `Book` and `Lot` -- standalone view values returned by replay;
   `RoundTrip` -- one consumed lot.
 - `ContractSpec` -- per-underlying facts: multiplier, exercise style,
   settlement style, delivery. A table in code keyed by ticker, from the
@@ -80,11 +81,16 @@ inside the ledger is a floating-point amount of money.
 
 ## Book and the two replays
 
-The book holds lots per `(group, contract)`, FIFO within, plus cash. It
-is never stored: it is the fold of the events, and the incrementally
-updated book equals the full replay exactly, by construction: every
-write resolves the same table of contract facts the replays resolve,
-and every amount is an integer.
+The book holds lots per `(group, contract)`, FIFO within, plus cash. The
+ledger owns the writable book as `L.book`; no writer accepts another.
+It is never stored: `Ledger(events)` validates and folds the events, and
+every supported write keeps that book exactly equal to the full replay.
+Every write resolves the same table of contract facts the replays resolve,
+and every amount is an integer. Julia fields are public and mutable: a
+caller can reach into `L.book`, but doing so is outside the supported path
+and the ledger cannot defend its journal/book invariant from that mutation.
+`book_as_known` and `book_effective` return standalone values, so read views
+remain free.
 
 Two replays answer two questions. *What was known* cuts by sequence,
 everything appended up to a boundary: the view a decision could have
@@ -103,7 +109,7 @@ first tick is already true at Friday's settlement.
 ## Invariants
 
 Every write goes through one validated path. A batch is checked whole
-against the ledger and the book; nothing is appended if any check
+against the ledger and its owned book; nothing is appended if any check
 fails, and each failure has a name. `record_order!`, the structure-level
 writer the engine calls, plans every leg of an order against the book
 as it will be after the earlier legs (so a leg may close a lot the same
@@ -187,7 +193,7 @@ valuation failures (outside the journal); persistence.
 
 | Decision | Why |
 |---|---|
-| **Append-only journal; the book is a view** | Corrections are new entries, never edits, so a stored run can be replayed and audited; a backtest policy and a live loop receive the same `Book` type. |
+| **Append-only journal; the ledger owns its folded book** | Corrections are new entries, never edits, so a stored run can be replayed and audited; no supported writer accepts an outside book, and every supported call keeps the owned book aligned with the journal. Direct mutation through the public Julia field `L.book` is outside that boundary. A backtest policy and a live loop receive the same `Book` type. |
 | **`Match` is an event** | One close can split across lots, and a change to the matching rule must not rewrite old results; the pairing is recorded, not recomputed. |
 | **`Expiry` is per lot and carries its side and contract** | Lineage survives mixed expiries inside one structure, and the event's cash needs no lookup. The copy is checked on append. |
 | **Bitemporal header, decision view cut by sequence** | Effective and recorded time separate what was true from what was known; sequence, not recorded time, bounds what a decision could see. |

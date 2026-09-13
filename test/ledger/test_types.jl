@@ -143,6 +143,7 @@ end
     @test length(L) == 0
     @test isempty(L)
     @test isempty(L.orders)
+    @test L.book == Book()
     @test L.next_id == 1
     @test L.next_sequence == 1
     @test L.next_group == 1
@@ -154,7 +155,16 @@ end
     err = try VolSurfaceAnalysis.event(L, 1); nothing catch e; e end
     @test err isa DanglingReference && err.field == :event_id && err.id == 1
     @test occursin("DanglingReference", sprint(showerror, err))
-    @test sprint(show, L) == "Ledger(0 events, 0 orders)"
+    @test sprint(show, L) == "Ledger(0 events, 0 orders, 0 open lots)"
+end
+
+@testset "types: Ledger(events) cannot reconstruct order ids or unused groups" begin
+    source, _ = _lg_case_strangle_order()
+    @test source.next_order_id == 2
+    @test mint_group!(source) == 2                 # minted, but no event uses it
+    rebuilt = Ledger(copy(source.events))
+    @test rebuilt.next_order_id == 1
+    @test rebuilt.next_group == 2                  # event maximum + 1, not source's 3
 end
 
 @testset "types: the order journal records construct and are immutable" begin
