@@ -157,7 +157,7 @@ failed.** What the review deferred is in the backlog below.
   unchanged -- with its tests on hand-built ledgers. The engine still
   runs on `positions` until slice 2. Gate after slice 1: 1626
   passed, 0 failed. **Review 2026-09-12**
-  ([ledger-slice1-review.md](proposals/ledger-slice1-review.md)): not
+  (`ledger-slice1-review.md`, retired): not
   mergeable. The write path accepts batches the invariants forbid (a
   caller-supplied spec at `commit!` that the replays ignore, consumption
   effective before its open, a partial or early expiry, a non-FIFO
@@ -167,7 +167,7 @@ failed.** What the review deferred is in the backlog below.
   in `test/ledger/test_review_findings.jl`, so the gate went red on
   purpose: 1630 passed, 15 failed, 1 errored, all in that file. **Fix
   round landed 2026-09-12**
-  ([ledger-slice1-fix.md](proposals/ledger-slice1-fix.md)): `commit!`
+  (`ledger-slice1-fix.md`, retired): `commit!`
   resolves contract facts from the table itself, with no caller-supplied
   spec; every reference must point backward in effective time and the
   effective replay folds equal instants in sequence order; FIFO is
@@ -178,9 +178,9 @@ failed.** What the review deferred is in the backlog below.
   contract) and fee shares by cumulative rounding, so book equality and
   the trips-to-cash reconciliation are exact. Gate after the fix round:
   1673 passed, 0 failed, 1 broken. **Hardening round landed 2026-09-12**
-  ([ledger-slice1-hardening.md](proposals/ledger-slice1-hardening.md);
+  (`ledger-slice1-hardening.md`, retired;
   the inventory is
-  [ledger-slice1-coverage.md](proposals/ledger-slice1-coverage.md)):
+  `ledger-slice1-coverage.md`, retired):
   every invariant and named failure the module documents is mapped to
   its enforcing code and its test; `test_review_findings.jl` is
   dissolved into the suites beside the behaviour they check; documented
@@ -190,13 +190,13 @@ failed.** What the review deferred is in the backlog below.
   finite, `InvalidPrice`; an unminted id at `event` and a non-positive
   join id are `DanglingReference`). The rule additions are listed in the
   coverage document for veto. Codex's review of the round
-  ([ledger-slice1-hardening-review.md](proposals/ledger-slice1-hardening-review.md))
+  (`ledger-slice1-hardening-review.md`, retired)
   found the fill review's construction-time post-expiry check missing:
   `FillAfterExpiry` is now thrown by the `Fill` constructor too, and
   every rejection in every failure testset checks the ledger snapshot
   and the book. Gate after hardening: 2306 passed, 0 failed, 1 broken,
   the structure-atomicity testset waiting for slice 2. **Slice 2 landed
-  2026-09-12** ([ledger-slice2.md](proposals/ledger-slice2.md)): the
+  2026-09-12** (`ledger-slice2.md`, retired): the
   engine computes, the ledger records. `decide` takes the `Book` and
   returns `Order`s; the venue (`src/backtest/execution.jl`) prices every
   leg through `:cross_spread` on the class's tick and IBKR Pro's US
@@ -218,7 +218,7 @@ failed.** What the review deferred is in the backlog below.
   its in-window leg by an `Expiry` against the lot's own underlying
   (`test/regressions/test_review_findings.jl`).
   **Slice 3 landed 2026-09-13**
-  ([ledger-lifecycle.md](proposals/ledger-lifecycle.md)): expiries are
+  (`ledger-lifecycle.md`, retired): expiries are
   booked in the tick loop, and the parked "Settlement rule" backlog item
   lands with them. `settlements` (`src/backtest/settlement.jl`) is
   `fill_legs`' twin -- a function of the cut and the book returning the
