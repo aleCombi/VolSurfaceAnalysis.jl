@@ -159,9 +159,12 @@ tick after its instant.
 
 ### Tick order
 
-1. **Lifecycle.** Expiries due at or before `t` are booked with
-   effective time at the settlement instant and recorded time `t`, so
-   a policy sees expired legs gone.
+1. **Lifecycle.** Lots falling due in `(prev, t]` -- the interval since
+   the previous tick, not every open lot with `expiry <= t` -- are
+   booked with effective time at the settlement instant and recorded
+   time `t`, so a lot that settled is gone from the book the policy is
+   handed. A lot with no honest settlement price stays open, stays
+   visible, and is warned about once.
 2. **Decide** on the book.
 3. **Fill.** Every leg of the order is validated first: quote
    resolvable, executable side present, spot present, something to

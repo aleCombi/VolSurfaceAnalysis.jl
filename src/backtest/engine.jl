@@ -23,19 +23,25 @@ using Dates
     UnpriceableLeg
 
 Design rule 7's "a leg that cannot honestly be priced": `contract` at
-`t`, for `reason` `:no_quote` (an empty chain, or the contract absent
-from it), `:no_executable_side` (the side the fill rule needs is
-`missing`) or `:no_spot` (the underlying is served but has no spot at
-`t`). Nothing serving the selector stays `UnservedSelector`, thrown by
-`at`. Thrown before anything is written, so no partial structure reaches
-the ledger.
+`t`, for `reason` `:expired_contract` (`t` is at or after the contract's
+expiry: trading in it has stopped), `:no_quote` (an empty chain, or the
+contract absent from it), `:no_executable_side` (the side the fill rule
+needs is `missing`) or `:no_spot` (the underlying is served but has no
+spot at `t`). Nothing serving the selector stays `UnservedSelector`,
+thrown by `at`. Thrown before anything is written, so no partial
+structure reaches the ledger.
 
 Settling is pricing a leg too -- at intrinsic, against a reference print
 -- so [`settlement_price`](@ref) throws the same failure, for `reason`
 `:unexpected_gap` (a date with no prints that the exchange calendar
-calls open: a data gap, never evidence of a closure) or `:no_session`
-(the bounded walk back found no session). The two are the only failures
-[`settlements`](@ref) catches; a lot they name stays open.
+calls open: a data gap, never evidence of a closure), `:no_session`
+(the bounded walk back found no session), `:no_session_close` (the cut
+does not reach the contract's expiry, so the settlement session's close
+is not visible: the rule's domain, unreachable from the tick loop) or
+`:pre_open_expiry` (the contract expires before its own listed session
+opens, so a close-settled rule has no close to offer it: the AM-settled
+contract, named rather than blamed on the data). The four are the only
+failures [`settlements`](@ref) catches; a lot they name stays open.
 """
 struct UnpriceableLeg <: Exception
     contract::ContractKey
@@ -93,16 +99,26 @@ end
         -> (prices, fees, observations, fill_rule)
 
 The venue as a pure function: for every leg of `order`, before anything
-else happens, resolve its quote ([`resolve_quote`](@ref)), its price
-through `fill_rule` ([`fill_price`](@ref)) and the spot of the leg's own
-underlying at `t`; then the commission of the whole order under
-`cost_model` ([`commission`](@ref)), negated into `Fee` amounts. Returns
-the per-leg keywords `record_order!` takes as a `NamedTuple`; each
-observation is the quote's bid, ask and timestamp and the spot's price
-and timestamp. Throws [`UnpriceableLeg`](@ref) (`:no_quote`,
+else happens, check that the contract still trades at `t`, then resolve
+its quote ([`resolve_quote`](@ref)), its price through `fill_rule`
+([`fill_price`](@ref)) and the spot of the leg's own underlying at `t`;
+then the commission of the whole order under `cost_model`
+([`commission`](@ref)), negated into `Fee` amounts. Returns the per-leg
+keywords `record_order!` takes as a `NamedTuple`; each observation is
+the quote's bid, ask and timestamp and the spot's price and timestamp.
+Throws [`UnpriceableLeg`](@ref) (`:expired_contract`, `:no_quote`,
 `:no_executable_side`, `:no_spot`) for a leg that cannot honestly be
 priced, and `UnservedSelector` when nothing serves an underlying. Reads
 through the cut and writes nothing.
+
+The venue is stricter than the ledger about expiry, deliberately. The
+ledger accepts a fill effective at the expiry instant itself
+(`FillAfterExpiry` is strictly later), but trading has stopped by then,
+so a chain still quoting the contract at that instant must not produce a
+fill. It is also what keeps the lifecycle interval honest: lifecycle
+runs before the fill, so a lot opened at or after its own expiry would
+fall outside `(prev, t]` for every later interval and never be examined
+again.
 """
 function fill_legs(cut::TimeCut, order::Order, t::DateTime;
                    fill_rule::Symbol, cost_model::Symbol, tick_cents::Int)
@@ -110,6 +126,9 @@ function fill_legs(cut::TimeCut, order::Order, t::DateTime;
     prices       = Vector{Float64}(undef, n)
     observations = Vector{LegObservation}(undef, n)
     for (k, leg) in enumerate(order.legs)
+        # Trading stops at the expiry instant, so the contract cannot be
+        # filled at or after it, whatever the chain still quotes.
+        t < leg.contract.expiry || throw(UnpriceableLeg(leg.contract, t, :expired_contract))
         q = resolve_quote(cut, leg.contract, t)
         p = fill_price(fill_rule, q.bid, q.ask, leg.side, tick_cents)
         ismissing(p) && throw(UnpriceableLeg(leg.contract, t, :no_executable_side))
@@ -236,12 +255,18 @@ end
 Walk the ticks of `clock` in `[from, to]` (or the agent's `tick_times`
 override when it returns one). Per tick, in order: settle the lots that
 fell due since the previous tick ([`settlements`](@ref), then the
-ledger's [`record_expiry!`](@ref)), so the policy sees expired legs
-gone; build the cut, ask the agent for the current policy, ask that
+ledger's [`record_expiry!`](@ref)), so a lot that settled is gone from
+the book the policy is handed -- one with no honest settlement price
+stays open and stays visible, and `settlements` warns; build the cut,
+ask the agent for the current policy, ask that
 policy for orders given the book; and for each order price every leg
 through the venue ([`fill_legs`](@ref)) and book it as one transaction
 ([`record_order!`](@ref)), then immediately run the per-record
-[`check_join`](@ref). Every order of a tick is recorded as having seen
+[`check_join`](@ref). Because lifecycle runs first, a leg on a contract
+already at or past its expiry is refused by `fill_legs`
+(`:expired_contract`), so no lot opened through this loop can escape its
+own settlement interval. Writing through `record_order!` directly
+bypasses the venue and forfeits that. Every order of a tick is recorded as having seen
 the ledger as it stood before the tick's first order (`known_to`), which
 is captured after that tick's expiries. The book handed to `decide` is
 the engine's own fold, equal to `book_as_known(L, known_to)`; a policy
@@ -274,9 +299,10 @@ function run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTi
     prev = from                                    # lower bound of the lifecycle interval
     for t in ticks
         cut = TimeCut(data, t)
-        # 1. Lifecycle, before the decision: a policy sees expired legs gone.
-        #    `settlements` warns about what it could not price; a lot falling
-        #    due in (prev, t] is examined exactly once, ever.
+        # 1. Lifecycle, before the decision: a lot that settled is gone from
+        #    the book the policy is handed, and one that could not be priced
+        #    stays open and visible. `settlements` warns about those; a lot
+        #    falling due in (prev, t] is examined exactly once, ever.
         foreach(settlements(cut, L.book, prev, t; settlement_rule).settled) do (lot, p)
             record_expiry!(L, lot; settlement_price = p,
                            effective_at = lot.contract.expiry, recorded_at = t)

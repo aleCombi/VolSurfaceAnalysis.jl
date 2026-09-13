@@ -18,6 +18,22 @@
 # The calendar only contradicts the tree: a printless weekday it calls
 # open is a named valuation failure (design rule 7), never evidence that
 # the exchange was closed.
+#
+# Two bounds keep the answer honest rather than merely permitted by the
+# cut. The reference window ends at the earlier of 16:00 ET and the
+# contract's own expiry, so an intraday expiry never settles at a print
+# from after it expired -- a price that did not exist at the instant the
+# event stamps, which would make `book_effective` report a lot settled at
+# a future number. And the cut must reach the expiry at all: a cut that
+# cannot see the settlement session's close is `:no_session_close`, not a
+# provisional intraday print dressed up as a settlement.
+#
+# The lower bound has a domain too. `:session_close` is PM settlement, and
+# an expiry earlier than 09:30 ET on its own listed date has no session
+# close behind it to settle against: it settles against that session's
+# *opening* print, the AM-settled case (`:pre_open_expiry`). That is a
+# contract this rule does not serve, not a gap in the data -- the window
+# is empty by construction, and no print could fill it.
 
 using BusinessDays
 
@@ -47,25 +63,76 @@ const _SESSION_CLOSE = Time(16, 0)
 # termination guarantee has to have a name.
 const _SESSION_WALK_DAYS = 10
 
-# Contract expiries are stamped `et_to_utc(date, Time(16, 0))` and every
-# timestamp on disk is UTC, so the listed date is read back in ET.
+# Every timestamp is UTC, so the listed date of an expiry is its ET date.
+# `parse_polygon_ticker` stamps `et_to_utc(date, Time(16, 0))`, but a
+# `ContractKey` takes any instant and the window bound above does not
+# assume that convention.
 _et_date(dt::DateTime)::Date = Date(DateTime(astimezone(ZonedDateTime(dt, tz"UTC"), TZ_ET)))
 
 # Whether the calendar says the exchange was closed on `d`.
 _closed_on(d::Date)::Bool = !isbday(_NYSE, d) || d in _ADHOC_CLOSURES
 
 function _session_close(cut::TimeCut, contract::ContractKey, t::DateTime)::Float64
+    # The domain. Every window below ends at or before the expiry instant,
+    # so a cut that does not reach the expiry cannot see the settlement
+    # session's close: it would answer with a provisional intraday print,
+    # or read a truncated -- possibly empty -- window and walk back past a
+    # session that had not finished printing yet. Design rule 7: name it.
+    cut.cutoff < contract.expiry &&
+        throw(UnpriceableLeg(contract, t, :no_session_close))
     listed = _et_date(contract.expiry)
     for k in 0:(_SESSION_WALK_DAYS - 1)
         d = listed - Day(k)
-        prints = between(cut, SpotPrice, contract.underlying,
-                         et_to_utc(d, _SESSION_OPEN), et_to_utc(d, _SESSION_CLOSE))
-        isempty(prints) || return last(prints).price
+        # The window never runs past the expiry instant. On the listed date
+        # of an intraday expiry that is the expiry itself; on an ordinary
+        # 16:00 ET expiry and on every walked-back session it is the close.
+        window_start = et_to_utc(d, _SESSION_OPEN)
+        window_end   = min(et_to_utc(d, _SESSION_CLOSE), contract.expiry)
+        if window_start > window_end
+            # The rule's other domain edge, and only the listed date can
+            # reach it: every walked-back date closes before the expiry
+            # instant, so its window is the whole session. An expiry before
+            # 09:30 ET is the AM-settled shape -- the opening print settles
+            # it, not a close this rule could read -- so name it rather than
+            # hand the reversed range to a provider and then blame the data
+            # for an emptiness the bounds created. The calendar is the only
+            # witness available here, because the window that would show a
+            # print is empty by construction; on a date it calls closed
+            # nothing is claimed about the contract at all, the listed date
+            # is simply not a session, and the walk back is the answer.
+            _closed_on(d) || throw(UnpriceableLeg(contract, t, :pre_open_expiry))
+            continue
+        end
+        # `between` promises an iterable, not a container: consume it once
+        # and keep the last record, which is the latest because the protocol
+        # promises sorted order. Indexing it would fail on a lazy reader, and
+        # probing it for emptiness and then reading it again is a second
+        # traversal a single-pass reader need not survive.
+        close_price = nothing
+        for p in between(cut, SpotPrice, contract.underlying, window_start, window_end)
+            close_price = p.price
+        end
+        close_price === nothing || return close_price
         _closed_on(d) || throw(UnpriceableLeg(contract, t, :unexpected_gap))
     end
     throw(UnpriceableLeg(contract, t, :no_session))
 end
 
+# The settlement rules by name, the `_FILL_RULES` shape. One entry, and it
+# is PM settlement: the contract settles against the close of its
+# settlement session, which is what `ContractSpec.settlement` records as
+# `PMSettled` for every underlying `_CONTRACT_TABLE` lists.
+#
+# AM settlement is the gap, and it is future work rather than an oversight.
+# `SettlementStyle` already has `AMSettled` and nothing selects it; the rule
+# it needs is a second entry here, `:session_open`, reading the *first*
+# print of the listed session rather than the last -- a different window,
+# not a different bound on this one. An expiry before 09:30 ET is precisely
+# the contract that would ask for it, which is why `:session_close` names
+# that case (`:pre_open_expiry`) instead of guessing at a price. The day
+# that rule exists, which of the two applies is a contract fact
+# (`contract_spec(u).settlement`) rather than the caller's symbol, and
+# routing it is its own decision to take then.
 const _SETTLEMENT_RULES = Dict{Symbol,Function}(:session_close => _session_close)
 
 """
@@ -73,22 +140,46 @@ const _SETTLEMENT_RULES = Dict{Symbol,Function}(:session_close => _session_close
 
 The reference price `contract` settles at under `rule`, read through
 `cut`. Reads only; writes nothing. Throws [`UnpriceableLeg`](@ref)
-(`:unexpected_gap`, `:no_session`) when no honest reference price
-exists. Errors, naming the known rules, for an unknown `rule`.
+(`:no_session_close`, `:pre_open_expiry`, `:unexpected_gap`,
+`:no_session`) when no honest reference price exists. Errors, naming the
+known rules, for an unknown `rule`.
 
-`:session_close`: the last regular-session print of the settlement
-session stands in for the official close. From the contract's listed
-expiry date in ET, walk back at most `$(_SESSION_WALK_DAYS)` calendar
-days; the first date whose underlying printed between 09:30 and 16:00 ET
-is the settlement session and the last of those prints is the price. A
-printless date the exchange calendar calls open is `:unexpected_gap`, a
-data gap and not a closure; exhausting the walk is `:no_session`. Early
-closes need no table: on a 13:00 ET close the last print in the window
-is the 13:00 one.
+`:session_close`: PM settlement. The last regular-session print of the
+settlement session stands in for the official close. From the contract's
+listed expiry date in ET, walk back at most `$(_SESSION_WALK_DAYS)`
+calendar days; the first date whose underlying printed in the window is
+the settlement session and the last of those prints is the price. The
+window runs from 09:30 ET to **the earlier of 16:00 ET and the
+contract's own expiry instant**, so an intraday expiry never settles at
+a print from after it expired. A printless date the exchange calendar
+calls open is `:unexpected_gap`, a data gap and not a closure;
+exhausting the walk is `:no_session`. Early closes need no table: on a
+13:00 ET close the last print in the window is the 13:00 one.
 
-Every instant queried is at or before the contract's expiry, which is at
-or before `t`, and every read goes through the tick's cut, so
-no-lookahead is structural here as everywhere else.
+**Domain.** `cut` must reach the contract's expiry; a cut before it is
+`:no_session_close`. The question this answers is what the contract
+settled at, and a cut that cannot see the settlement session's close
+cannot answer it -- it would return a provisional intraday print, or
+read a truncated window and walk back past a session that had not
+finished printing. Design rule 7 gives that a name rather than a
+plausible-looking number. The engine can never reach it: lifecycle
+builds the cut at a tick at or after the expiry. It exists for a direct
+caller driving the lifecycle step from its own loop.
+
+The other edge is the contract, not the cut: an expiry earlier than
+09:30 ET on a listed date the calendar calls open is
+`:pre_open_expiry`. Such a contract settles against that session's
+opening print -- the AM-settled case, which no rule here serves yet --
+and this rule's window for it is empty however complete the data is, so
+design rule 7 names the contract rather than reporting a data gap. An
+expiry at exactly 09:30 ET is a one-instant window and settles at the
+opening print if one exists. When the listed date is *not* a session the
+question does not arise: the walk back proceeds as it does for any
+closed date, and the settlement session is the previous one.
+
+Within the domain every instant queried is at or before the contract's
+expiry, which is at or before the cut, and every read goes through the
+cut, so no-lookahead is structural here as everywhere else.
 """
 function settlement_price(rule::Symbol, cut::TimeCut, contract::ContractKey, t::DateTime)::Float64
     f = get(_SETTLEMENT_RULES, rule) do
@@ -114,12 +205,18 @@ A lot is examined exactly once, ever: the interval, not an
 `expiry <= t` threshold. An unsettleable lot stays open by design and
 its answer is fixed by the contract's expiry rather than by `t`, so a
 threshold would re-derive the same failure at every later tick. The
-interval is open below, so a contract expiring exactly at `prev` is
+interval misses nothing only because the engine refuses to fill a leg at
+or after its contract's expiry (`fill_legs`, `:expired_contract`): every
+lot is therefore in the book strictly before its own expiry, and so
+inside the interval that examines it. The ledger alone does not give
+that -- it accepts a fill effective at the expiry instant -- so the
+guarantee is the engine's, not the ledger's.
+
+The interval is open below, so a contract expiring exactly at `prev` is
 never examined; the engine passes the window start at the first tick,
-which is safe today because nothing is open before it and a fill after
-expiry is refused. Seeding a ledger with open lots -- resuming a run, or
-a live loop against an existing book -- is what would make that bound
-matter.
+which is safe today because nothing is open before it. Seeding a ledger
+with open lots -- resuming a run, or a live loop against an existing
+book -- is what would make that bound matter.
 
 This is the one place the named failure is caught, and the one place it
 is reported: a `@warn` per unsettled lot, carrying the contract, its

@@ -1,5 +1,6 @@
-# Known-red regression specifications for the confirmed PR #9 review findings.
-# This file is intentionally excluded from the main test gate.
+# Regression specifications for the confirmed PR #9 review findings. Each was
+# red when it was written and all of them pass now; the file runs inside the
+# main test gate (`test/runtests.jl`) so they stay that way.
 
 using VolSurfaceAnalysis
 using Test
