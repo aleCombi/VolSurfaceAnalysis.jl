@@ -309,6 +309,26 @@ intended direction, but not currently in flight.
   official close, what kind or provider shape they take, and what that
   costs in identity, is the design note. Not investigated. Parked
   2026-09-13 from the PR #13 review finding.
+- **Named columns in the parquet writes.** Every write site in
+  `src/persistence/store.jl` is `INSERT INTO _writebuf VALUES (...)`,
+  positional, and `events.parquet` is one wide union table, so each event
+  type pads the columns it lacks with positional `"NULL"` strings. A
+  miscount writes a value into the wrong column and nothing in the type
+  system catches it; what defends it today is `load_run` rebuilding
+  through one `commit!` and re-running `check_join`, which turns a
+  misalignment into a load-time failure rather than a plausible wrong
+  number. Naming the columns removes the padding entirely -- DuckDB nulls
+  what an insert does not name -- and the class of bug with it. The file
+  written is byte-identical, so there is no schema version change and no
+  migration. *Considered and rejected:* a table per event type plus a
+  spine by id. Cleaner modelling, but `save_run` has no transaction
+  across files, so a crash between writes would leave fills without their
+  matches and `load_run` would rebuild a wrong ledger rather than fail to
+  find one; and every read of the journal becomes a four-way `UNION ALL`
+  re-sorted by sequence, in `load_run` and in cross-run SQL alike. The
+  sparse columns themselves cost almost nothing -- parquet stores NULLs
+  cheaply. Parked 2026-09-13 from the PR #13 code read; the natural home
+  is whichever slice is already inside `store.jl`.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail
