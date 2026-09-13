@@ -123,7 +123,68 @@ failed.** What the review deferred is in the backlog below.
 
 ## In flight
 
-Nothing.
+- **Ledger rebuild (proposal).** The fill-vector ledger splits the
+  lifecycle over three layers (engine fills, `pnl_series` matches,
+  `run_experiment` settles) with no shared record, plus a FIFO
+  float-residue defect, per-share units labelled USD, and per-leg
+  sampling that inflates the annualised ratios. The plan is an event
+  journal booked inside the run: `Order` with intent out of `decide`, a
+  `Book` view in, `Fill` / `Match` / `Expiry` / `Fee` events with a
+  bitemporal header, an order journal outside the ledger holding the
+  quotes decisions saw, contract facts / simulated venue / named
+  simplifications as three identity-bearing config values, ratios on a
+  daily equity curve. Revised after four reviews; see
+  [docs/proposals/ledger.md](proposals/ledger.md), whose section 3
+  decisions are being settled slice by slice. **Slice 1 landed
+  2026-09-11**: the pure
+  `ledger` module ([docs/modules/ledger.md](modules/ledger.md)) -- the
+  order and event vocabulary, the contract table, the cash rules, the
+  validated write path, the book with both replays, `round_trips`, and
+  the `pnl_series(::Ledger)` adapter so today's metrics read a ledger
+  unchanged -- with its tests on hand-built ledgers. The engine still
+  runs on `positions` until slice 2. Gate after slice 1: 1626
+  passed, 0 failed. **Review 2026-09-12**
+  ([ledger-slice1-review.md](proposals/ledger-slice1-review.md)): not
+  mergeable. The write path accepts batches the invariants forbid (a
+  caller-supplied spec at `commit!` that the replays ignore, consumption
+  effective before its open, a partial or early expiry, a non-FIFO
+  match) and there is no structure-level atomic writer; the driver's
+  review added that book equality is exact float while the two replays
+  add in different orders. Every finding is pinned as a failing testset
+  in `test/ledger/test_review_findings.jl`, so the gate went red on
+  purpose: 1630 passed, 15 failed, 1 errored, all in that file. **Fix
+  round landed 2026-09-12**
+  ([ledger-slice1-fix.md](proposals/ledger-slice1-fix.md)): `commit!`
+  resolves contract facts from the table itself, with no caller-supplied
+  spec; every reference must point backward in effective time and the
+  effective replay folds equal instants in sequence order; FIFO is
+  checked on append; an expiry settles the whole remaining lot at or
+  after the contract's expiry; cash is whole USD cents everywhere inside
+  the ledger, with `contract_cents` as the one rounding point
+  (`NonIntegralCash` refuses a price that is not whole cents per
+  contract) and fee shares by cumulative rounding, so book equality and
+  the trips-to-cash reconciliation are exact. Gate after the fix round:
+  1673 passed, 0 failed, 1 broken. **Hardening round landed 2026-09-12**
+  ([ledger-slice1-hardening.md](proposals/ledger-slice1-hardening.md);
+  the inventory is
+  [ledger-slice1-coverage.md](proposals/ledger-slice1-coverage.md)):
+  every invariant and named failure the module documents is mapped to
+  its enforcing code and its test; `test_review_findings.jl` is
+  dissolved into the suites beside the behaviour they check; documented
+  promises the code did not enforce now are (an expiry's outcome agrees
+  with its intrinsic value; recorded time is at or after effective time
+  and nondecreasing along sequence, `RecordedOutOfOrder`; prices are
+  finite, `InvalidPrice`; an unminted id at `event` and a non-positive
+  join id are `DanglingReference`). The rule additions are listed in the
+  coverage document for veto. Codex's review of the round
+  ([ledger-slice1-hardening-review.md](proposals/ledger-slice1-hardening-review.md))
+  found the fill review's construction-time post-expiry check missing:
+  `FillAfterExpiry` is now thrown by the `Fill` constructor too, and
+  every rejection in every failure testset checks the ledger snapshot
+  and the book. **Gate: 2306 passed, 0 failed,
+  1 broken.** The one Broken is the structure-atomicity testset,
+  known-broken until slice 2's `record_order!` lands (it then records an
+  unexpected pass, the signal to flip it to `@test`). Next: slice 2.
 
 ## Backlog
 
