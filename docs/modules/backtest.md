@@ -130,20 +130,33 @@ An unknown rule or model errors naming the known ones.
 A `ContractKey`'s `expiry` is an instant, and the ticker parser stamps
 the listed date at 16:00 ET; nothing constrains it to that. What settles
 a contract is the *session-close print*: the underlying's last
-regular-hours print of the settlement session. That is a stated
-departure from the facts -- the official closing auction is not in the
-data -- and it is the only one here; the payoff itself is real,
-intrinsic under exercise by exception.
+regular-hours print of the settlement session, which the rule reads as
+the last print of its reference window and which is the same thing only
+under the regular-session `SpotPrice` contract
+([`market_data`](market_data.md)). That is a stated departure from the
+facts -- the official closing auction is not in the data -- and it is
+the only one here; the payoff itself is real, intrinsic under exercise
+by exception.
 
 **Sessions come from the spot tree; the calendar only contradicts it.** A
 date is a session when the underlying printed in the reference window on
 it, and its close is the last of those prints. Nothing else is
-consulted, which is why the six early-close sessions of a ten-year SPY
-run settle correctly with no early-close table: the last print in the
-window is the 13:00 one. The exchange calendar answers one question
-only, and it is a *check*: a printless date the calendar calls open is a
-data gap, named and reported, never evidence that the exchange was
-closed (design rule 7). Ad-hoc closures the calendar may lag behind have
+consulted, so an early close needs no early-close table -- but what
+makes the answer right there is an *input contract*, not the bounds:
+`SpotPrice` providers serve regular-session prints only
+([`market_data`](market_data.md)), and under that contract the last
+print in the window of a 13:00 ET close is the 13:00 one. Break the
+contract and the rule breaks silently: a 15:59 extended-hours print on
+an early-close day is inside the 09:30-16:00 window and becomes the
+settlement price, and nothing here can tell it apart from a regular one
+-- a `SpotPrice` does not record which session it came from, and no
+narrower window helps, since 15:59 is regular-hours-shaped. The six
+early-close sessions of a ten-year SPY run settle at their 13:00 prints
+because the tree they read holds nothing after 13:00 on those dates,
+which is the contract holding, not the rule guaranteeing it. The
+exchange calendar answers one question only, and it is a *check*: a
+printless date the calendar calls open is a data gap, named and
+reported, never evidence that the exchange was closed (design rule 7). Ad-hoc closures the calendar may lag behind have
 a cited `const` seam beside it, empty today.
 
 **The reference window never runs past the expiry instant.** It opens at
@@ -323,7 +336,7 @@ before the order.
 | **Venue as two symbol tables and a tick, no type hierarchy** | Three plain values are what config and identity will carry in slice 4; `Fill.fill_rule` already stores the key. A hierarchy would name the same three things twice. |
 | **R5: fill prices on the tick, rounded away from the trader** | The ledger refuses cash that is not whole cents; synthesized and modelled quotes are not on the tick; exchanges only trade on it. Rounding against the trader keeps the rule as conservative as crossing the spread already is. The observation keeps the raw quote; the fill carries the tick price. |
 | **Observations recorded per leg, fills carry none** | Research records what pricing saw. This slice retains an observation row with optional quote sides for broker executions but ignores it during validation; truly observation-less live records arrive with the adapter. The join is validated, never assumed. |
-| **Sessions come from the spot tree; the calendar only contradicts it** | A date is a session when the underlying printed in regular hours, so an early close needs no table -- the last print in the window *is* the 13:00 one. A calendar as the source would have to carry every half-day and every ad-hoc closure correctly forever; as the check it only has to answer whether a printless date was closed, and design rule 7 makes a wrong answer loud. |
+| **Sessions come from the spot tree; the calendar only contradicts it** | A date is a session when the underlying printed in the reference window, so an early close needs no table: under the regular-session `SpotPrice` contract the last print in the window is the 13:00 one. A calendar as the source would have to carry every half-day and every ad-hoc closure correctly forever; as the check it only has to answer whether a printless date was closed, and design rule 7 makes a wrong answer loud. The cost is that the correctness of an early close is the data's to keep -- an extended-hours print inside the window would settle the contract instead, undetectably -- which is why the contract is written down where the kind is defined. |
 | **The settlement instant is always the contract's expiry** | When the reference price comes from an earlier session, the departure from reality is *which print stands in for the official close*, never *when the obligation ceased to exist*. The engine always passes the contract's expiry; the ledger's `_check_expiry` permits settlement at or after it, which is what makes an expiry booked at a later tick legal. The equality is this engine's choice, not the ledger's rule. |
 | **The lifecycle computes, the ledger records** | `settlements` is a function of the cut and the book, `fill_legs`' twin; the writer is the ledger's `record_expiry!`. The engine gains no expiry queue, no cached calendar and no `try`/`catch` in the loop -- `prev` is a loop variable, not state. |
 | **Settlement as a symbol through a table, no type hierarchy** | The same shape as `_FILL_RULES` and `_COST_MODELS`, and the same reason: the value config and identity will carry is a symbol, so a struct would name one thing twice. |
@@ -365,7 +378,7 @@ window end is marked; metrics and persistence.
 | An execution report carries a broker-assigned execution id, unique per report | FIX [ExecutionReport (35=8)](https://www.onixs.biz/fix-dictionary/4.4/msgtype_8_8.html), `ExecID` (tag 17) | one execution id per fill, minted by the writer here, reported by the broker live; a duplicate is refused |
 | Backend selection by symbol through a dispatch table with defaults | Optim.jl, MLJ.jl; this repo's `_METRIC_TABLE` | `_FILL_RULES`, `_COST_MODELS`, `_SETTLEMENT_RULES` |
 | An expiring in-the-money listed option is exercised without an instruction | OCC / The Options Industry Council, [Options exercise FAQ](https://www.optionseducation.org/referencelibrary/faq/options-exercise), checked 2026-09-13: "'Exercise by exception' is an administrative procedure used by OCC to expedite the exercise of expiring options by clearing members. In this procedure, OCC exercises options that are in-the-money by specified threshold amounts unless the clearing member submits instructions not to exercise" | an expiring lot settles at intrinsic against the settlement session's close, with no closing order; the OCC threshold itself is not modelled |
-| The exchange's closed days and its 13:00 ET early closes are calendar facts, not data | NYSE, [Holidays & Trading Hours](https://www.nyse.com/markets/hours-calendars), checked 2026-09-13: the annual holiday list, and "Each market will close early at 1:00 p.m. (1:15 p.m. for eligible options)" on the named half-days | the calendar is the *check* on a printless date, never the source of sessions; early closes need no table, since the session's last regular-hours print is the 13:00 one |
+| The exchange's closed days and its 13:00 ET early closes are calendar facts, not data | NYSE, [Holidays & Trading Hours](https://www.nyse.com/markets/hours-calendars), checked 2026-09-13: the annual holiday list, and "Each market will close early at 1:00 p.m. (1:15 p.m. for eligible options)" on the named half-days | the calendar is the *check* on a printless date, never the source of sessions; early closes need no table, since under the regular-session `SpotPrice` contract the session's last print in the window is the 13:00 one -- a provider serving extended-hours prints defeats that, which is the contract's reason for existing |
 | An expiring listed option stops trading at the 16:00 ET close, and settles against the underlying's 16:00 ET close | Cboe, [Equity Options Extended Trading Hours FAQ](https://www.cboe.com/document/tech-spec/content/technical-specifications/equity-options-extended-trading-hours-faq/regular-trading-hours-vs.-globalcurb-trading-hours/), checked 2026-09-13: "Expiring equity single stock options will trade until 4:00 p.m. ET as part of RTH and 4:15 p.m. ET in the Curb session on expiration day", and "OCC also bases in/out-of-the-money determination based on the 4:00 p.m. ET closing price of the underlying equity security" | `fill_legs` refuses a leg at or after its contract's expiry (`:expired_contract`), and the settlement price is the underlying's session-close print. **Stated departure:** the 16:15 ET Curb session is not modelled, so this venue stops fifteen minutes before the real one does; a contract's expiry is stamped at 16:00 ET (`parse_polygon_ticker`), which is the RTH close and the instant OCC prices against |
 | An exchange calendar as a library, not a hand-rolled table | [BusinessDays.jl](https://github.com/JuliaFinance/BusinessDays.jl) `USNYSE`, checked 2026-09-13 at v0.9.25: it carries the weekends, the ten annual holidays, both national days of mourning (2018-12-05, 2025-01-09) and the 2012 Hurricane Sandy closure | `isbday(USNYSE(), d)` is the whole calendar check; the ad-hoc `const` set beside it is **empty**, kept as the seam for a future closure the library will not have on the day |
 

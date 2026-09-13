@@ -12,12 +12,18 @@
 # the failure has the same name and the same three fields.
 #
 # Sessions come from the spot tree, not from the calendar. A date is a
-# session when the underlying printed in regular hours, and its close is
-# the last of those prints; that is what settles the six early-close
-# sessions (official close 13:00 ET) correctly with no early-close table.
-# The calendar only contradicts the tree: a printless weekday it calls
-# open is a named valuation failure (design rule 7), never evidence that
-# the exchange was closed.
+# session when the underlying printed in the reference window, and its
+# close is the last of those prints. That reads an early close (official
+# close 13:00 ET) with no early-close table, and it does so on the
+# strength of an input contract rather than of the bounds: `SpotPrice`
+# providers serve regular-session prints only (`market_data.md`), so the
+# window's last print is the session's. A provider that also serves
+# extended-hours prints breaks it -- a 15:59 print on a 13:00 ET close
+# sits inside the window and settles the contract -- and this rule cannot
+# detect that, because nothing in a `SpotPrice` says which session it came
+# from. The calendar only contradicts the tree: a printless weekday it
+# calls open is a named valuation failure (design rule 7), never evidence
+# that the exchange was closed.
 #
 # Two bounds keep the answer honest rather than merely permitted by the
 # cut. The reference window ends at the earlier of 16:00 ET and the
@@ -153,8 +159,16 @@ window runs from 09:30 ET to **the earlier of 16:00 ET and the
 contract's own expiry instant**, so an intraday expiry never settles at
 a print from after it expired. A printless date the exchange calendar
 calls open is `:unexpected_gap`, a data gap and not a closure;
-exhausting the walk is `:no_session`. Early closes need no table: on a
-13:00 ET close the last print in the window is the 13:00 one.
+exhausting the walk is `:no_session`.
+
+**Input contract.** Early closes need no table, but only because the
+data is required to be regular-session prints alone (the `SpotPrice`
+contract, stated in `market_data`): under it the last print in the
+window of a 13:00 ET close is the 13:00 one. A provider that also
+serves extended-hours prints breaks this rule silently -- a 15:59 print
+on an early-close day is inside the 09:30-16:00 window and becomes the
+settlement price -- and no bound here can catch it, since nothing in a
+`SpotPrice` records which session it came from.
 
 **Domain.** `cut` must reach the contract's expiry; a cut before it is
 `:no_session_close`. The question this answers is what the contract

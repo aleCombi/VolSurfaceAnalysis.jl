@@ -229,7 +229,10 @@ failed.** What the review deferred is in the backlog below.
   `:session_close` a date is a session when the underlying printed
   in a window running from 09:30 ET to the earlier of 16:00 ET and its
   own expiry, and its close is the last of those prints, which settles
-  the early closes with no early-close table;
+  the early closes with no early-close table *given* the regular-session
+  `SpotPrice` input contract (stated in `market_data.md` after the PR #13
+  review; an extended-hours print inside the window would settle an early
+  close instead, undetectably);
   BusinessDays.jl's `USNYSE` is consulted only to contradict the tree, so
   a printless date the calendar calls open is
   `UnpriceableLeg(:unexpected_gap)`, warned about once and left open
@@ -247,7 +250,7 @@ failed.** What the review deferred is in the backlog below.
   parked and this round deliberately does not land: the mark for a leg
   still open past the window end (the contract's own quote mark there,
   surface price as fallback) belongs to the equity curve, slice 5.
-  **Gate after slice 3 and both rounds of review fixes: 3362 passed, 0
+  **Gate after slice 3 and the review-fix rounds: 3364 passed, 0
   failed, 0 broken.** The ten-year strangle
   (`configs/strangle_spy_16d_1dte.local.toml`, 2016-03-28 to 2026-03-27,
   1-DTE SPY, one contract per leg) now closes
@@ -261,7 +264,12 @@ failed.** What the review deferred is in the backlog below.
   the final pair, whose 2026-03-30 expiry is *past* the window end and so
   is never examined: those two lots stay open, as decision 8 says they
   should. Two rounds of review closed eight findings; the shape they left is
-  the shape above, plus four boundaries worth keeping here. **The venue
+  the shape above, plus four boundaries worth keeping here. A third round, on
+  the PR #13 review, closed one finding with documentation and a test
+  rather than logic: the early close is right because the spot input is
+  regular-session only, so that requirement is now stated as the
+  `SpotPrice` contract and pinned by a test that feeds the rule a
+  violating extended-hours print. **The venue
   is stricter than the ledger about expiry**: `fill_legs` refuses a leg
   whose contract expires at or before the tick, because trading has
   stopped, and that refusal is what the interval's completeness rests
@@ -287,6 +295,20 @@ failed.** What the review deferred is in the backlog below.
 Backlog items are concrete parked work: visible enough to preserve the
 intended direction, but not currently in flight.
 
+- **Official closing prices instead of the session-close print.** The
+  `:session_close` rule reads the underlying's last regular-session print
+  of the settlement session, and that stand-in is the model's one stated
+  departure in settlement: the official closing auction is not in minute
+  bars, so the 16:00 (or 13:00) print takes its place. A source of
+  *official* closes would remove the departure outright, and with it the
+  early-close exposure the regular-session `SpotPrice` contract currently
+  covers by assumption -- an official close is stamped by its session
+  rather than inferred from a window, so an extended-hours print could
+  not be mistaken for one. Candidate source: Polygon's daily aggregates,
+  which `massive/polygon` may already deliver; whether they carry the
+  official close, what kind or provider shape they take, and what that
+  costs in identity, is the design note. Not investigated. Parked
+  2026-09-13 from the PR #13 review finding.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail
