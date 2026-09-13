@@ -30,7 +30,7 @@ pack everything (including the originating `Experiment`) into one
 `with_data`; the `Experiment` itself holds specs only. Open lots at the
 window end stay open and contribute nothing until the equity curve of
 slice 5 marks them; nothing is force-settled, and expiries inside the
-window are booked by the lifecycle of slice 3.
+window are booked by the engine's lifecycle step.
 
 ## The abstraction
 
@@ -104,7 +104,7 @@ the current tick is blocked.
 | **`run_experiment`, not `run`** | `Base.run` is exported and dispatches on `Cmd`; shadowing it for a domain verb is exactly the convention warning every Julia style guide gives. `run_experiment` also reads as a peer of `run_backtest`. |
 | **Result carries the full `Experiment`, not just `name`** | Rerun is the primary use case for provenance. `run_experiment(result.experiment)` is the obvious primitive; a bare `name` would force a sidecar registry to look up the rest. The cost is one cheap struct reference. |
 | **The result carries the ledger, not a fill vector** | The ledger is the run: events with declared intent and recorded lineage, plus what every decision saw. The series and the metrics are derived from it and can be recomputed; nothing in the result is a second copy that could disagree with it. |
-| **Open lots at the window end stay open** | Proposal decision 8: nothing is force-settled at `exp.to`. A lot still open contributes nothing to the realized series until the equity curve marks it at the evaluation endpoint (slice 5); expiries inside the window are lifecycle events (slice 3). The window-end spot lookup and its error are gone with the settle closure. |
+| **Open lots at the window end stay open** | Proposal decision 8: nothing is force-settled at `exp.to`. A lot still open contributes nothing to the realized series until the equity curve marks it at the evaluation endpoint (slice 5); expiries inside the window are lifecycle events, booked in the tick loop. The window-end spot lookup and its error are gone with the settle closure. |
 | **The venue's values are the engine's defaults, not keywords here** | `fill_rule`, `cost_model` and `tick_cents` change results, so they must be in the run id before they are configurable; `run_experiment` takes none until slice 4 makes them `Experiment` fields. |
 | **The clock underlying and a declared policy underlying must agree** | One experiment, one underlying is the real invariant here, and `load_experiment` asserts it rather than assuming it: it errors when `declared_underlyings(agent)` is non-empty and does not contain the clock selector. A clock is a tick grid; its selector answers *when* to step, not *whose price*: fills resolve per leg against the leg's own underlying. A policy that chooses its underlying per tick declares nothing and is not checked at load. |
 | **Specs in, readers scoped to the run** | `Experiment.data` holds pure spec values (hashable, persistable); `run_experiment` opens them with `with_data` and closes them on every exit path. Rehydrating a saved run needs no data on disk until it is actually run. |

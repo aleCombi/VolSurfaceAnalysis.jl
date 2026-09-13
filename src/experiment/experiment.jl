@@ -120,7 +120,7 @@ and return the result.
 Open lots at the window end stay open and contribute nothing to the
 series until the equity curve of slice 5 marks them; nothing is
 force-settled, and expiries inside the window are booked by the
-lifecycle of slice 3. Errors loudly if there is no clock tick in the
+engine's lifecycle step. Errors loudly if there is no clock tick in the
 window, if the clock's selector is not an `Underlying` (an experiment
 ticks on an underlying's grid), or if any requested metric symbol is
 unknown.

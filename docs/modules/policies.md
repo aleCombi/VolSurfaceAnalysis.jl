@@ -96,7 +96,7 @@ a base case in property tests.
 |---|---|
 | **Policy returns orders, not a portfolio** | A policy's natural output is "orders to fire," not "the portfolio I want after this tick." Orders keep the policy small (no need to redeclare unchanged positions), make the no-op case trivially `Order[]`, and let the ledger own the open-vs-close bookkeeping in one place. |
 | **Intent is declared; a close names its group** | A counter-trade left the engine to guess intent from direction, and guessed wrong at a side flip. A `Close` leg naming a group is what a broker ticket says (position effect O/C), matches only within that group, and is refused when there is nothing to close, so a policy's mistake is a named failure at fill time rather than a silent new lot. |
-| **The book, not the fill log, is what a policy sees** | The book is the view by replay a live loop hands a policy too: open lots per group and contract, plus cash. A policy that wants "what do I hold" reads it directly instead of netting a fill vector; it never sees expired legs as live once lifecycle is booked (slice 3). |
+| **The book, not the fill log, is what a policy sees** | The book is the view by replay a live loop hands a policy too: open lots per group and contract, plus cash. A policy that wants "what do I hold" reads it directly instead of netting a fill vector; it never sees expired legs as live, because lifecycle is booked before the decision. |
 | **Stateless `decide`** | The policy struct holds only configuration. Any "state" the recurrence might want (rolling windows, last-action time, fitted predictions) is either derivable from `(t, data, book)` plus config, or it belongs to an [`Agent`](agents.md) that hands out a fresh Policy when state advances. Stateless `decide` is easier to test (no setup), easier to replay deterministically, and avoids confusion about whether to mutate or rebuild between ticks. |
 | **No-lookahead is a type, not a convention** | `decide` accepts a [`TimeCut`](market_data.md), not the bare map. Every shape is empty strictly after `t`, and reads a derived provider makes on the policy's behalf go through the same cut. The legacy codebase enforced the same property via `HistoricalView` passed at runtime; the rebuild moves it into the function signature and into the data layer. |
 | **`t` is an explicit argument** | Even though `data` is cut at `t`, schedule-driven policies that want to ask "is this my entry time?" shouldn't have to dig through `timestamps(data, ...)` for it. Making `t` explicit also gives the engine a trivially-cheap crosscheck against the cutoff. |
@@ -120,7 +120,7 @@ a base case in property tests.
   chains/surfaces to *decide*).
 - Lot lifecycle. A close is a `Close` leg emitted by the policy and
   booked like any other order; there is no `close!` primitive, and
-  expiries are booked by the engine's lifecycle step (slice 3).
+  expiries are booked by the engine's lifecycle step.
 - Reporting / PnL aggregation. Policies return orders, not P&L.
   Computing performance is downstream.
 
@@ -170,8 +170,8 @@ end
 The two legs go out as one `Order`, so the venue fills them whole or
 not at all and the ledger samples them as one structure. `quantity` is
 an integer number of contracts (the config loader accepts `1` and
-`1.0`, refuses `1.5`); the policy only opens, and lifecycle closes its
-lots (slice 3).
+`1.0`, refuses `1.5`); the policy only opens, and lifecycle settles its
+lots.
 
 Three properties worth noting:
 

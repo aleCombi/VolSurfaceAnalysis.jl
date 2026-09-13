@@ -154,8 +154,8 @@ entry point.
 
 - Ledger construction, lot pairing, cash rules and round trips. That is
   the [`ledger`](ledger.md), fed by the [backtest engine](backtest.md).
-- Settlement and marks. Lifecycle is slice 3; the equity curve from
-  marks is slice 5.
+- Settlement and marks. Lifecycle belongs to the backtest engine; the
+  equity curve from marks is slice 5.
 - Persistence, plotting, reporting. Downstream layers.
 
 ## Failure modes

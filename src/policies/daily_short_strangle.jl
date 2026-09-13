@@ -144,8 +144,8 @@ One `Order(:daily_short_strangle, [short put, short call])` with `Open`
 legs of `p.quantity` contracts each at the entry tick, or `Order[]` when
 the gate does not fire, no surface or chain is visible, no expiry lies
 on or after `t + expiry_interval`, or either wing cannot be placed. The
-book is read for nothing: this policy only opens, and lifecycle closes
-its lots (slice 3).
+book is read for nothing: this policy only opens, and lifecycle settles
+its lots.
 """
 function decide(p::DailyShortStrangle, t::DateTime,
                 data::TimeCut,
