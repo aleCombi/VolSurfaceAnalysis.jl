@@ -1,9 +1,11 @@
 # Ledger rebuild -- proposal
 
-Status: proposal, 2026-09-11, revised after four reviews (the diagnosis
-checked against the code; the event list, the fill's contents, and the
-cash, return and time-boundary rules reviewed separately). Nothing is
-implemented. The plan replaces the fill-vector ledger with an event
+Status: 2026-09-13. Sections 2 and 3 stay binding. The ledger module is
+open as PR #11 -- the event journal, both replays, round trips, the
+order journal and the ledger-owned book; the engine that uses it follows
+as the wiring PR. Section 4's slice list is the original plan and is
+superseded, where the two disagree, by the pull-request plan in
+[ledger-orchestration.md](ledger-orchestration.md). The plan replaces the fill-vector ledger with an event
 journal booked inside the run, shaped so the live-trading loop of
 [vision.md](../vision.md) hands the same book to a policy.
 
@@ -120,7 +122,11 @@ Observations sit outside the journal of economic facts, whether they
 come before a fill or after it. The order journal records, per order,
 its legs and, per leg, the quote and spot the engine resolved it
 against and the fill rule applied. A fill references its order leg by
-id. A broker execution report carries no quote, so this is the only
+id. A broker execution report carries no quote. The research loop still
+keeps one observation per order leg under every fill rule, with the
+quote sides `missing` where the rule does not consult them; a record
+with no observation at all is the live adapter's shape and is deferred
+with it. So this is the only
 shape that is complete for both loops without a sentinel or a
 fabricated record: a live fill has an order record with no observation
 row and a `BrokerExecution` fill rule.
@@ -284,19 +290,23 @@ settlement item already budgeted.
 
 Each lands green with its module doc.
 
-1. `ledger` module: order and event types, `Book`, both replays,
-   `round_trips`, the cash rules with the contract spec as a ledger
-   parameter, and a `pnl_series(ledger)` adapter so metrics stay green
-   until slice 5. Pure; tests on hand-built ledgers with hand-computed
+1. `ledger` module: order and event types, the ledger-owned `Book`,
+   both replays, `round_trips`, the order journal (`OrderRecord`,
+   `LegObservation`, `record_order!`), the cash rules with the contract
+   spec as a ledger parameter, and a `pnl_series(ledger)` adapter so
+   metrics stay green until slice 5. Pure; tests on hand-built ledgers with hand-computed
    answers: a full round trip, a close split across lots, two groups on
    one contract, mixed expiries in one group, fees across a partial
    close, a lot left open at the window end; incremental book equals
    full replay in every case. Lands beside `positions`, which stays
    until the engine switches.
-2. Engine: `Order` in, `Book` out, `Match` and `Fee` booked; the
-   order journal written and its join invariants tested;
-   `DailyShortStrangle` emits one order per day; `positions` retired
-   and the `pnl_series(ledger)` adapter takes over.
+2. Engine wiring: the simulated venue (price rule and cost model as
+   symbol tables), `fill_legs`, and the join check the loop runs at
+   every append; `Order` in, `Book` out, `Match` and `Fee` booked
+   through `record_order!`; `DailyShortStrangle` emits one order per
+   day; `positions` retired, the `pnl_series(ledger)` adapter takes
+   over, and persistence moves to schema 3 with `events`, `orders` and
+   `order_legs`, validated on write and on load.
 3. Lifecycle: `LifecycleModel` with the session calendar, `Expiry` in
    the tick loop, window-end lifecycle at the evaluation endpoint. Then
    one auditable strangle run before anything widens.
@@ -305,10 +315,11 @@ Each lands green with its module doc.
    bump.
 5. Metrics: structure-level series; equity curve from chain-mid marks;
    ratios move onto it.
-6. Persistence: `events`, `orders` (orders, legs, observations),
-   `round_trips`, `marks`, `equity`, `failures` tables, and a
-   completeness flag in the manifest; `load_run` rebuilds the ledger
-   and validates the fill-to-order join; `compare_runs.jl` follows.
+6. Persistence: the derived tables -- `round_trips`, `marks`,
+   `equity`, `failures` -- and a completeness flag in the manifest;
+   `compare_runs.jl` follows. The `events`, `orders` and `order_legs`
+   tables, and the join validated on write and on load, came forward to
+   the engine wiring.
 7. Docs per slice; this proposal deleted once landed.
 
 ## 5. Conventions consulted
