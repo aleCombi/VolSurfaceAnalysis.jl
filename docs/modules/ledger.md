@@ -1,15 +1,14 @@
 # `ledger` module: the journal of economic facts
 
 Defines *what happened* to a portfolio: an append-only journal of typed
-events, the book that is replayed from it, and the round trips derived
-from it. The engine is the journal's only writer (it switches over in
-slice 2 of the [ledger proposal](../proposals/ledger.md)); policies
-read the book; metrics read the derived tables. The module knows only
-the identity vocabulary of [`data`](data.md) (`Underlying`,
-`OptionType`) and the contract facts it defines itself -- no quotes,
-spots or time cut -- so a ledger is built, checked and replayed from
-its own events alone. It lands beside `positions`, which the engine
-keeps using until it switches.
+events, the order journal recording what each decision saw, the book
+that is replayed from the events, and the round trips derived from
+them. The engine is the journal's only writer; policies read the book;
+metrics read the derived tables. The module knows only the identity
+vocabulary of [`data`](data.md) (`Underlying`, `OptionType`) and the
+contract facts it defines itself -- no quotes, spots or time cut -- so a
+ledger is built, checked and replayed from its own events alone. The
+order journal holds plain numbers and timestamps for the same reason.
 
 ## The kinds it defines
 
@@ -28,6 +27,19 @@ keeps using until it switches.
   fact is true), recorded time (when the ledger learned it) and
   sequence (replay order). A group sits on `Fill`, `Match` and `Expiry`;
   a `Fee` has none.
+- `OrderRecord`, `LegObservation` -- the order journal, one record per
+  order recorded beside the events it produced: the order as the policy
+  emitted it, the group minted or named for it, its order id and the id
+  of its first leg (leg `k` has id `first_leg_id + k - 1`, so a fill
+  joins its leg by one integer), the tick it was decided at, `known_to`
+  (the ledger sequence the decision could see, so
+  `book_as_known(L, known_to)` is the book the policy was handed), and
+  one observation per leg: the quote's bid, ask and timestamp and the
+  spot's price and timestamp the engine resolved. The journal is outside
+  the journal of economic facts in substance: replays and cash fold the
+  events only. This slice retains one `LegObservation` per leg under
+  `:broker_execution`, though its quote sides may be `missing` and the
+  observation is not consulted; absent observations wait for the live adapter.
 - `Ledger` -- the container; `Book` and `Lot` -- the view by replay;
   `RoundTrip` -- one consumed lot.
 - `ContractSpec` -- per-underlying facts: multiplier, exercise style,
@@ -92,7 +104,14 @@ first tick is already true at Friday's settlement.
 
 Every write goes through one validated path. A batch is checked whole
 against the ledger and the book; nothing is appended if any check
-fails, and each failure has a name:
+fails, and each failure has a name. `record_order!`, the structure-level
+writer the engine calls, plans every leg of an order against the book
+as it will be after the earlier legs (so a leg may close a lot the same
+order opened), validates all, constructs the order record and its
+observation vector, commits once, and only then pushes the record and
+advances its counters: **a structure lands whole or not at
+all, and the group is minted inside the transaction**, so a failed order
+consumes no group, no id and no sequence. The checks:
 
 - sequence and id continue the ledger's counters -- `SequenceGap`;
 - every event is recorded at or after its effective time: a fact is not
@@ -104,6 +123,12 @@ fails, and each failure has a name:
 - a fill is effective at or before its contract's expiry --
   `FillAfterExpiry`, thrown at construction so no such value exists and
   checked again on append;
+- an execution id is held by at most one fill, in the ledger or within
+  a batch -- `DuplicateExecution`; the execution counter still moves to
+  one past the largest id seen;
+- an order names a group the ledger has minted, or none --
+  `DanglingReference` (`:group`); an order with no legs or a per-leg
+  vector of the wrong length is a malformed call, `ArgumentError`;
 - every reference points backward to an event of the right kind --
   `DanglingReference`;
 - every reference points backward in effective time: a match's opening
@@ -141,18 +166,22 @@ and tests is
 ## Responsibility boundaries
 
 **Owns:** the order and event vocabulary, the contract table, the cash
-rules, the validated write path, the book and its replays, round trips,
-and the `pnl_series(ledger)` adapter in `metrics` that lets today's
-metrics read a ledger unchanged (`unit = :structure` samples per group
-and closing instant, `unit = :leg` per round trip). Metrics depend on
-the ledger, never the reverse.
+rules, the validated write path including the structure-level
+`record_order!`, the order journal's records and the ids that join a
+fill to its leg, the book and its replays, round trips, and the
+`pnl_series(ledger)` adapter in `metrics` that lets today's metrics
+read a ledger unchanged (`unit = :structure` samples per group and
+closing instant, `unit = :leg` per round trip). Metrics depend on the
+ledger, never the reverse.
 
-**Does not own:** deciding what to trade (policies); resolving quotes,
-turning them into prices, and the order journal that records what a
-decision saw (the engine and its execution model); when and at what
-price a lot settles (the lifecycle model); marks, the equity curve and
-valuation failures (outside the journal); persistence. Those arrive in
-the later slices of the proposal.
+**Does not own:** deciding what to trade (policies); resolving the
+quote and the spot a leg is priced against and turning them into a
+price and a fee (the engine and its venue: the ledger records what a
+decision saw, the engine resolves it); checking that a research fill's
+price is the rule applied to its observation (`check_join`, in the
+engine, since the rule lives there); when and at what price a lot
+settles (the lifecycle model, slice 3); marks, the equity curve and
+valuation failures (outside the journal); persistence.
 
 ## Key decisions
 
@@ -169,6 +198,8 @@ the later slices of the proposal.
 | **Validation of the whole batch at the write, FIFO included** | A structure is either booked whole or not at all; a leg that fails validation is an error before anything is written; a hand-built or loaded batch cannot encode a different lot-matching rule than the one stated here. |
 | **`ContractKey` hashes by content** | The book keys lots on `(group, contract)`; the default `objectid` hash is build-dependent, as `Underlying` documents. |
 | **The adapter keeps `PnLSeries` unchanged** | Metrics stay green while the engine switches; `window_end_spot` and `n_unmarked` are placeholders that leave with the slice-5 metrics. |
+| **The order journal lives inside the `Ledger` container, as plain values** | One object carries a run's facts and what each decision saw, so nothing is kept in sync between two containers; the records hold numbers and timestamps, never the data module's types. Replays fold `events` only. This slice uses placeholder observations with optional quote sides for broker executions; observation-less live records are deferred. |
+| **A structure is one transaction; the group is minted inside it** | Every leg is planned and validated and the record is constructed before one `commit!`; afterward only one vector grows and counters advance. A validation failure leaves the ledger, its counters, its orders and the book exactly as they were. |
 
 ## Conventions consulted
 

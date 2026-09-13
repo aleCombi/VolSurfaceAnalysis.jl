@@ -115,10 +115,41 @@ const _LG_CASES = [
     "open at window end"          => _lg_case_open_at_end,
 ]
 
+# An observation whose bid and ask both equal the fill price, so
+# the engine's join check passes on a hand-built ledger whatever the leg's side.
+_lg_seen(price; at=_LG_T_OPEN) = LegObservation(at, price, price, 480.0, at)
+
+# Case 7 (slice 2). A short strangle booked as one order: short 1 put 470
+# at 0.85 and short 1 call 490 at 1.10, a 65-cent commission on each leg.
+#   events Fill, Fill, Fee, Fee; cash = 8500 + 11000 - 130 = 19370; group 1.
+function _lg_case_strangle_order()
+    L, book = Ledger(), Book()
+    order = Order(:strangle, [Leg(_LG_PUT470, Short, 1, Open), Leg(_LG_CALL490, Short, 1, Open)])
+    record_order!(L, book, order; prices=[0.85, 1.10], fees=[-65, -65],
+                  observations=[_lg_seen(0.85), _lg_seen(1.10)],
+                  effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN, fill_rule=:cross_spread)
+    return (L, book)
+end
+
+# Case 8 (slice 2). Case 7 closed by one order naming group 1: buy the put
+# back at 0.40 and the call at 0.60, 65 cents on each leg.
+#   events Fill, Match, Fill, Match, Fee, Fee; cash = 19370 - 4000 - 6000 - 130 = 9240;
+#   trips (8500 - 4000) - 65 - 65 = 4370 and (11000 - 6000) - 65 - 65 = 4870; book empty.
+function _lg_case_strangle_closed()
+    L, book = _lg_case_strangle_order()
+    order = Order(:close, [Leg(_LG_PUT470, Long, 1, Close), Leg(_LG_CALL490, Long, 1, Close)]; group=1)
+    record_order!(L, book, order; prices=[0.40, 0.60], fees=[-65, -65],
+                  observations=[_lg_seen(0.40; at=_LG_T_CLOSE), _lg_seen(0.60; at=_LG_T_CLOSE)],
+                  effective_at=_LG_T_CLOSE, recorded_at=_LG_T_CLOSE, fill_rule=:cross_spread)
+    return (L, book)
+end
+
 # The k-th header (from 0) of a hand-built batch, minted the way the
-# writers mint theirs; and the ledger state a failed batch must leave.
+# writers mint theirs; and the ledger state a failed batch must leave:
+# the event count, the six counters and the order count.
 _lg_hdr(L, k, t=_LG_T_CLOSE) = EventHeader(L.next_id + k, t, t, L.next_sequence + k)
-_lg_snapshot(L) = (length(L), L.next_id, L.next_sequence, L.next_group, L.next_execution)
+_lg_snapshot(L) = (length(L), L.next_id, L.next_sequence, L.next_group, L.next_execution,
+                   L.next_order_id, L.next_leg_id, length(L.orders))
 
 # The structural promises of a book, checked after any fold: a lot with
 # nothing remaining is gone (and so is an emptied key), every lot sits

@@ -134,7 +134,7 @@ end
     L, book = Ledger(), Book()
     g = mint_group!(L)
     @test_throws FillAfterExpiry _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.85, g; at=_LG_EXPIRY_A + Second(1))
-    @test _lg_snapshot(L) == (0, 1, 1, 2, 1)
+    @test _lg_snapshot(L) == (0, 1, 1, 2, 1, 1, 1, 0)
     @test book == Book()
     _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.85, g; at=_LG_EXPIRY_A)     # at the instant is allowed
     @test length(L) == 1
@@ -297,11 +297,44 @@ end
     @test isempty(open_lots(book))
     @test L.next_execution == 3
     commit!(L, book, LedgerEvent[])
-    @test _lg_snapshot(L) == (3, 4, 4, 2, 3)
-    # a hand-built fill with a stale execution id does not move the counter backwards
+    @test _lg_snapshot(L) == (3, 4, 4, 2, 3, 1, 1, 0)
+    # a hand-built fill whose execution id is already held is refused: an
+    # execution report is one fact (it used to land and leave the counter alone)
+    snap, before = _lg_snapshot(L), deepcopy(book)
     late = Fill(_lg_hdr(L, 0, _LG_T_CLOSE), g, 3, 1, _LG_PUT470, Short, Open, 1, 0.85, :cross_spread)
-    commit!(L, book, LedgerEvent[late])
+    @test_throws DuplicateExecution commit!(L, book, LedgerEvent[late])
+    @test _lg_snapshot(L) == snap
+    @test book == before
     @test L.next_execution == 3
+end
+
+@testset "append: DuplicateExecution" begin
+    L, book = _lg_case_round_trip()              # fills with execution ids 1 and 2; next is 3
+    snap, before = _lg_snapshot(L), deepcopy(book)
+    # an id held by a fill in the ledger
+    held = Fill(_lg_hdr(L, 0, _LG_T_CLOSE), 1, 3, 2, _LG_PUT470, Short, Open, 1, 0.85, :cross_spread)
+    @test_throws DuplicateExecution commit!(L, book, LedgerEvent[held])
+    @test_throws DuplicateExecution commit!(L, book, LedgerEvent[
+        Fill(_lg_hdr(L, 0, _LG_T_CLOSE), 1, 3, 1, _LG_PUT470, Short, Open, 1, 0.85, :cross_spread)])
+    # two fills sharing an execution id inside one batch are refused whole
+    a = Fill(_lg_hdr(L, 0, _LG_T_CLOSE), 1, 3, 7, _LG_PUT470,  Short, Open, 1, 0.85, :cross_spread)
+    b = Fill(_lg_hdr(L, 1, _LG_T_CLOSE), 1, 4, 7, _LG_CALL490, Short, Open, 1, 1.10, :cross_spread)
+    @test_throws DuplicateExecution commit!(L, book, LedgerEvent[a, b])
+    @test _lg_snapshot(L) == snap
+    @test book == before
+    @test book.cash == 4500
+    err = try commit!(L, book, LedgerEvent[a, b]); nothing catch e; e end
+    @test err isa DuplicateExecution && err.id == 7
+    @test occursin("DuplicateExecution", sprint(showerror, err))
+    @test _lg_snapshot(L) == snap && book == before
+    # an id above the counter lands and moves it one past
+    commit!(L, book, LedgerEvent[a])
+    @test L.next_execution == 8
+    @test length(L) == 4
+    # and the writer's own ids continue from there
+    _lg_fill!(L, book, _LG_CALL490, Short, Open, 1, 1.10, 1; at=_LG_T_CLOSE, leg_id=4)
+    @test L.events[end].execution_id == 8
+    @test L.next_execution == 9
 end
 
 @testset "append: NonIntegralCash refuses a batch whose cash is not whole cents" begin
@@ -333,7 +366,7 @@ end
     @test_throws NonPositiveQuantity Expiry(_lg_hdr(L, 0), 1, 1, _LG_PUT470, Short, 0, 468.0, Worthless)
     @test_throws NonPositiveQuantity record_expiry!(L, book, Lot(1, _LG_PUT470, Short, 1, 0, 0.85);
                                                     settlement_price=470.0, effective_at=_LG_EXPIRY_A, recorded_at=_LG_EXPIRY_A)
-    @test _lg_snapshot(L) == (0, 1, 1, 1, 1)
+    @test _lg_snapshot(L) == (0, 1, 1, 1, 1, 1, 1, 0)
     @test book == Book()
     @test occursin("NonPositiveQuantity", sprint(showerror, err))
 end
@@ -342,7 +375,7 @@ end
     for err in (NothingToClose(1, _LG_PUT470), ExceedsOpen(1, _LG_PUT470, 3, 2),
                 FillAfterExpiry(1, _LG_T_OPEN, _LG_EXPIRY_A), DanglingReference(:open_fill_id, 9),
                 MatchMismatch(4, "why"), SequenceGap(:sequence, 4, 6), NonPositiveQuantity(0),
-                NonIntegralCash(1234.56), InvalidPrice(-0.5),
+                NonIntegralCash(1234.56), InvalidPrice(-0.5), DuplicateExecution(7),
                 RecordedOutOfOrder(7, _LG_T_OPEN, _LG_T_OPEN2), UnknownContract(Underlying("SPX")))
         @test err isa Exception
         @test occursin(string(nameof(typeof(err))), sprint(showerror, err))
@@ -528,7 +561,7 @@ end
 @testset "append: id and sequence are separate counters, never used for each other" begin
     # a ledger whose ids start at 100 while sequence starts at 1 (direct struct
     # construction; nothing in the writers makes the two diverge yet)
-    L, book = Ledger(LedgerEvent[], 100, 1, 1, 1, Dict{Int,Int}()), Book()
+    L, book = Ledger(LedgerEvent[], OrderRecord[], 100, 1, 1, 1, 1, 1, Dict{Int,Int}()), Book()
     g = mint_group!(L)
     _lg_fill!(L, book, _LG_PUT470, Short, Open,  2, 0.85, g; at=_LG_T_OPEN,  leg_id=1)   # id 100, seq 1
     _lg_fill!(L, book, _LG_PUT470, Long,  Close, 1, 0.40, g; at=_LG_T_CLOSE, leg_id=2)   # ids 101, 102; seq 2, 3
@@ -634,21 +667,234 @@ end
 end
 
 @testset "ledger promise: a structure lands whole or not at all" begin
-    # Known broken until slice 2 adds record_order!; flip @test_broken to @test then.
+    # Was @test_broken until slice 2 added record_order!; a two-leg order whose
+    # second leg has nothing to close leaves the ledger, the book and the group
+    # counter untouched.
     L, book = Ledger(), Book()
     before_group = L.next_group
     order = Order(:invalid_structure, [
         Leg(_LG_PUT470, Short, 1, Open),
         Leg(_LG_CALL490, Long, 1, Close),
     ])
-    @test_broken begin
+    @test begin
         threw_right = try
-            record_order!(L, book, order; prices=[0.85, 0.40], effective_at=_LG_T_OPEN,
-                          recorded_at=_LG_T_OPEN, order_leg_ids=[1, 2], fill_rule=:cross_spread)
+            record_order!(L, book, order; prices=[0.85, 0.40],
+                          observations=[_lg_seen(0.85), _lg_seen(0.40)],
+                          effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN, fill_rule=:cross_spread)
             false                                   # it must throw
         catch e
             e isa NothingToClose
         end
         threw_right && length(L) == 0 && book == Book() && L.next_group == before_group
     end
+    @test isempty(L.orders)
+    @test _lg_snapshot(L) == (0, 1, 1, 1, 1, 1, 1, 0)
+end
+
+# ---- record_order!, the structure-level writer (slice 2) ----------------
+
+@testset "record_order!: a short strangle lands as one batch, the group minted inside" begin
+    L, book = _lg_case_strangle_order()
+    rec = only(L.orders)
+    @test rec isa OrderRecord
+    @test rec.order_id == 1 && rec.first_leg_id == 1 && rec.group == 1 && rec.known_to == 0
+    @test rec.decided_at == _LG_T_OPEN
+    @test rec.order.label == :strangle && rec.order.group === nothing
+    @test length(rec.observations) == 2
+    @test rec.observations[1].bid == 0.85 && rec.observations[2].ask == 1.10
+    @test length(L) == 4
+    f1, f2, fee1, fee2 = L.events
+    @test f1 isa Fill && f2 isa Fill && fee1 isa Fee && fee2 isa Fee
+    @test [event_id(e) for e in L.events] == [1, 2, 3, 4]
+    @test [sequence(e) for e in L.events] == [1, 2, 3, 4]
+    @test (f1.execution_id, f2.execution_id) == (1, 2)
+    @test (f1.order_leg_id, f2.order_leg_id) == (1, 2)
+    @test (fee1.source_id, fee2.source_id) == (1, 2)
+    @test (fee1.amount, fee2.amount) == (-65, -65)
+    @test f1.contract == _LG_PUT470 && f1.side == Short && f1.intent == Open && f1.price == 0.85
+    @test f2.contract == _LG_CALL490 && f2.side == Short && f2.intent == Open && f2.price == 1.10
+    @test group(f1) == group(f2) == 1
+    @test all(effective_at(e) == _LG_T_OPEN && recorded_at(e) == _LG_T_OPEN for e in L.events)
+    @test book.cash == 19370                     # 8500 + 11000 - 130
+    @test L.next_group == 2
+    @test L.next_leg_id == 3
+    @test L.next_order_id == 2
+    @test (L.next_id, L.next_sequence, L.next_execution) == (5, 5, 3)
+    @test open_groups(book) == [1]
+    @test length(lots(book, 1)) == 2
+    @test book == book_as_known(L, 4) == book_effective(L, _LG_FAR)
+    @test last_sequence(L) == 4
+    _lg_check_book(book)
+end
+
+@testset "record_order!: a close order names its group and matches FIFO per leg" begin
+    L, book = _lg_case_strangle_closed()
+    @test length(L.orders) == 2
+    rec = L.orders[2]
+    @test rec.order_id == 2 && rec.first_leg_id == 3 && rec.group == 1 && rec.known_to == 4
+    @test rec.decided_at == _LG_T_CLOSE
+    @test rec.order.group == 1
+    @test length(L) == 10
+    kinds = [typeof(e) for e in L.events[5:10]]
+    @test kinds == [Fill, Match, Fill, Match, Fee, Fee]
+    c1, m1, c2, m2, fee1, fee2 = L.events[5:10]
+    @test c1.order_leg_id == 3 && c2.order_leg_id == 4
+    @test c1.execution_id == 3 && c2.execution_id == 4
+    @test m1.open_fill_id == 1 && m1.close_fill_id == event_id(c1) && m1.quantity == 1
+    @test m2.open_fill_id == 2 && m2.close_fill_id == event_id(c2) && m2.quantity == 1
+    @test fee1.source_id == event_id(c1) && fee2.source_id == event_id(c2)
+    @test book.cash == 9240                      # 19370 - 4000 - 6000 - 130
+    @test isempty(open_lots(book))
+    @test isempty(open_groups(book))
+    trips = round_trips(L)
+    @test [r.pnl for r in trips] == [4370, 4870]  # (8500 - 4000) - 65 - 65, (11000 - 6000) - 65 - 65
+    @test sum(r.pnl for r in trips) == book.cash
+    s = pnl_series(L)
+    @test s.pnl ≈ [92.40]                        # one structure sample at the close instant
+    @test s.timestamps == [_LG_T_CLOSE]
+    @test s.n_opens == 2 && s.n_closes == 2
+    @test book == book_as_known(L, 10) == book_effective(L, _LG_FAR)
+    @test L.next_group == 2                      # a named group mints nothing
+    @test (L.next_order_id, L.next_leg_id) == (3, 5)
+end
+
+@testset "record_order!: legs are planned against the book after the earlier legs" begin
+    L, book = Ledger(), Book()
+    order = Order(:open_and_trim, [Leg(_LG_PUT470, Short, 2, Open), Leg(_LG_PUT470, Long, 1, Close)])
+    rec = record_order!(L, book, order; prices=[0.85, 0.40],
+                        observations=[_lg_seen(0.85), _lg_seen(0.40)],
+                        effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN, fill_rule=:cross_spread)
+    @test length(L) == 3
+    o, c, m = L.events
+    @test o isa Fill && o.intent == Open && o.quantity == 2
+    @test c isa Fill && c.intent == Close && c.quantity == 1
+    @test m isa Match && m.open_fill_id == event_id(o) && m.close_fill_id == event_id(c) && m.quantity == 1
+    @test open_lots(book) == [Lot(1, _LG_PUT470, Short, 1, 1, 0.85)]
+    @test book.cash == 13000                     # 17000 - 4000
+    @test rec.group == 1 && length(rec.observations) == 2
+    @test [r.pnl for r in round_trips(L)] == [4500]
+end
+
+@testset "record_order!: zero fees book no Fee" begin
+    L, book = Ledger(), Book()
+    order = Order(:strangle, [Leg(_LG_PUT470, Short, 1, Open), Leg(_LG_CALL490, Short, 1, Open)])
+    record_order!(L, book, order; prices=[0.85, 1.10],
+                  observations=[_lg_seen(0.85), _lg_seen(1.10)],
+                  effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN, fill_rule=:cross_spread)
+    @test length(L) == 2
+    @test all(e isa Fill for e in L.events)
+    @test book.cash == 19500                     # 8500 + 11000
+    # an explicit zero beside a cost: one Fee, on the costed leg only
+    L, book = Ledger(), Book()
+    record_order!(L, book, order; prices=[0.85, 1.10], fees=[0, -65],
+                  observations=[_lg_seen(0.85), _lg_seen(1.10)],
+                  effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN, fill_rule=:cross_spread)
+    @test length(L) == 3
+    @test L.events[3] isa Fee && L.events[3].source_id == 2 && L.events[3].amount == -65
+    @test book.cash == 19435
+end
+
+@testset "record_order!: a structure lands whole or not at all, whichever leg fails" begin
+    spx = ContractKey(Underlying("SPX"), 4700.0, _LG_EXPIRY_A, Put)
+    early = ContractKey(_LG_SPY, 470.0, _LG_T_OPEN - Day(1), Put)     # expired before effective_at
+    cases = [
+        # (name, second leg, its price, the failure)
+        ("ExceedsOpen",     Leg(_LG_PUT470, Long, 2, Close),  0.40,     ExceedsOpen),
+        ("NonIntegralCash", Leg(_LG_CALL490, Short, 1, Open), 0.123456, NonIntegralCash),
+        ("UnknownContract", Leg(spx, Short, 1, Open),          10.0,     UnknownContract),
+        ("FillAfterExpiry", Leg(early, Short, 1, Open),        0.85,     FillAfterExpiry),
+        ("InvalidPrice",    Leg(_LG_CALL490, Short, 1, Open), 0.0,      InvalidPrice),
+        ("NothingToClose",  Leg(_LG_CALL490, Short, 1, Close), 0.60,    NothingToClose),   # same side as the lot
+    ]
+    for (name, leg2, price2, failure) in cases
+        L, book = _lg_case_strangle_order()                          # group 1: short put, short call
+        snap, before = _lg_snapshot(L), deepcopy(book)
+        order = Order(Symbol(name), [Leg(_LG_PUT465B, Short, 1, Open), leg2]; group=1)
+        kw = (prices=[1.50, price2], fees=[-65, -65],
+              observations=[_lg_seen(1.50; at=_LG_T_CLOSE), _lg_seen(price2; at=_LG_T_CLOSE)],
+              effective_at=_LG_T_CLOSE, recorded_at=_LG_T_CLOSE, fill_rule=:cross_spread)
+        @test_throws failure record_order!(L, book, order; kw...)
+        err = try record_order!(L, book, order; kw...); nothing catch e; e end
+        @test err isa failure
+        @test occursin(string(nameof(failure)), sprint(showerror, err))
+        @test _lg_snapshot(L) == snap
+        @test book == before
+        @test length(L.orders) == 1 && L.next_group == 2 && L.next_order_id == 2 && L.next_leg_id == 3
+        @test length(L) == 4 && book.cash == 19370
+    end
+    # the first leg of a fresh order may also be the one that fails: nothing is minted
+    L, book = _lg_case_strangle_order()
+    snap, before = _lg_snapshot(L), deepcopy(book)
+    bad_first = Order(:bad_first, [Leg(_LG_PUT470, Long, 5, Close), Leg(_LG_CALL490, Long, 1, Close)]; group=1)
+    @test_throws ExceedsOpen record_order!(L, book, bad_first; prices=[0.40, 0.60],
+                                           observations=[_lg_seen(0.40), _lg_seen(0.60)],
+                                           effective_at=_LG_T_CLOSE, recorded_at=_LG_T_CLOSE, fill_rule=:cross_spread)
+    err = try record_order!(L, book, bad_first; prices=[0.40, 0.60],
+                            observations=[_lg_seen(0.40), _lg_seen(0.60)],
+                            effective_at=_LG_T_CLOSE, recorded_at=_LG_T_CLOSE, fill_rule=:cross_spread); nothing catch e; e end
+    @test err isa ExceedsOpen && err.group == 1 && err.requested == 5 && err.available == 1
+    @test _lg_snapshot(L) == snap && book == before
+    # an opening order that fails mints no group
+    L, book = Ledger(), Book()
+    @test_throws InvalidPrice record_order!(L, book, Order(:bad, [Leg(_LG_PUT470, Short, 1, Open)]);
+                                            prices=[-1.0], observations=[_lg_seen(0.85)],
+                                            effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN, fill_rule=:cross_spread)
+    @test _lg_snapshot(L) == (0, 1, 1, 1, 1, 1, 1, 0)
+    @test book == Book()
+end
+
+@testset "record_order!: shape is an ArgumentError, the call is malformed" begin
+    L, book = _lg_case_strangle_order()
+    snap, before = _lg_snapshot(L), deepcopy(book)
+    order = Order(:strangle, [Leg(_LG_PUT470, Short, 1, Open), Leg(_LG_CALL490, Short, 1, Open)])
+    ok = (observations=[_lg_seen(0.85), _lg_seen(1.10)],
+          effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN, fill_rule=:cross_spread)
+    @test_throws ArgumentError record_order!(L, book, order; prices=[0.85], ok...)
+    @test_throws ArgumentError record_order!(L, book, order; prices=[0.85, 1.10, 0.5], ok...)
+    @test_throws ArgumentError record_order!(L, book, order; prices=[0.85, 1.10], fees=[-65], ok...)
+    @test_throws ArgumentError record_order!(L, book, order; prices=[0.85, 1.10],
+                                             observations=[_lg_seen(0.85)],
+                                             effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN, fill_rule=:cross_spread)
+    @test_throws ArgumentError record_order!(L, book, Order(:empty, Leg[]); prices=Float64[],
+                                             observations=LegObservation[],
+                                             effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN, fill_rule=:cross_spread)
+    @test _lg_snapshot(L) == snap
+    @test book == before
+end
+
+@testset "record_order!: a named group must be minted; an Open leg may join one" begin
+    L, book = _lg_case_strangle_order()          # next_group == 2
+    snap, before = _lg_snapshot(L), deepcopy(book)
+    stray = Order(:stray, [Leg(_LG_PUT465B, Short, 1, Open)]; group=7)
+    kw = (prices=[1.50], observations=[_lg_seen(1.50)],
+          effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN, fill_rule=:cross_spread)
+    @test_throws DanglingReference record_order!(L, book, stray; kw...)
+    err = try record_order!(L, book, stray; kw...); nothing catch e; e end
+    @test err isa DanglingReference && err.field == :group && err.id == 7
+    @test occursin("DanglingReference", sprint(showerror, err))
+    @test_throws DanglingReference record_order!(L, book, Order(:zero, stray.legs; group=0); kw...)
+    @test_throws DanglingReference record_order!(L, book, Order(:next, stray.legs; group=2); kw...)   # not yet minted
+    @test _lg_snapshot(L) == snap
+    @test book == before
+    # an Open leg into group 1 adds a third lot to that structure
+    rec = record_order!(L, book, Order(:add_leg, stray.legs; group=1); kw...)
+    @test rec.group == 1 && rec.order_id == 2 && rec.first_leg_id == 3
+    @test length(lots(book, 1)) == 3
+    @test open_groups(book) == [1]
+    @test L.next_group == 2
+    @test book.cash == 19370 + 15000
+end
+
+@testset "record_order!: known_to defaults to the last sequence at the call" begin
+    L, book = _lg_case_strangle_order()          # four events
+    order = Order(:add, [Leg(_LG_PUT465B, Short, 1, Open)]; group=1)
+    kw = (prices=[1.50], observations=[_lg_seen(1.50; at=_LG_T_OPEN2)],
+          effective_at=_LG_T_OPEN2, recorded_at=_LG_T_OPEN2, fill_rule=:cross_spread)
+    rec = record_order!(L, book, order; kw...)
+    @test rec.known_to == 4
+    # the engine passes what the tick saw before its first order: the second
+    # order of a tick does not appear to have seen the first order's fills
+    rec2 = record_order!(L, book, order; known_to=4, kw...)
+    @test rec2.known_to == 4 && rec2.order_id == 3
+    @test book_as_known(L, rec2.known_to) != book
 end
