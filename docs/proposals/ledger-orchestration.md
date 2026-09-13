@@ -5,34 +5,28 @@ human wants to do nothing between review points. Your job is to run
 the loop below, one slice at a time, and surface a report at each
 review point.
 
-## State as of 2026-09-12, evening
+## State as of 2026-09-13, morning
 
-- Branch `claude/ledger-system-review-h9c8md`, tracking origin, six
-  commits ahead, nothing pushed. Tree clean except two untracked review
-  inputs, `docs/proposals/ledger-events-review.md` and
-  `ledger-fill-review.md`, folded into the proposal long ago; the human
-  has not yet said to delete them.
-- Landed and committed: slice 1 (the pure `ledger` module), its fix
-  round (`ledger-slice1-fix.md`, codex review `-fix-review.md`), and a
-  hardening round (`ledger-slice1-hardening.md`, codex review
-  `-hardening-review.md`, inventory `ledger-slice1-coverage.md`). Gate:
-  2306 passed, 0 failed, 1 broken. The one Broken is deliberate: the
-  `@test_broken` structure-atomicity testset at the end of
-  `test/ledger/test_append.jl`, which waits for slice 2's
-  `record_order!`; when that writer lands the test records an
-  unexpected pass and must be flipped to `@test`.
-- Next: slice 2. Write `docs/proposals/ledger-slice2.md` in the shape of
-  the slice 1 brief, derived from the code as it stands, then run the
-  loop. See "Decisions taken on 2026-09-12" below; they are binding.
-- The `julia` tmux window holds a REPL with Revise and the package
-  loaded, no state worth keeping. Exit it before the gate when under
-  about 1.3 GB available; relaunch it after
-  (`julia --project=. -e 'using Revise' -i`, then `using VolSurfaceAnalysis`).
-- The `codex` tmux window is at a bash prompt. Headless codex worked
-  well: `codex exec --dangerously-bypass-approvals-and-sandbox "$(cat
-  prompt)"` from a runner script that tees to a log and appends a
-  `CODEX_EXIT=` marker, watched by a Monitor; codex writes its review to
-  `docs/proposals/ledger-slice<N>-review.md`.
+- Branch `claude/ledger-system-review-h9c8md`. Origin holds it at
+  `3f3d7c9`; locally two docs commits follow (`47cec92`, the slice 2
+  brief, and the commit carrying this handoff, the slice 2 review and
+  the fix brief). Slice 2's code sits **uncommitted in the working
+  tree** (43 files, `positions` staged for deletion): gate observed
+  2026-09-12 night at 2795 passed, 0 failed, 0 errored, 2 broken, the
+  two Broken being the slice 3 placeholders named in the brief.
+- Codex's review of slice 2 (`ledger-slice2-review.md`): not mergeable
+  on four findings, two High (the writer commits before the
+  cross-record checks run; `save_run` never runs `check_join`), one
+  Medium (the "nothing after `commit!` can fail" claim), one Low (a
+  doc sentence). Every literal and the scope were confirmed. The fix
+  round is `ledger-slice2-fix.md`; run it as a mission (fresh agent,
+  gate, codex re-check), then commit the slice as one commit.
+- Two review inputs, `ledger-events-review.md` and
+  `ledger-fill-review.md`, are still untracked pending the human's
+  decision.
+- The `julia` window holds a REPL with Revise and the package loaded, no
+  state worth keeping; the `codex` window is at a bash prompt. The
+  headless codex runner pattern below worked again for slice 2.
 
 ## Decisions taken on 2026-09-12 (binding for later slices)
 
@@ -64,6 +58,67 @@ review point.
   nondecreasing; settlement price finite and non-negative; positive
   join ids) are in force; codex kept all four.
 
+## Decisions taken on 2026-09-12, night (binding for later slices)
+
+- **The engine computes, the ledger records.** The engine turns a
+  decision into immutable inputs and makes one call; every id, the
+  group, the order record and the events are minted inside
+  `record_order!`. The engine holds no state beyond the ledger and the
+  book it folds. The first slice 2 draft, which minted ids in two places
+  and kept a journal in sync with the ledger, was rejected by the human
+  as breaking the codebase's simplicity and near-immutability.
+- **The order journal lives inside the `Ledger` container**, as
+  `L.orders` beside `L.events`: two records, `OrderRecord` (embedding
+  the `Order` the policy emitted, with `first_leg_id` and `known_to`)
+  and `LegObservation`. Replays and cash fold `events` only; the ledger
+  module still knows no quotes, spots or time cut.
+- **No type hierarchy for the venue.** The price rule and the cost
+  model are symbols dispatched through two tables in the
+  `_METRIC_TABLE` style; the tick is an integer; slice 4 puts the three
+  values in config and identity. Before proposing a struct, ask whether
+  a symbol, a function or an existing type does the job.
+- **R5: fill prices are on the venue's tick, rounded away from the
+  trader** (USD 0.01 for SPY, QQQ, IWM).
+- **Persistence landed with slice 2**: `events`, `orders`, `order_legs`
+  parquet replace `positions.parquet`, schema version 3, `load_run`
+  rebuilds through one `commit!` and `check_join`. Slice 6 keeps the
+  derived tables (`round_trips`, `marks`, `equity`, `failures`), the
+  completeness flag and `compare_runs.jl` over them.
+- **Two `@test_broken` placeholders wait for slice 3** (an expiry inside
+  the window is booked; the PR #9 regression becomes an `Expiry`
+  against the lot's own underlying). They flip when slice 3 lands.
+- Smaller: a commission of zero books no `Fee`; a duplicate execution
+  id is `DuplicateExecution`; an unminted group is
+  `DanglingReference(:group, g)`; a malformed `record_order!` call is
+  `ArgumentError`; `DailyShortStrangle.quantity` is an `Int` and the
+  config accepts `1` and `1.0`.
+
+## Pull requests
+
+Four PRs over the seven slices, cut where `master` is usable and the
+diff reviewable. Agreed with the human on 2026-09-13.
+
+1. **Slice 1 alone.** Cut a branch `ledger-slice1` at `3f3d7c9` (slice
+   1, its fix and hardening rounds, this handoff as it then stood; it
+   is exactly what origin holds for this branch) and open it against
+   `master`. Additive: the ledger landed beside `positions`.
+2. **Slices 2 and 3 together**, from this branch. Slice 2 alone would
+   leave `master` with a strangle run that opens and never closes,
+   since expiries are booked only in slice 3; the auditable strangle
+   run at the end of slice 3 is the PR's own evidence. Open it as a
+   draft with base `ledger-slice1` as soon as slice 2 is committed, so
+   its diff shows slice 2 only and review can start; GitHub retargets
+   it to `master` when PR 1 merges.
+3. **Slice 4 alone.** The run-id break; small, and easy to point at
+   later.
+4. **Slices 5, 6 and 7 together.** Outputs only: the structure series
+   and equity curve, the remaining tables, the docs cleanup that
+   deletes the proposal, the briefs and the reviews.
+
+Seven PRs would be too fine (item 2), one would be some 8,000 lines.
+Each PR carries its codex review files and module docs current with
+the code. Pushing is the human's call, as before.
+
 ## Read before acting
 
 1. `docs/design.md`, all seven rules.
@@ -88,9 +143,10 @@ review point.
    `ws` tooling and the human's editor see the same tree. One agent
    at a time; the box has 3.7 GB.
 3. **Gate.** When the agent reports, run the full suite yourself. Use
-   `ws test` in the shell window. Do not wait on echoed text (`ws wait`
-   false-matches the command); wait on the julia process exiting, then
-   `ws capture shell 60`. Check `free -m` first; under about 1.2 GB
+   `ws run "JULIA_NUM_PRECOMPILE_TASKS=1 julia --project=. -e 'using Pkg; Pkg.test()'"`
+   in the shell window (`ws test` sets no precompile variable). Do not
+   wait on echoed text (`ws wait` false-matches the command); wait on
+   the julia process exiting, then `ws capture shell 60`. Check `free -m` first; under about 1.2 GB
    available, exit the REPL in the `julia` window before running.
    Green means every existing test still passes plus the new ones.
 4. **Codex review.** Write the review prompt to a file under the
