@@ -1,7 +1,10 @@
 # Status
 
 This is `master` -- the active clean-line codebase. The prior full codebase
-lives on the `legacy` branch and remains the reference we mine from. Work here
+is not a branch: it is this repository's own history. `6d016c8` ("Wipe to
+clean slate for rebuild", 2026-05-03) emptied the tree, so its parent
+`bc31405` is the last commit carrying the old 37-file `src/`, and that is
+the reference we mine from -- `git show bc31405:src/<file>`. Work here
 advances toward the long-term shape in [vision.md](vision.md), one small,
 deliberate piece at a time.
 
