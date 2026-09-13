@@ -35,9 +35,9 @@ end
 @testset "append: record_fill! returns the batch it appended" begin
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    b1 = _lg_fill!(L, book, _LG_PUT470, Short, Open, 2, 0.85, g)
+    b1 = _lg_fill!(L, _LG_PUT470, Short, Open, 2, 0.85, g)
     @test length(b1) == 1 && b1[1] isa Fill
-    b2 = _lg_fill!(L, book, _LG_PUT470, Long, Close, 2, 0.40, g; at=_LG_T_CLOSE, leg_id=2)
+    b2 = _lg_fill!(L, _LG_PUT470, Long, Close, 2, 0.40, g; at=_LG_T_CLOSE, leg_id=2)
     @test length(b2) == 2 && b2[1] isa Fill && b2[2] isa Match
     @test L.events == vcat(b1, b2)
 end
@@ -56,9 +56,9 @@ end
 @testset "append: a partial close leaves the oldest lot's remainder" begin
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open,  2, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open,  1, 0.90, g; at=_LG_T_OPEN2, leg_id=2)
-    batch = _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, 0.40, g; at=_LG_T_CLOSE, leg_id=3)
+    _lg_fill!(L, _LG_PUT470, Short, Open,  2, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
+    _lg_fill!(L, _LG_PUT470, Short, Open,  1, 0.90, g; at=_LG_T_OPEN2, leg_id=2)
+    batch = _lg_fill!(L, _LG_PUT470, Long, Close, 1, 0.40, g; at=_LG_T_CLOSE, leg_id=3)
     @test length(batch) == 2
     @test open_lots(book) == [Lot(1, _LG_PUT470, Short, 1, 1, 0.85), Lot(1, _LG_PUT470, Short, 2, 1, 0.90)]
     @test book.cash == 22000                     # 17000 + 9000 - 4000
@@ -74,15 +74,15 @@ end
     @test m.group == 2 && m.open_fill_id == 2
 
     snap, before = _lg_snapshot(L), deepcopy(book)
-    @test_throws ExceedsOpen    _lg_fill!(L, book, _LG_CALL490, Long, Close, 2, 0.70, 1; at=_LG_T_CLOSE, leg_id=4)
-    @test_throws NothingToClose _lg_fill!(L, book, _LG_CALL490, Long, Close, 1, 0.70, 2; at=_LG_T_CLOSE, leg_id=4)
-    @test_throws NothingToClose _lg_fill!(L, book, _LG_PUT470,  Long, Close, 1, 0.70, 1; at=_LG_T_CLOSE, leg_id=4)
+    @test_throws ExceedsOpen    _lg_fill!(L, _LG_CALL490, Long, Close, 2, 0.70, 1; at=_LG_T_CLOSE, leg_id=4)
+    @test_throws NothingToClose _lg_fill!(L, _LG_CALL490, Long, Close, 1, 0.70, 2; at=_LG_T_CLOSE, leg_id=4)
+    @test_throws NothingToClose _lg_fill!(L, _LG_PUT470,  Long, Close, 1, 0.70, 1; at=_LG_T_CLOSE, leg_id=4)
     # a close matches the opposite side only: a same-side "close" has nothing to close
-    @test_throws NothingToClose _lg_fill!(L, book, _LG_CALL490, Short, Close, 1, 0.70, 1; at=_LG_T_CLOSE, leg_id=4)
+    @test_throws NothingToClose _lg_fill!(L, _LG_CALL490, Short, Close, 1, 0.70, 1; at=_LG_T_CLOSE, leg_id=4)
     @test _lg_snapshot(L) == snap
     @test book == before
     @test book.cash == 16000
-    err = try _lg_fill!(L, book, _LG_CALL490, Long, Close, 2, 0.70, 1; at=_LG_T_CLOSE, leg_id=4); nothing catch e; e end
+    err = try _lg_fill!(L, _LG_CALL490, Long, Close, 2, 0.70, 1; at=_LG_T_CLOSE, leg_id=4); nothing catch e; e end
     @test err isa ExceedsOpen && err.group == 1 && err.requested == 2 && err.available == 1
     @test _lg_snapshot(L) == snap && book == before
 end
@@ -133,18 +133,18 @@ end
 @testset "append: FillAfterExpiry" begin
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    @test_throws FillAfterExpiry _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.85, g; at=_LG_EXPIRY_A + Second(1))
+    @test_throws FillAfterExpiry _lg_fill!(L, _LG_PUT470, Short, Open, 1, 0.85, g; at=_LG_EXPIRY_A + Second(1))
     @test _lg_snapshot(L) == (0, 1, 1, 2, 1, 1, 1, 0)
     @test book == Book()
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.85, g; at=_LG_EXPIRY_A)     # at the instant is allowed
+    _lg_fill!(L, _LG_PUT470, Short, Open, 1, 0.85, g; at=_LG_EXPIRY_A)     # at the instant is allowed
     @test length(L) == 1
     snap, before = _lg_snapshot(L), deepcopy(book)
     # the writer's fill is refused by the Fill constructor itself, before commit!
-    @test_throws FillAfterExpiry _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, 0.40, g; at=_LG_EXPIRY_A + Minute(1), leg_id=2)
+    @test_throws FillAfterExpiry _lg_fill!(L, _LG_PUT470, Long, Close, 1, 0.40, g; at=_LG_EXPIRY_A + Minute(1), leg_id=2)
     @test _lg_snapshot(L) == snap
     @test book == before
     @test open_lots(book) == [Lot(g, _LG_PUT470, Short, 1, 1, 0.85)]
-    err = try _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, 0.40, g; at=_LG_EXPIRY_A + Minute(1), leg_id=2); nothing catch e; e end
+    err = try _lg_fill!(L, _LG_PUT470, Long, Close, 1, 0.40, g; at=_LG_EXPIRY_A + Minute(1), leg_id=2); nothing catch e; e end
     @test err isa FillAfterExpiry && err.id == L.next_id && err.effective_at == _LG_EXPIRY_A + Minute(1) && err.expiry == _LG_EXPIRY_A
     @test occursin("FillAfterExpiry", sprint(showerror, err))
     @test _lg_snapshot(L) == snap && book == before
@@ -208,9 +208,9 @@ end
     L = Ledger(); book = L.book
     g1 = mint_group!(L)
     g2 = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 2, 0.85, g1; leg_id=1)      # fill 1: a short lot of 2 in group 1
-    _lg_fill!(L, book, _LG_PUT470, Long,  Open, 1, 0.50, g1; leg_id=2)      # fill 2: a long lot in group 1
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.90, g2; leg_id=3)      # fill 3: a short lot in group 2
+    _lg_fill!(L, _LG_PUT470, Short, Open, 2, 0.85, g1; leg_id=1)      # fill 1: a short lot of 2 in group 1
+    _lg_fill!(L, _LG_PUT470, Long,  Open, 1, 0.50, g1; leg_id=2)      # fill 2: a long lot in group 1
+    _lg_fill!(L, _LG_PUT470, Short, Open, 1, 0.90, g2; leg_id=3)      # fill 3: a short lot in group 2
     snap, before = _lg_snapshot(L), deepcopy(book)
     mkclose(q, g=g1) = Fill(_lg_hdr(L, 0), g, 9, 9, _LG_PUT470, Long, Close, q, 0.40, :cross_spread)
     # the matches do not exhaust the close
@@ -249,7 +249,7 @@ end
 @testset "append: references point backward in effective time" begin
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.85, g; at=_LG_T_OPEN2, leg_id=1)   # fill 1 at T_OPEN2
+    _lg_fill!(L, _LG_PUT470, Short, Open, 1, 0.85, g; at=_LG_T_OPEN2, leg_id=1)   # fill 1 at T_OPEN2
     snap, before = _lg_snapshot(L), deepcopy(book)
     # a fee effective before its source fill
     @test_throws MatchMismatch record_fee!(L, 1, -65; effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN2)
@@ -266,7 +266,7 @@ end
 @testset "append: ExceedsOpen on a hand-built over-consumption" begin
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 2, 0.85, g; leg_id=1)   # fill 1
+    _lg_fill!(L, _LG_PUT470, Short, Open, 2, 0.85, g; leg_id=1)   # fill 1
     snap, before = _lg_snapshot(L), deepcopy(book)
     c = Fill(_lg_hdr(L, 0), g, 9, 9, _LG_PUT470, Long, Close, 3, 0.40, :cross_spread)
     @test_throws ExceedsOpen commit!(L, LedgerEvent[c, Match(_lg_hdr(L, 1), g, 1, event_id(c), 3)])
@@ -332,7 +332,7 @@ end
     @test L.next_execution == 8
     @test length(L) == 4
     # and the writer's own ids continue from there
-    _lg_fill!(L, book, _LG_CALL490, Short, Open, 1, 1.10, 1; at=_LG_T_CLOSE, leg_id=4)
+    _lg_fill!(L, _LG_CALL490, Short, Open, 1, 1.10, 1; at=_LG_T_CLOSE, leg_id=4)
     @test L.events[end].execution_id == 8
     @test L.next_execution == 9
 end
@@ -344,7 +344,7 @@ end
     # 0.123456 per share on SPY is 0.123456 * 100 * 100 = 1234.56 cents per contract
     f = Fill(_lg_hdr(L, 0, _LG_T_OPEN), g, 1, 1, _LG_PUT470, Short, Open, 1, 0.123456, :cross_spread)
     @test_throws NonIntegralCash commit!(L, LedgerEvent[f])
-    @test_throws NonIntegralCash _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.123456, g)
+    @test_throws NonIntegralCash _lg_fill!(L, _LG_PUT470, Short, Open, 1, 0.123456, g)
     @test _lg_snapshot(L) == snap
     @test book == before
     err = try commit!(L, LedgerEvent[f]); nothing catch e; e end
@@ -385,17 +385,17 @@ end
 @testset "append: NothingToClose" begin
     L = Ledger(); book = L.book
     g1 = mint_group!(L); g2 = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.85, g1; leg_id=1)
+    _lg_fill!(L, _LG_PUT470, Short, Open, 1, 0.85, g1; leg_id=1)
     snap, before = _lg_snapshot(L), deepcopy(book)
     # a group with nothing in it
-    @test_throws NothingToClose _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, 0.40, g2; at=_LG_T_CLOSE, leg_id=2)
+    @test_throws NothingToClose _lg_fill!(L, _LG_PUT470, Long, Close, 1, 0.40, g2; at=_LG_T_CLOSE, leg_id=2)
     # a contract the group does not hold
-    @test_throws NothingToClose _lg_fill!(L, book, _LG_CALL490, Long, Close, 1, 0.40, g1; at=_LG_T_CLOSE, leg_id=2)
+    @test_throws NothingToClose _lg_fill!(L, _LG_CALL490, Long, Close, 1, 0.40, g1; at=_LG_T_CLOSE, leg_id=2)
     # only same-side lots on that contract: a short "close" against a short lot
-    @test_throws NothingToClose _lg_fill!(L, book, _LG_PUT470, Short, Close, 1, 0.40, g1; at=_LG_T_CLOSE, leg_id=2)
+    @test_throws NothingToClose _lg_fill!(L, _LG_PUT470, Short, Close, 1, 0.40, g1; at=_LG_T_CLOSE, leg_id=2)
     @test _lg_snapshot(L) == snap
     @test book == before
-    err = try _lg_fill!(L, book, _LG_PUT470, Short, Close, 1, 0.40, g1; at=_LG_T_CLOSE, leg_id=2); nothing catch e; e end
+    err = try _lg_fill!(L, _LG_PUT470, Short, Close, 1, 0.40, g1; at=_LG_T_CLOSE, leg_id=2); nothing catch e; e end
     @test err isa NothingToClose && err.group == g1 && err.contract == _LG_PUT470
     @test occursin("NothingToClose", sprint(showerror, err))
     @test _lg_snapshot(L) == snap && book == before
@@ -408,7 +408,7 @@ end
     spx = ContractKey(Underlying("SPX"), 4700.0, _LG_EXPIRY_A, Put)
     f = Fill(_lg_hdr(L, 0, _LG_T_OPEN), g, 1, 1, spx, Short, Open, 1, 10.0, :cross_spread)
     @test_throws UnknownContract commit!(L, LedgerEvent[f])
-    @test_throws UnknownContract _lg_fill!(L, book, spx, Short, Open, 1, 10.0, g)
+    @test_throws UnknownContract _lg_fill!(L, spx, Short, Open, 1, 10.0, g)
     # a listed fill ahead of it in the batch does not land either
     ok  = Fill(_lg_hdr(L, 0, _LG_T_OPEN), g, 1, 1, _LG_PUT470, Short, Open, 1, 0.85, :cross_spread)
     bad = Fill(_lg_hdr(L, 1, _LG_T_OPEN), g, 2, 2, spx,        Short, Open, 1, 10.0, :cross_spread)
@@ -423,9 +423,9 @@ end
 @testset "append: InvalidPrice is thrown at construction, before the write path" begin
     L, book = _lg_case_open_at_end()             # lot 1: short put 470, open
     snap, before = _lg_snapshot(L), deepcopy(book)
-    @test_throws InvalidPrice _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, 0.0,  1; at=_LG_T_CLOSE, leg_id=4)
-    @test_throws InvalidPrice _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, -0.4, 1; at=_LG_T_CLOSE, leg_id=4)
-    @test_throws InvalidPrice _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, Inf,  1; at=_LG_T_CLOSE, leg_id=4)
+    @test_throws InvalidPrice _lg_fill!(L, _LG_PUT470, Long, Close, 1, 0.0,  1; at=_LG_T_CLOSE, leg_id=4)
+    @test_throws InvalidPrice _lg_fill!(L, _LG_PUT470, Long, Close, 1, -0.4, 1; at=_LG_T_CLOSE, leg_id=4)
+    @test_throws InvalidPrice _lg_fill!(L, _LG_PUT470, Long, Close, 1, Inf,  1; at=_LG_T_CLOSE, leg_id=4)
     lot = only(open_lots(book))
     @test_throws InvalidPrice record_expiry!(L, lot; settlement_price=-1.0, effective_at=_LG_EXPIRY_A, recorded_at=_LG_T_NEXT)
     @test_throws InvalidPrice record_expiry!(L, lot; settlement_price=NaN,  effective_at=_LG_EXPIRY_A, recorded_at=_LG_T_NEXT)
@@ -468,7 +468,7 @@ end
     @test occursin("RecordedOutOfOrder", sprint(showerror, err))
     @test _lg_snapshot(L) == snap && book == before
     # the same for an expiry and a fee: book a lot, then try each recorded before it is true
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.85, g; at=_LG_T_OPEN)
+    _lg_fill!(L, _LG_PUT470, Short, Open, 1, 0.85, g; at=_LG_T_OPEN)
     snap, before = _lg_snapshot(L), deepcopy(book)
     lot = only(open_lots(book))
     @test_throws RecordedOutOfOrder record_expiry!(L, lot; settlement_price=468.0, effective_at=_LG_EXPIRY_A, recorded_at=_LG_T_CLOSE)
@@ -543,7 +543,7 @@ end
     # a lot already in the book is older than any lot the batch opens
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.85, g; at=_LG_T_OPEN, leg_id=1)    # fill 1, in the book
+    _lg_fill!(L, _LG_PUT470, Short, Open, 1, 0.85, g; at=_LG_T_OPEN, leg_id=1)    # fill 1, in the book
     snap, before = _lg_snapshot(L), deepcopy(book)
     b = Fill(_lg_hdr(L, 0, _LG_T_OPEN2), g, 2, 2, _LG_PUT470, Short, Open,  1, 0.90, :cross_spread)
     c = Fill(_lg_hdr(L, 1, _LG_T_CLOSE), g, 3, 3, _LG_PUT470, Long,  Close, 2, 0.40, :cross_spread)
@@ -564,8 +564,8 @@ end
     L = Ledger(LedgerEvent[], OrderRecord[], Book(), 100, 1, 1, 1, 1, 1, Dict{Int,Int}())
     book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open,  2, 0.85, g; at=_LG_T_OPEN,  leg_id=1)   # id 100, seq 1
-    _lg_fill!(L, book, _LG_PUT470, Long,  Close, 1, 0.40, g; at=_LG_T_CLOSE, leg_id=2)   # ids 101, 102; seq 2, 3
+    _lg_fill!(L, _LG_PUT470, Short, Open,  2, 0.85, g; at=_LG_T_OPEN,  leg_id=1)   # id 100, seq 1
+    _lg_fill!(L, _LG_PUT470, Long,  Close, 1, 0.40, g; at=_LG_T_CLOSE, leg_id=2)   # ids 101, 102; seq 2, 3
     record_fee!(L, 101, -65; effective_at=_LG_T_CLOSE, recorded_at=_LG_T_CLOSE)    # id 103, seq 4
     lot = only(open_lots(book))
     record_expiry!(L, lot; settlement_price=468.0, effective_at=_LG_EXPIRY_A, recorded_at=_LG_T_NEXT)   # id 104, seq 5
@@ -614,9 +614,9 @@ end
 @testset "ledger promise: validated batches enforce FIFO" begin
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.85, g;
+    _lg_fill!(L, _LG_PUT470, Short, Open, 1, 0.85, g;
               at=_LG_T_OPEN, leg_id=1)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.90, g;
+    _lg_fill!(L, _LG_PUT470, Short, Open, 1, 0.90, g;
               at=_LG_T_OPEN2, leg_id=2)
     snap, before = _lg_snapshot(L), deepcopy(book)
     close = Fill(_lg_hdr(L, 0), g, 3, L.next_execution, _LG_PUT470,
@@ -630,7 +630,7 @@ end
 @testset "ledger promise: consumption is not effective before its open" begin
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.85, g;
+    _lg_fill!(L, _LG_PUT470, Short, Open, 1, 0.85, g;
               at=_LG_T_CLOSE, leg_id=1)
     snap, before = _lg_snapshot(L), deepcopy(book)
     @test_throws MatchMismatch record_fill!(
@@ -644,7 +644,7 @@ end
 @testset "ledger promise: expiry consumes the whole remaining lot" begin
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 2, 0.85, g;
+    _lg_fill!(L, _LG_PUT470, Short, Open, 2, 0.85, g;
               at=_LG_T_OPEN, leg_id=1)
     snap, before = _lg_snapshot(L), deepcopy(book)
     expiry = Expiry(_lg_hdr(L, 0, _LG_EXPIRY_A), g, 1, _LG_PUT470,
@@ -657,7 +657,7 @@ end
 @testset "ledger promise: expiry is not effective before contract expiry" begin
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.85, g;
+    _lg_fill!(L, _LG_PUT470, Short, Open, 1, 0.85, g;
               at=_LG_T_OPEN, leg_id=1)
     snap, before = _lg_snapshot(L), deepcopy(book)
     expiry = Expiry(_lg_hdr(L, 0, _LG_T_OPEN2), g, 1, _LG_PUT470,

@@ -51,7 +51,10 @@ Four principles:
 1. **The ledger is an append-only journal of economic facts.** The engine
    is the only writer; nothing is edited. Marks, diagnostics and order
    status live outside it.
-2. **The book is a view by replay, never stored.** A backtest policy and
+2. **The book is not persisted; it is reproducible by replay.** The
+   ledger owns one, folded as it writes, and `Ledger(events)` rebuilds it
+   from the events alone, so nothing but the events is ever stored. A
+   backtest policy and
    a live loop receive the same type.
 3. **Intent is declared, cash is derived, lineage is recorded.** Orders
    say open or close; cash follows from price, quantity and multiplier;

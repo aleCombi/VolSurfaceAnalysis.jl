@@ -91,9 +91,9 @@ end
     # several groups and contracts: ascending groups, lots by opening fill
     L = Ledger(); book = L.book
     g1 = mint_group!(L); g2 = mint_group!(L); g3 = mint_group!(L)
-    _lg_fill!(L, book, _LG_CALL490, Short, Open, 1, 1.10, g3; leg_id=1)
-    _lg_fill!(L, book, _LG_PUT470,  Short, Open, 1, 0.85, g1; leg_id=2)
-    _lg_fill!(L, book, _LG_PUT465B, Short, Open, 2, 1.50, g1; leg_id=3)
+    _lg_fill!(L, _LG_CALL490, Short, Open, 1, 1.10, g3; leg_id=1)
+    _lg_fill!(L, _LG_PUT470,  Short, Open, 1, 0.85, g1; leg_id=2)
+    _lg_fill!(L, _LG_PUT465B, Short, Open, 2, 1.50, g1; leg_id=3)
     @test open_groups(book) == [1, 3]
     @test [l.open_fill_id for l in open_lots(book)] == [1, 2, 3]
     @test [l.open_fill_id for l in lots(book, g1)] == [2, 3]
@@ -228,7 +228,7 @@ end
     # same instant: equal instants fold in sequence order (finding 6.2)
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.85, g;
+    _lg_fill!(L, _LG_PUT470, Short, Open, 1, 0.85, g;
               at=_LG_EXPIRY_A, leg_id=1)
     lot = only(open_lots(book))
     record_expiry!(L, lot; settlement_price=468.0,
@@ -246,9 +246,9 @@ end
     L = Ledger(); book = L.book
     g = mint_group!(L)
     later_put = _lg_put(470.0; expiry=_LG_T_NEXT + Day(4))
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 1, 0.07, g;
+    _lg_fill!(L, _LG_PUT470, Short, Open, 1, 0.07, g;
               at=_LG_T_OPEN, leg_id=1)
-    _lg_fill!(L, book, later_put, Short, Open, 1, 0.07, g;
+    _lg_fill!(L, later_put, Short, Open, 1, 0.07, g;
               at=_LG_T_NEXT, leg_id=2)
     lot = only(l for l in open_lots(book) if l.contract == _LG_PUT470)
     record_expiry!(L, lot; settlement_price=469.83,

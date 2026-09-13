@@ -24,7 +24,7 @@ const _LG_CALL490 = _lg_call(490.0)
 const _LG_PUT465B = _lg_put(465.0; expiry=_LG_EXPIRY_B)
 
 # Book one leg, recorded when it is effective.
-function _lg_fill!(L, book, contract, side, intent, qty, price, group;
+function _lg_fill!(L, contract, side, intent, qty, price, group;
                    at=_LG_T_OPEN, leg_id=1, rule=:cross_spread)
     batch = record_fill!(L, Leg(contract, side, qty, intent), group;
                          price=price, effective_at=at, recorded_at=at,
@@ -38,8 +38,8 @@ end
 function _lg_case_round_trip()
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open,  1, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
-    _lg_fill!(L, book, _LG_PUT470, Long,  Close, 1, 0.40, g; at=_LG_T_CLOSE, leg_id=2)
+    _lg_fill!(L, _LG_PUT470, Short, Open,  1, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
+    _lg_fill!(L, _LG_PUT470, Long,  Close, 1, 0.40, g; at=_LG_T_CLOSE, leg_id=2)
     return (L, book)
 end
 
@@ -50,9 +50,9 @@ end
 function _lg_case_split()
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open,  2, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open,  1, 0.90, g; at=_LG_T_OPEN2, leg_id=2)
-    _lg_fill!(L, book, _LG_PUT470, Long,  Close, 3, 0.40, g; at=_LG_T_CLOSE, leg_id=3)
+    _lg_fill!(L, _LG_PUT470, Short, Open,  2, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
+    _lg_fill!(L, _LG_PUT470, Short, Open,  1, 0.90, g; at=_LG_T_OPEN2, leg_id=2)
+    _lg_fill!(L, _LG_PUT470, Long,  Close, 3, 0.40, g; at=_LG_T_CLOSE, leg_id=3)
     return (L, book)
 end
 
@@ -63,9 +63,9 @@ function _lg_case_two_groups()
     L = Ledger(); book = L.book
     g1 = mint_group!(L)
     g2 = mint_group!(L)
-    _lg_fill!(L, book, _LG_CALL490, Short, Open,  1, 1.10, g1; at=_LG_T_OPEN,  leg_id=1)
-    _lg_fill!(L, book, _LG_CALL490, Short, Open,  1, 1.20, g2; at=_LG_T_OPEN2, leg_id=2)
-    _lg_fill!(L, book, _LG_CALL490, Long,  Close, 1, 0.70, g2; at=_LG_T_CLOSE, leg_id=3)
+    _lg_fill!(L, _LG_CALL490, Short, Open,  1, 1.10, g1; at=_LG_T_OPEN,  leg_id=1)
+    _lg_fill!(L, _LG_CALL490, Short, Open,  1, 1.20, g2; at=_LG_T_OPEN2, leg_id=2)
+    _lg_fill!(L, _LG_CALL490, Long,  Close, 1, 0.70, g2; at=_LG_T_CLOSE, leg_id=3)
     return (L, book)
 end
 
@@ -77,8 +77,8 @@ end
 function _lg_case_mixed_expiries()
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470,  Short, Open, 1, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
-    _lg_fill!(L, book, _LG_PUT465B, Short, Open, 1, 1.50, g; at=_LG_T_OPEN2, leg_id=2)
+    _lg_fill!(L, _LG_PUT470,  Short, Open, 1, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
+    _lg_fill!(L, _LG_PUT465B, Short, Open, 1, 1.50, g; at=_LG_T_OPEN2, leg_id=2)
     lot = only(l for l in lots(book, g) if l.contract == _LG_PUT470)
     record_expiry!(L, lot; settlement_price=468.0,
                    effective_at=_LG_EXPIRY_A, recorded_at=_LG_T_NEXT)
@@ -104,9 +104,9 @@ end
 function _lg_case_open_at_end()
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470,  Short, Open,  1, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
-    _lg_fill!(L, book, _LG_CALL490, Short, Open,  1, 1.10, g; at=_LG_T_OPEN,  leg_id=2)
-    _lg_fill!(L, book, _LG_CALL490, Long,  Close, 1, 0.60, g; at=_LG_T_CLOSE, leg_id=3)
+    _lg_fill!(L, _LG_PUT470,  Short, Open,  1, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
+    _lg_fill!(L, _LG_CALL490, Short, Open,  1, 1.10, g; at=_LG_T_OPEN,  leg_id=2)
+    _lg_fill!(L, _LG_CALL490, Long,  Close, 1, 0.60, g; at=_LG_T_CLOSE, leg_id=3)
     return (L, book)
 end
 

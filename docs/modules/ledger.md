@@ -20,7 +20,8 @@ order journal holds plain numbers and timestamps for the same reason.
 - `Fill`, `Match`, `Expiry`, `Fee` -- the four event kinds, a closed
   union (`LedgerEvent`). A fill is one execution and carries nothing
   about the market it was filled against (that belongs to the order
-  journal, outside this module); a match names the lot one closing fill
+  journal, outside the journal of economic facts though inside this
+  module); a match names the lot one closing fill
   consumed; an expiry settles one remaining lot; a fee names the fill
   that caused it. Every event carries an `EventHeader` by composition:
   a stable id (a reference, never an index), effective time (when the
@@ -165,9 +166,67 @@ open lots of the opposite side, so two groups on one contract never
 touch each other's lots. Effective time need not be monotone in
 sequence; ids and sequence are separate counters that coincide in a
 fresh ledger and are never used for each other. Every failure prints
-its name. The inventory of these promises against their enforcing code
-and tests is
-[ledger-slice1-coverage.md](../proposals/ledger-slice1-coverage.md).
+its name. Each promise above is enforced in `src/ledger/append.jl` and
+has a test of its own in `test/ledger/test_append.jl`, named for the
+failure it provokes.
+
+## The exported surface
+
+Everything the module exports, in one place. Signatures and semantics
+live in the docstrings; this is the inventory, so a reader can see the
+whole surface without grepping the export list.
+
+**Vocabulary.** `ExerciseStyle` (`American`, `European`),
+`SettlementStyle` (`AMSettled`, `PMSettled`), `Delivery` (`Physical`,
+`Cash`), `Side` (`Long`, `Short`), `Intent` (`Open`, `Close`),
+`ExpiryOutcome` (`Worthless`, `CashSettled`). Each is a closed set of
+singleton values, not a string or a symbol, so a wrong one cannot be
+constructed.
+
+**Contracts.** `ContractKey`, the identity of an option; `ContractSpec`,
+the facts the cash rules need; `contract_spec(key)`, which resolves them
+from the table in code on every write and throws `UnknownContract` for
+an underlying it does not list.
+
+**Orders.** `Leg` (contract, side, quantity, intent) and `Order` (a
+name and its legs), both immutable, both what a policy emits.
+
+**Events.** `Fill`, `Match`, `Expiry`, `Fee`, their closed union
+`LedgerEvent`, and the `EventHeader` each carries. The header accessors
+are `header`, `event_id`, `effective_at`, `recorded_at`, `sequence` and
+`group`; `side_sign` is `+1` for `Long` and `-1` for `Short`;
+`intrinsic(key, settlement)` and `cash(event)` are the two economic
+functions, the second returning whole USD cents.
+
+**The ledger.** `Ledger()` is empty; `Ledger(events)` validates and
+folds, and documents the two counters it cannot rebuild from events
+alone. `last_sequence(L)` is the sequence of the last event, the
+boundary a decision saw. `OrderRecord` and `LegObservation` are the
+journal's two records, reached by `order_leg(L, leg_id)`.
+
+**The book.** `Lot` and `Book`, with `open_lots(book)`, `lots(book,
+group)` and `open_groups(book)` reading one. `L.book` is the ledger's
+own, folded as it writes. The two replays build fresh books and return
+them by value: `book_as_known(L, boundary)` cuts by sequence -- what a
+decision could have seen -- and `book_effective(L, t)` cuts by
+effective time -- what was true at an instant. `apply!`, the fold step,
+is deliberately not exported.
+
+**Writers.** `mint_group!(L)` reserves a group id. `record_fill!`,
+`record_expiry!` and `record_fee!` each append one event.
+`record_order!(L, order; ...)` is the structure writer: it plans every
+leg against the book as it would be after the earlier legs, validates
+all of them, and commits once. `commit!(L, batch)` is the one path all
+of them take, and the only place the ledger mutates.
+
+**Failures.** `NothingToClose`, `ExceedsOpen`, `FillAfterExpiry`,
+`DanglingReference`, `MatchMismatch`, `SequenceGap`,
+`NonPositiveQuantity`, `NonIntegralCash`, `InvalidPrice`,
+`RecordedOutOfOrder`, `DuplicateExecution`, `UnknownContract`. Each
+names what it refused and prints that name.
+
+**Derived.** `RoundTrip` and `round_trips(L)`, a closed lot matched to
+its opening fill with its realised cash.
 
 ## Responsibility boundaries
 

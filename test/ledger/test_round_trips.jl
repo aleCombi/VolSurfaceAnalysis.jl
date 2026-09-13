@@ -59,10 +59,10 @@ end
 @testset "round_trips: a fee on the opening fill is shared by its consumers" begin
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 3, 0.85, g; leg_id=1)                          # fill 1
+    _lg_fill!(L, _LG_PUT470, Short, Open, 3, 0.85, g; leg_id=1)                          # fill 1
     record_fee!(L, 1, -90; effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN)             # fee 2 on the open (0.90 USD)
-    _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, 0.40, g; at=_LG_T_CLOSE, leg_id=2)          # fill 3, match 4
-    _lg_fill!(L, book, _LG_PUT470, Long, Close, 2, 0.30, g; at=_LG_T_CLOSE + Hour(1), leg_id=3) # fill 5, match 6
+    _lg_fill!(L, _LG_PUT470, Long, Close, 1, 0.40, g; at=_LG_T_CLOSE, leg_id=2)          # fill 3, match 4
+    _lg_fill!(L, _LG_PUT470, Long, Close, 2, 0.30, g; at=_LG_T_CLOSE + Hour(1), leg_id=3) # fill 5, match 6
     trips = round_trips(L)
     # cumulative rounding over the consumers of fill 1 (quantity 3):
     # round(-90 * 1/3) = -30, then round(-90 * 3/3) - (-30) = -60
@@ -75,10 +75,10 @@ end
 @testset "round_trips: fee shares are whole cents by cumulative rounding" begin
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 3, 0.85, g; leg_id=1)                    # fill 1
+    _lg_fill!(L, _LG_PUT470, Short, Open, 3, 0.85, g; leg_id=1)                    # fill 1
     record_fee!(L, 1, -100; effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN)       # fee 2 (1.00 USD)
     for k in 1:3
-        _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, 0.40, g; at=_LG_T_CLOSE + Hour(k), leg_id=k + 1)
+        _lg_fill!(L, _LG_PUT470, Long, Close, 1, 0.40, g; at=_LG_T_CLOSE + Hour(k), leg_id=k + 1)
     end
     trips = round_trips(L)
     # cumulative: round(-100 * 1/3) = -33, round(-100 * 2/3) = -67, round(-100 * 3/3) = -100
@@ -160,20 +160,20 @@ end
     # 4470, two lots remain (17000), and -90 - round(-90 * 1/3) = -60 is unallocated
     L = Ledger(); book = L.book
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470, Short, Open, 3, 0.85, g; leg_id=1)
+    _lg_fill!(L, _LG_PUT470, Short, Open, 3, 0.85, g; leg_id=1)
     record_fee!(L, 1, -90; effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN)
-    _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, 0.40, g; at=_LG_T_CLOSE, leg_id=2)
+    _lg_fill!(L, _LG_PUT470, Long, Close, 1, 0.40, g; at=_LG_T_CLOSE, leg_id=2)
     @test book.cash == 21410                                   # 25500 - 90 - 4000
     @test _lg_reconciliation(L, book) == (4470, 17000, -60)
     @test sum(_lg_reconciliation(L, book)) == book.cash
     # one more closed at 0.30 (-3000): its share is round(-90 * 2/3) - (-30) =
     # -30, so the trip is 5500 - 30 = 5470; one lot remains (8500); -30 unallocated
-    _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, 0.30, g; at=_LG_T_CLOSE + Hour(1), leg_id=3)
+    _lg_fill!(L, _LG_PUT470, Long, Close, 1, 0.30, g; at=_LG_T_CLOSE + Hour(1), leg_id=3)
     @test book.cash == 18410                                   # 21410 - 3000
     @test _lg_reconciliation(L, book) == (4470 + 5470, 8500, -30)
     @test sum(_lg_reconciliation(L, book)) == book.cash
     # the last one at 0.30: the remainder lands on it, nothing is open, exact
-    _lg_fill!(L, book, _LG_PUT470, Long, Close, 1, 0.30, g; at=_LG_T_CLOSE + Hour(2), leg_id=4)
+    _lg_fill!(L, _LG_PUT470, Long, Close, 1, 0.30, g; at=_LG_T_CLOSE + Hour(2), leg_id=4)
     @test _lg_reconciliation(L, book) == (4470 + 5470 + 5470, 0, 0)   # 5500 - 30 again: -90 - (-60)
     @test sum(r.pnl for r in round_trips(L)) == book.cash == 15410  # 25500 - 90 - 4000 - 3000 - 3000
 end

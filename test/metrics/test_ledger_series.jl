@@ -30,13 +30,13 @@ end
 
 @testset "pnl_series(ledger): ordering matches pnl_series(positions)" begin
     # two groups closed at different instants, the earlier one a loss
-    L, book = Ledger(), Book()
+    L = Ledger()
     g1 = mint_group!(L)
     g2 = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470,  Short, Open,  1, 0.85, g1; at=_LG_T_OPEN,  leg_id=1)
-    _lg_fill!(L, book, _LG_CALL490, Short, Open,  1, 1.10, g2; at=_LG_T_OPEN,  leg_id=2)
-    _lg_fill!(L, book, _LG_CALL490, Long,  Close, 1, 1.60, g2; at=_LG_T_OPEN2, leg_id=3)   # -50 at T_OPEN2
-    _lg_fill!(L, book, _LG_PUT470,  Long,  Close, 1, 0.40, g1; at=_LG_T_CLOSE, leg_id=4)   # +45 at T_CLOSE
+    _lg_fill!(L, _LG_PUT470,  Short, Open,  1, 0.85, g1; at=_LG_T_OPEN,  leg_id=1)
+    _lg_fill!(L, _LG_CALL490, Short, Open,  1, 1.10, g2; at=_LG_T_OPEN,  leg_id=2)
+    _lg_fill!(L, _LG_CALL490, Long,  Close, 1, 1.60, g2; at=_LG_T_OPEN2, leg_id=3)   # -50 at T_OPEN2
+    _lg_fill!(L, _LG_PUT470,  Long,  Close, 1, 0.40, g1; at=_LG_T_CLOSE, leg_id=4)   # +45 at T_CLOSE
     s = pnl_series(L)
     @test s.timestamps == [_LG_T_OPEN2, _LG_T_CLOSE]
     @test s.pnl ≈ [-50.0, 45.0]
@@ -48,12 +48,12 @@ end
 end
 
 @testset "pnl_series(ledger): legs of one group closed at one instant are one sample" begin
-    L, book = Ledger(), Book()
+    L = Ledger()
     g = mint_group!(L)
-    _lg_fill!(L, book, _LG_PUT470,  Short, Open,  1, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
-    _lg_fill!(L, book, _LG_CALL490, Short, Open,  1, 1.10, g; at=_LG_T_OPEN,  leg_id=2)
-    _lg_fill!(L, book, _LG_PUT470,  Long,  Close, 1, 1.00, g; at=_LG_T_CLOSE, leg_id=3)   # -15
-    _lg_fill!(L, book, _LG_CALL490, Long,  Close, 1, 0.60, g; at=_LG_T_CLOSE, leg_id=4)   # +50
+    _lg_fill!(L, _LG_PUT470,  Short, Open,  1, 0.85, g; at=_LG_T_OPEN,  leg_id=1)
+    _lg_fill!(L, _LG_CALL490, Short, Open,  1, 1.10, g; at=_LG_T_OPEN,  leg_id=2)
+    _lg_fill!(L, _LG_PUT470,  Long,  Close, 1, 1.00, g; at=_LG_T_CLOSE, leg_id=3)   # -15
+    _lg_fill!(L, _LG_CALL490, Long,  Close, 1, 0.60, g; at=_LG_T_CLOSE, leg_id=4)   # +50
     @test pnl_series(L).pnl ≈ [35.0]
     @test pnl_series(L; unit=:leg).pnl ≈ [-15.0, 50.0]
     @test hit_rate(pnl_series(L)) == 1.0

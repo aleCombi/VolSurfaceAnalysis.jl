@@ -1,4 +1,5 @@
-# The book is a view by replay, never stored: lots per (group, contract),
+# The book: lots per (group, contract), never persisted and always
+# reproducible by replay,
 # FIFO within, plus cash. `apply!` is the fold step; the two replays
 # differ only in which events they fold and in what order.
 #
