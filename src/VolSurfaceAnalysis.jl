@@ -31,6 +31,7 @@ include("policies/policy.jl")
 include("policies/daily_short_strangle.jl")
 include("agents/agent.jl")
 include("backtest/execution.jl")
+include("backtest/settlement.jl")
 include("backtest/engine.jl")
 include("metrics/pnl_series.jl")
 include("metrics/ledger_series.jl")
@@ -89,7 +90,8 @@ export OptionType, Call, Put,
        declared_underlyings,
        Agent, StaticAgent, current_policy,
        fill_price, commission,
-       resolve_quote, fill_legs, check_join, run_backtest,
+       resolve_quote, fill_legs, settlement_price, settlements,
+       check_join, run_backtest,
        UnpriceableLeg, JoinViolation,
        PnLSeries, pnl_series, equity_curve,
        total_pnl, n_round_trips, hit_rate,

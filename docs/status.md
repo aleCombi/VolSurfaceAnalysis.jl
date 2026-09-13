@@ -38,13 +38,17 @@ Progress toward vision:
    refit / learning / policy evolution); `StaticAgent` wraps a fixed
    Policy. `TimeCut` gives no-lookahead a supported-interface guarantee;
    `run_backtest(agent, data, from, to, clock; fill_rule, cost_model,
-   tick_cents)` drives the tick loop on the experiment's declared
-   `Clock`, prices every leg of every order through the simulated venue
-   (`docs/modules/backtest.md`: `:cross_spread` on the tick, IBKR Pro's
-   US options commissions as `Fee` events) before anything is written,
-   and returns a `Ledger`; per-record `check_join` validates the
-   fill-to-order join at each append. Lifecycle (expiries in the tick
-   loop) is slice 3.
+   settlement_rule, tick_cents)` drives the tick loop on the
+   experiment's declared `Clock`, prices every leg of every order
+   through the simulated venue (`docs/modules/backtest.md`:
+   `:cross_spread` on the tick, IBKR Pro's US options commissions as
+   `Fee` events) before anything is written, and returns a `Ledger`;
+   per-record `check_join` validates the fill-to-order join at each
+   append. Lifecycle runs first at every tick and once more at the
+   evaluation endpoint: `settlements` says which lots fell due and at
+   what price, the ledger's own `record_expiry!` books each one, and the
+   settlement rule (`:session_close`) reads sessions off the spot tree,
+   consulting the NYSE calendar only to contradict it.
 5. **Metric computation** -- on the ledger. `PnLSeries` is built by
    `pnl_series(::Ledger)` from the ledger's round trips, one sample per
    structure closed at one instant, in USD. Always-on core metrics
@@ -102,10 +106,10 @@ for sanity checks against real SPY surfaces.
 Step 5 / 6 had gained per-leg expiry settlement through a caller-supplied
 `settle(trade)` closure in `pnl_series`, marking each residual lot at its
 own underlying's spot at `min(expiry, window_end)`. The ledger rebuild
-superseded it: settlement is a lifecycle event booked in the tick loop
-(slice 3), open lots at the window end stay open until the equity curve
-marks them (slice 5), and the closure, the window-end spot lookup and
-the fill-vector builder are gone with slice 2. What survives: the clock
+superseded it: settlement is a lifecycle event booked in the tick loop,
+open lots at the window end stay open until the equity curve marks them
+(slice 5), and the closure, the window-end spot lookup and the
+fill-vector builder are gone with slice 2. What survives: the clock
 selector says *when* to step, not whose price, and `load_experiment`
 asserts a declared policy underlying matches it -- one experiment, one
 underlying. `scripts/run_experiment.jl --out-dir <dir>` renders the
@@ -212,8 +216,47 @@ failed.** What the review deferred is in the backlog below.
   window is booked as an `Expiry` (`test/experiment/test_experiment.jl`)
   and the PR #9 regression "settlement uses trade underlying" settles
   its in-window leg by an `Expiry` against the lot's own underlying
-  (`test/regressions/test_review_findings.jl`). Next: slice 3, lifecycle
-  in the tick loop; then the one auditable strangle run.
+  (`test/regressions/test_review_findings.jl`).
+  **Slice 3 landed 2026-09-13**
+  ([ledger-lifecycle.md](proposals/ledger-lifecycle.md)): expiries are
+  booked in the tick loop, and the parked "Settlement rule" backlog item
+  lands with them. `settlements` (`src/backtest/settlement.jl`) is
+  `fill_legs`' twin -- a function of the cut and the book returning the
+  lots falling due in `(prev, t]` paired with the price each settles at
+  -- and the loop calls the ledger's own `record_expiry!`, one call per
+  lot, so the engine still defines nothing that mutates. The rule is a
+  symbol through a table in the `_FILL_RULES` style: under
+  `:session_close` a date is a session when the underlying printed
+  between 09:30 and 16:00 ET and its close is the last of those prints,
+  which settles the early closes with no early-close table;
+  BusinessDays.jl's `USNYSE` is consulted only to contradict the tree, so
+  a printless date the calendar calls open is
+  `UnpriceableLeg(:unexpected_gap)`, warned about once and left open
+  (design rule 7). An expiry is
+  effective at the contract's expiry and recorded at the tick that
+  booked it, which is the sole source of the two replays disagreeing at
+  an intermediate instant. The two Broken flipped. The settlement rule
+  is not in config or identity yet (that is the next slice), so this
+  round changes results under unchanged run ids; nothing on disk
+  silently disagrees, because schema 3 already refuses runs written
+  under schema 2. What the deleted backlog entry parked and this round
+  deliberately does not land: the mark for a leg still open past the
+  window end (the contract's own quote mark there, surface price as
+  fallback) belongs to the equity curve, slice 5. **Gate after slice 3:
+  3279 passed, 0 failed, 0 broken.** The ten-year strangle
+  (`configs/strangle_spy_16d_1dte.local.toml`, 2016-03-28 to 2026-03-27,
+  1-DTE SPY, one contract per leg) now closes
+  itself: 2240 orders and 4480 opening fills produce 4478 `Expiry`
+  events over 1699 expiry instants, 4478 expired round trips and no
+  warnings at all. The old backlog entry's nine misses resolve as eight
+  in-window instants -- six early closes (2017-11-24, 2018-07-03,
+  2019-07-03, 2022-11-25, 2024-12-24, 2025-07-03, each settling at its
+  13:00 ET print) and two unscheduled closures (2018-12-05, 2025-01-09,
+  each settling at the previous session's close) -- plus a ninth instant,
+  the final pair, whose 2026-03-30 expiry is *past* the window end and so
+  is never examined: those two lots stay open, as decision 8 says they
+  should.
+  Next: the settlement rule and the venue into config and identity.
 
 ## Backlog
 
@@ -229,38 +272,13 @@ intended direction, but not currently in flight.
   back in from. `data.md` is the first pass / template; the other module
   docs follow. `market_data.md` (new) follows the template from the
   start. Parked after PR #9 (2026-09-08); no slice in progress.
-- **Settlement rule (replaces "surface-based theoretical settle").**
-  A contract's `expiry` is stamped at parse time as the listed date at
-  16:00 ET; settlement reads that instant as the last price the market
-  put on the contract, which it is not. On the ten-year strangle run
-  (`5700d3f242f8132e`) 1691 of 1700 expiry instants have a spot; the
-  nine misses are calendar, not sparse data: six early-close sessions
-  (the official close was 13:00 ET), two unscheduled closures
-  (2018-12-05, 2025-01-09, where the OCC settled against the previous
-  session's close), and the final pair past the end of the data. Real
-  mechanics for SPY: exercise by exception, intrinsic against the
-  official close of the last session on or before the listed expiry
-  date. The component: a settlement rule owned by the experiment,
-  answering (1) the settlement session (last session on or before the
-  listed date), (2) its close instant and reference price (the last
-  regular-session spot print stands in for the auction), (3) the payoff
-  (intrinsic), and separately (4) the mark for a leg still open past the
-  window end (the contract's own quote mark at the window end, surface
-  price as fallback; today it is intrinsic at the window-end spot, and
-  the sample is stamped at the expiry rather than the mark's instant, so
-  the equity curve runs past `exp.to`). Sessions derived from the spot
-  tree (a date is a session if the underlying printed in regular hours;
-  its close is the last print at or before 16:00 ET) rather than a static
-  calendar, with an override hook. In core identity, so one more id
-  break. Not a surface problem at all. Parked 2026-09-08: 18 of 4480 legs
-  plus the final pair, all with a known correct answer; revisit with the
-  first policy that holds past a session close by design.
-- **Second concrete policy** -- on deck once settlement is
+- **Second concrete policy** -- unblocked now that settlement is
   honest. Candidate: a daily iron condor (same scheduled-gate /
   `invert_delta` shape, four legs instead of two). Once the duplication
   is visible, decide whether to extract a `Structure` abstraction
   (`policies.md` Future work) or keep policies as 4-leg inline
-  `decide` bodies. Parked 2026-09-08 behind the settle item.
+  `decide` bodies. Parked 2026-09-08 behind the settle item, which
+  landed with slice 3 of the ledger rebuild.
 - **Reproducibility harness for stored runs.** Opt-in, data-gated tests
   that rerun each saved run (`load_run` -> `run_experiment`) and assert its
   `metrics` / `pnl_series` still match, auto-skipping where the source data

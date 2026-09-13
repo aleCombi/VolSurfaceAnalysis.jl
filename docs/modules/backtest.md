@@ -9,7 +9,10 @@ immutable inputs (per-leg prices, fees and observations) and makes one
 call; every id, the group, the order record and the events are minted
 inside that call. The record is constructed before the event commit;
 afterward it is pushed beside the events and the counters advance. The
-engine holds no state beyond the ledger, which owns the book it folds.
+lifecycle step has the same shape: a function of the cut says which lots
+fell due and at what price, and the loop calls the ledger's own
+`record_expiry!`. The engine defines nothing that mutates, and holds no
+state beyond the ledger, which owns the book it folds.
 
 ## Data flow
 
@@ -26,30 +29,41 @@ flowchart LR
     subgraph Loop["per tick t"]
         direction LR
         Cut[TimeCut]
+        SE([settlements])
+        RE([record_expiry!])
         CP([current_policy])
         D([decide])
         FL([fill_legs])
         RO([record_order!])
+        Cut --> SE
+        Book[Book] --> SE
+        SE -->|lot, settlement price| RE
+        RE -->|Expiry| Ledger[(Ledger)]
+        RE -->|fold| Book
         Cut --> CP
         CP -->|Policy| D
         Cut --> D
-        Book[Book] --> D
+        Book --> D
         D -->|orders| FL
         Cut --> FL
         FL -->|prices, fees, observations| RO
-        RO -->|events, order record| Ledger[(Ledger)]
+        RO -->|events, order record| Ledger
         RO -->|fold| Book
     end
 
     Engine --> Loop
+    Loop --> WE([window end: settlements at exp.to])
     RO --> CJ([per-record check_join]) --> Out[Ledger]
 ```
 
 ## The tick order
 
-1. **Lifecycle** (slice 3): expiries due at or before `t` are booked so
-   the policy sees expired legs gone. The slot is named in the loop and
-   empty until then.
+1. **Lifecycle.** The lots falling due in `(prev, t]` are settled before
+   anything else, so the policy sees expired legs gone. `settlements`
+   computes what settles and at what price; the ledger's own
+   `record_expiry!` books each one, separately -- two lots expiring at
+   one instant are independent facts, and batching them would claim an
+   atomicity that does not exist.
 2. **Decide.** The cut at `t`, the current policy, and `L.book`: the
    ledger's owned fold, kept equal to `book_as_known(L, known_to)` by
    supported ledger calls for every order record the tick produces. A
@@ -64,15 +78,21 @@ flowchart LR
    order of a tick records the ledger sequence before the tick's first
    order as what it could see (`known_to`), so the second order of a tick
    does not appear to have seen the first order's fills.
+4. **Window end.** The lifecycle once more, at the evaluation endpoint
+   `to`, which may be later than the last policy tick. Lots still open
+   after it stay open; nothing is force-settled.
 
-The per-record `check_join` runs immediately after each append. The
+`known_to` is captured *after* the tick's expiries, so the sequence an
+order records as what its decision saw already includes them. The
+per-record `check_join` runs immediately after each append. The
 whole-ledger form remains the persistence write/load audit.
 
 ## The venue
 
 Shaped like Interactive Brokers, as three values: a price rule, a cost
 model and the class's tick, keywords on `run_backtest` (defaults in
-`run_experiment`) until slice 4 puts them in config and identity. The
+`run_experiment`) until slice 4 puts them in config and identity, along
+with the settlement rule. The
 rule and the model are symbols dispatched through two small tables in
 the `_METRIC_TABLE` style; `Fill.fill_rule` is literally the table key.
 
@@ -98,16 +118,71 @@ the `_METRIC_TABLE` style; `Fill.fill_rule` is literally the table key.
 
 An unknown rule or model errors naming the known ones.
 
+## Lifecycle and settlement
+
+A contract's `expiry` is the listed date at 16:00 ET. What settles it is
+the *session-close print*: the underlying's last regular-hours print of
+the settlement session. That is a stated departure from the facts -- the
+official closing auction is not in the data -- and it is the only one
+here; the payoff itself is real, intrinsic under exercise by exception.
+
+**Sessions come from the spot tree; the calendar only contradicts it.** A
+date is a session when the underlying printed between 09:30 and 16:00 ET
+on it, and its close is the last of those prints. Nothing else is
+consulted, which is why the six early-close sessions of a ten-year SPY
+run settle correctly with no early-close table: the last print in the
+window is the 13:00 one. The exchange calendar answers one question
+only, and it is a *check*: a printless date the calendar calls open is a
+data gap, named and reported, never evidence that the exchange was
+closed (design rule 7). Ad-hoc closures the calendar may lag behind have
+a cited `const` seam beside it, empty today.
+
+**The settlement instant is always the contract's expiry.** When the
+reference price comes from an earlier session -- an unscheduled closure
+-- only *which print stands in for the official close* moves; the
+obligation still ceased to exist when it expired. So `effective_at` is
+`lot.contract.expiry` and `recorded_at` is the tick that booked it, which
+is the general bitemporal case and the sole source of the two replays
+disagreeing at an intermediate instant.
+
+**A lot is examined for settlement exactly once, ever.** `settlements`
+takes the interval `(prev, t]`, not every open lot with `expiry <= t`: a
+lot that cannot be settled stays open by design, and its answer is fixed
+by the contract's expiry rather than by `t`, so a threshold would
+re-derive the same failure at every later tick. The interval is safe
+because a fill after expiry is already refused, so a lot is in the book
+by the first tick at or after its expiry. It is open below, so a
+contract expiring exactly at the window start is never examined; that
+becomes live only when a ledger is seeded with open lots.
+
+**An unsettleable lot stays open, loudly.** `settlement_price` throws
+the named failure like every other named failure here; `settlements` is
+the one boundary that catches it, warns once with the contract, its
+expiry and the reason, and returns the lot in `unsettled`. A bad day
+must not kill a ten-year run, but it must never pass silently either,
+and reporting at the boundary rather than at the call site is what makes
+that structural. `settlements` mutates no state; it is not
+side-effect-free, and the distinction is deliberate.
+
+Early assignment and physical delivery are not modelled: SPY
+cash-settles at intrinsic here instead of delivering shares. Marking a
+lot still open past the window end belongs to the equity curve, not to
+the lifecycle.
+
 ## Public surface
 
 ```julia
 run_backtest(agent::Agent,  data, from, to, clock; fill_rule = :cross_spread,
-             cost_model = :ibkr_pro_us_options, tick_cents = 1) -> Ledger
+             cost_model = :ibkr_pro_us_options,
+             settlement_rule = :session_close, tick_cents = 1) -> Ledger
 run_backtest(policy::Policy, data, from, to, clock; kw...)      -> Ledger   # StaticAgent wrapper
 
 resolve_quote(cut::TimeCut, contract::ContractKey, t) -> OptionQuote
 fill_legs(cut, order::Order, t; fill_rule, cost_model, tick_cents)
     -> (prices, fees, observations, fill_rule)                  # record_order!'s per-leg keywords
+settlement_price(rule::Symbol, cut::TimeCut, contract::ContractKey, t) -> Float64
+settlements(cut, book::Book, prev, t; settlement_rule)
+    -> (settled::Vector{Tuple{Lot,Float64}}, unsettled::Vector{UnpriceableLeg})
 check_join(L::Ledger; tick_cents = 1) -> Nothing
 check_join(L::Ledger, rec::OrderRecord; tick_cents = 1) -> Nothing
 
@@ -118,8 +193,11 @@ commission(model::Symbol, prices, quantities) -> Vector{Int}
 Ticks come from the declared clock (the timestamps of one kind for one
 selector, part of core identity) unless the agent's `tick_times`
 override returns a schedule; a candidate with no data yields `Order[]`
-in `decide`. Open lots at the window end stay open; nothing is settled
-here.
+in `decide`. Expiries inside the window are booked; lots still open
+after the window-end pass stay open, and nothing is force-settled.
+Because the settlement rule is not yet in config or identity, this
+changes results under unchanged run ids -- nothing on disk silently
+disagrees, since schema 3 already refuses runs written under schema 2.
 
 ## `check_join`: the cross-record contract
 
@@ -148,6 +226,10 @@ own `DuplicateExecution`, not repeated here.
 | A leg names a contract not in the chain at `t` (or the chain is empty) | `UnpriceableLeg(contract, t, :no_quote)`, nothing written |
 | The side the rule needs is `missing` on the quote | `UnpriceableLeg(..., :no_executable_side)` |
 | The leg's underlying is served but has no spot at `t` | `UnpriceableLeg(..., :no_spot)` |
+| A lot falls due on a date with no prints that the exchange calendar calls open | `UnpriceableLeg(..., :unexpected_gap)` from `settlement_price`; `settlements` warns once and the lot stays open |
+| The walk back for a settlement session exhausts its bound | `UnpriceableLeg(..., :no_session)`, the same way |
+| A lot is still open after the window-end pass | stays open; nothing is force-settled |
+| An unknown settlement rule | error naming the known ones |
 | Nothing serves the leg's underlying (quotes or spots) | `UnservedSelector`, from the data layer |
 | A `Close` leg with nothing to close, or for more than is open | `NothingToClose` / `ExceedsOpen` from `record_order!`; the structure does not land |
 | A leg price that is not whole cents, an unlisted underlying, a fill after expiry | the ledger's named failure; nothing lands |
@@ -170,6 +252,13 @@ before the order.
 | **Venue as two symbol tables and a tick, no type hierarchy** | Three plain values are what config and identity will carry in slice 4; `Fill.fill_rule` already stores the key. A hierarchy would name the same three things twice. |
 | **R5: fill prices on the tick, rounded away from the trader** | The ledger refuses cash that is not whole cents; synthesized and modelled quotes are not on the tick; exchanges only trade on it. Rounding against the trader keeps the rule as conservative as crossing the spread already is. The observation keeps the raw quote; the fill carries the tick price. |
 | **Observations recorded per leg, fills carry none** | Research records what pricing saw. This slice retains an observation row with optional quote sides for broker executions but ignores it during validation; truly observation-less live records arrive with the adapter. The join is validated, never assumed. |
+| **Sessions come from the spot tree; the calendar only contradicts it** | A date is a session when the underlying printed in regular hours, so an early close needs no table -- the last print in the window *is* the 13:00 one. A calendar as the source would have to carry every half-day and every ad-hoc closure correctly forever; as the check it only has to answer whether a printless date was closed, and design rule 7 makes a wrong answer loud. |
+| **The settlement instant is always the contract's expiry** | When the reference price comes from an earlier session, the departure from reality is *which print stands in for the official close*, never *when the obligation ceased to exist*. It is also the only `effective_at` the ledger's `_check_expiry` accepts. |
+| **The lifecycle computes, the ledger records** | `settlements` is a function of the cut and the book, `fill_legs`' twin; the writer is the ledger's `record_expiry!`. The engine gains no expiry queue, no cached calendar and no `try`/`catch` in the loop -- `prev` is a loop variable, not state. |
+| **Settlement as a symbol through a table, no type hierarchy** | The same shape as `_FILL_RULES` and `_COST_MODELS`, and the same reason: the value config and identity will carry is a symbol, so a struct would name one thing twice. |
+| **One `record_expiry!` per lot, never one batched `commit!`** | A structure's legs are jointly atomic, which is what `record_order!` is for; two lots expiring at one instant are independent facts. Batching would claim an atomicity that does not exist, and one unpriceable lot would reject the others. |
+| **The interval `(prev, t]`, not `expiry <= t`** | An unsettleable lot stays open and its answer is fixed by its expiry, so a threshold would re-examine it at every later tick: thousands of identical warnings and calendar walks on a ten-year run. A fill after expiry is refused, so the interval misses nothing. |
+| **The warning lives in `settlements`, not at the call site** | If reporting were the caller's job, the window-end pass could forget it, and a silent gap is exactly the failure design rule 7 exists to prevent. |
 | **`known_to` captured once per tick** | Sequence, not recorded time, bounds what a decision saw; the second order of a tick did not see the first's fills. |
 | **Engine driven by `Agent`, not `Policy`** | Refits, swaps and learning live in the agent layer; one loop serves a fixed policy and a learning agent alike. The bare-`Policy` overload is ergonomics. |
 | **No-lookahead at the type level, through derived data** | `current_policy` and `decide` take `TimeCut`; every read a derived provider makes on the policy's behalf goes through the cut. |
@@ -179,14 +268,17 @@ before the order.
 ## Responsibility boundaries
 
 **Owns:** the tick loop and its order; the venue (`fill_price`,
-`commission`, their tables, the tick); `fill_legs`, `resolve_quote`;
-`check_join`; the bare-`Policy` overload.
+`commission`, their tables, the tick); the settlement rule
+(`settlement_price`, `settlements`, the session walk and the calendar
+check); `fill_legs`, `resolve_quote`; `check_join`; the bare-`Policy`
+overload.
 
 **Does NOT own:** the time cut (a `market_data` type); policy logic
 and policy evolution; data acquisition; opening and closing the data
 (`run_experiment`); the writer, the events, the book and the cash rules
-([`ledger`](ledger.md)); lifecycle and settlement (slice 3); marks and
-the equity curve (slice 5); metrics and persistence.
+([`ledger`](ledger.md)) -- `record_expiry!` included; marks and the
+equity curve (slice 5), which is also where a lot still open past the
+window end is marked; metrics and persistence.
 
 ## Conventions consulted
 
@@ -196,19 +288,28 @@ the equity curve (slice 5); metrics and persistence.
 | Commission per contract by premium tier, with a per-order minimum | Interactive Brokers, [US options commissions](https://www.interactivebrokers.com/en/pricing/commissions-options.php), IBKR Pro fixed, monthly volume ≤ 10,000, fetched 2026-09-12: USD 0.25 below a 0.05 premium, 0.50 from 0.05 to below 0.10, 0.65 at 0.10 and above, minimum USD 1.00 per order; the page's worked examples are the test literals | `:ibkr_pro_us_options`; one `Fee` per fill |
 | Options on SPY, QQQ and IWM quote and trade in one-cent increments at every premium | MIAX, [Options Penny Program, all options exchanges](https://www.miaxglobal.com/markets/us-options/all-options-exchanges/penny-program), describing the industry-wide Penny Interval Program: penny classes trade in $0.01 below $3.00 and $0.05 at or above, but options overlying QQQ, SPY and IWM "are quoted and traded in minimum increments of $0.01 for all series regardless of the price" | `tick_cents = 1`; a non-penny tick per class is a later model |
 | An execution report carries a broker-assigned execution id, unique per report | FIX [ExecutionReport (35=8)](https://www.onixs.biz/fix-dictionary/4.4/msgtype_8_8.html), `ExecID` (tag 17) | one execution id per fill, minted by the writer here, reported by the broker live; a duplicate is refused |
-| Backend selection by symbol through a dispatch table with defaults | Optim.jl, MLJ.jl; this repo's `_METRIC_TABLE` | `_FILL_RULES`, `_COST_MODELS` |
+| Backend selection by symbol through a dispatch table with defaults | Optim.jl, MLJ.jl; this repo's `_METRIC_TABLE` | `_FILL_RULES`, `_COST_MODELS`, `_SETTLEMENT_RULES` |
+| An expiring in-the-money listed option is exercised without an instruction | OCC / The Options Industry Council, [Options exercise FAQ](https://www.optionseducation.org/referencelibrary/faq/options-exercise), checked 2026-09-13: "'Exercise by exception' is an administrative procedure used by OCC to expedite the exercise of expiring options by clearing members. In this procedure, OCC exercises options that are in-the-money by specified threshold amounts unless the clearing member submits instructions not to exercise" | an expiring lot settles at intrinsic against the settlement session's close, with no closing order; the OCC threshold itself is not modelled |
+| The exchange's closed days and its 13:00 ET early closes are calendar facts, not data | NYSE, [Holidays & Trading Hours](https://www.nyse.com/markets/hours-calendars), checked 2026-09-13: the annual holiday list, and "Each market will close early at 1:00 p.m. (1:15 p.m. for eligible options)" on the named half-days | the calendar is the *check* on a printless date, never the source of sessions; early closes need no table, since the session's last regular-hours print is the 13:00 one |
+| An exchange calendar as a library, not a hand-rolled table | [BusinessDays.jl](https://github.com/JuliaFinance/BusinessDays.jl) `USNYSE`, checked 2026-09-13 at v0.9.25: it carries the weekends, the ten annual holidays, both national days of mourning (2018-12-05, 2025-01-09) and the 2012 Hurricane Sandy closure | `isbday(USNYSE(), d)` is the whole calendar check; the ad-hoc `const` set beside it is **empty**, kept as the seam for a future closure the library will not have on the day |
 
 ## Layout
 
 ```
 src/backtest/
     execution.jl    # the venue: fill_price, commission, their tables
+    settlement.jl   # the settlement rule: settlement_price, settlements
     engine.jl       # resolve_quote, fill_legs, check_join, run_backtest
 
 test/backtest/
     test_execution.jl
+    test_settlement.jl
     test_engine.jl
 ```
+
+`settlement.jl` rather than `lifecycle.jl`: the latter would collide by
+name with `src/market_data/lifecycle.jl`, which is about opening and
+closing readers.
 
 All files are `include`d into the top-level `VolSurfaceAnalysis`
 module; no submodule wrappers.

@@ -31,6 +31,7 @@ using Dates
     include("agents/test_agent.jl")
     include("backtest/test_execution.jl")
     include("backtest/test_engine.jl")
+    include("backtest/test_settlement.jl")
     include("metrics/test_pnl_series.jl")
     include("metrics/test_ledger_series.jl")
     include("metrics/test_core.jl")

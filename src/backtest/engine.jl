@@ -10,7 +10,10 @@
 # record and the events are minted inside `record_order!`, so the engine
 # holds no state beyond the ledger and the book it folds.
 #
-# Tick order: lifecycle (slice 3), decide, fill.
+# Tick order: lifecycle, decide, fill, then lifecycle once more at the
+# evaluation endpoint. The lifecycle step has the venue's shape: a
+# function of the cut (`settlement.jl`) computes what settles and at what
+# price, and the loop calls the ledger's own `record_expiry!`.
 
 using Dates
 
@@ -26,6 +29,13 @@ from it), `:no_executable_side` (the side the fill rule needs is
 `t`). Nothing serving the selector stays `UnservedSelector`, thrown by
 `at`. Thrown before anything is written, so no partial structure reaches
 the ledger.
+
+Settling is pricing a leg too -- at intrinsic, against a reference print
+-- so [`settlement_price`](@ref) throws the same failure, for `reason`
+`:unexpected_gap` (a date with no prints that the exchange calendar
+calls open: a data gap, never evidence of a closure) or `:no_session`
+(the bounded walk back found no session). The two are the only failures
+[`settlements`](@ref) catches; a lot they name stays open.
 """
 struct UnpriceableLeg <: Exception
     contract::ContractKey
@@ -220,28 +230,40 @@ end
 """
     run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTime,
                  clock::Clock; fill_rule = :cross_spread,
-                 cost_model = :ibkr_pro_us_options, tick_cents = 1) -> Ledger
+                 cost_model = :ibkr_pro_us_options,
+                 settlement_rule = :session_close, tick_cents = 1) -> Ledger
 
 Walk the ticks of `clock` in `[from, to]` (or the agent's `tick_times`
-override when it returns one). Per tick: build the cut, ask the agent
-for the current policy, ask that policy for orders given the book, and
-for each order price every leg through the venue ([`fill_legs`](@ref))
-and book it as one transaction ([`record_order!`](@ref)), then immediately
-run the per-record [`check_join`](@ref); every order of
-a tick is recorded as having seen the ledger as it stood before the
-tick's first order (`known_to`). The book handed to `decide` is the
-engine's own fold, equal to `book_as_known(L, known_to)`; a policy must
-not mutate it. `data` is the opened reader map (see `with_data`). Returns
-the ledger after every append has passed the per-record join check; open
-lots at the window end stay open, and nothing is settled here (lifecycle
-is slice 3).
+override when it returns one). Per tick, in order: settle the lots that
+fell due since the previous tick ([`settlements`](@ref), then the
+ledger's [`record_expiry!`](@ref)), so the policy sees expired legs
+gone; build the cut, ask the agent for the current policy, ask that
+policy for orders given the book; and for each order price every leg
+through the venue ([`fill_legs`](@ref)) and book it as one transaction
+([`record_order!`](@ref)), then immediately run the per-record
+[`check_join`](@ref). Every order of a tick is recorded as having seen
+the ledger as it stood before the tick's first order (`known_to`), which
+is captured after that tick's expiries. The book handed to `decide` is
+the engine's own fold, equal to `book_as_known(L, known_to)`; a policy
+must not mutate it. `data` is the opened reader map (see `with_data`).
 
-The venue's three values are keywords here and defaults in
-`run_experiment` until slice 4 puts them in config and identity.
+After the last tick the lifecycle runs once more at `to`, the evaluation
+endpoint, which may be later than the last policy tick. An expiry is
+effective at its contract's expiry and recorded at the tick that booked
+it, so the two replays differ only by that lag. Lots still open after
+the window-end pass stay open, and nothing is force-settled; a lot with
+no honest settlement price stays open too and `settlements` warns.
+Returns the ledger after every append has passed the per-record join
+check.
+
+The venue's values and the settlement rule are keywords here and
+defaults in `run_experiment` until slice 4 puts them in config and
+identity; this round changes results under unchanged run ids.
 """
 function run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTime,
                       clock::Clock; fill_rule::Symbol = :cross_spread,
-                      cost_model::Symbol = :ibkr_pro_us_options, tick_cents::Int = 1)::Ledger
+                      cost_model::Symbol = :ibkr_pro_us_options,
+                      settlement_rule::Symbol = :session_close, tick_cents::Int = 1)::Ledger
     L = Ledger()
     # Sparse policies (once a day on minute data) override `tick_times` so
     # the engine never enumerates the clock's grid; keep the `if`.
@@ -249,17 +271,33 @@ function run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTi
     if ticks === nothing
         ticks = timestamps(data, clock, from, to)
     end
+    prev = from                                    # lower bound of the lifecycle interval
     for t in ticks
-        # lifecycle: slice 3
-        cut    = TimeCut(data, t)
+        cut = TimeCut(data, t)
+        # 1. Lifecycle, before the decision: a policy sees expired legs gone.
+        #    `settlements` warns about what it could not price; a lot falling
+        #    due in (prev, t] is examined exactly once, ever.
+        foreach(settlements(cut, L.book, prev, t; settlement_rule).settled) do (lot, p)
+            record_expiry!(L, lot; settlement_price = p,
+                           effective_at = lot.contract.expiry, recorded_at = t)
+        end
+        prev = t
+        # 2. Decide on the book the ledger owns.
         policy = current_policy(agent, t, cut, L.book)
         orders = decide(policy, t, cut, L.book)
         known_to = last_sequence(L)                # what every order of this tick saw
+        # 3. Fill: every leg priced before anything is written.
         for order in orders
             rec = record_order!(L, order; fill_legs(cut, order, t; fill_rule, cost_model, tick_cents)...,
                                 effective_at = t, recorded_at = t, known_to)
             check_join(L, rec; tick_cents)
         end
+    end
+    # 4. Window end: lifecycle once more at the evaluation endpoint, which
+    #    may be later than the last policy tick. Lots still open stay open.
+    foreach(settlements(TimeCut(data, to), L.book, prev, to; settlement_rule).settled) do (lot, p)
+        record_expiry!(L, lot; settlement_price = p,
+                       effective_at = lot.contract.expiry, recorded_at = to)
     end
     return L
 end

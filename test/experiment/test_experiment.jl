@@ -111,10 +111,8 @@ end
     @test isnan(res.pnl_series.window_end_spot)          # a placeholder until slice 5
 end
 
-@testset "run_experiment: an expiry inside the window is booked (slice 3)" begin
+@testset "run_experiment: an expiry inside the window is booked" begin
     # A map with a real spot at the leg's expiry, which is the window end.
-    # Flip @test_broken to @test when slice 3 books lifecycle in the tick
-    # loop; until then the lot stays open and no Expiry exists.
     ts1 = DateTime(2024, 1, 15, 15, 30)
     ts2 = DateTime(2024, 1, 15, 15, 31)
     ts3 = DateTime(2024, 1, 15, 15, 32)
@@ -131,7 +129,7 @@ end
     res = run_experiment(exp)
     @test length(res.ledger.orders) == 1
     @test count(e -> e isa Fill, res.ledger.events) == 1
-    @test_broken any(e isa Expiry for e in res.ledger.events)
+    @test any(e isa Expiry for e in res.ledger.events)
 end
 
 @testset "run_experiment: a QQQ leg under a SPY clock fills against QQQ" begin

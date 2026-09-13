@@ -29,7 +29,7 @@ end
 # The finding: every residual lot was settled from the clock's SPY spot, so a
 # QQQ leg under a SPY clock filled against QQQ and settled against SPY. The
 # engine now prices each leg against its own underlying and records what it
-# saw; settlement moves into the ledger's lifecycle in slice 3.
+# saw, and settlement is a lifecycle event booked in the tick loop.
 @testset "settlement uses trade underlying" begin
     t1 = DateTime(2024, 1, 15, 15, 30)
     expiry = DateTime(2024, 1, 15, 15, 31)       # inside the window (= the window end)
@@ -73,19 +73,20 @@ end
     @test all(only(r.observations).spot_at == t1 for r in L.orders)
     @test all(only(r.observations).bid == 0.90 && only(r.observations).ask == 1.00 for r in L.orders)
 
-    # Slice 3 books lifecycle in the tick loop: the in-window leg is settled by
-    # an Expiry against QQQ's own spot at its expiry (120, not SPY's 90), a
-    # round trip of (20.00 - 1.00) * 100 * 100 - 100 = 189900 cents, the 100
-    # being the commission on its opening fill (a lone contract raised to the
-    # USD 1.00 minimum). Flip to @test when slice 3 lands.
-    @test_broken any(e isa Expiry && e.settlement_price == 120.0 && e.contract == inside for e in L.events) &&
-                 [r.pnl for r in round_trips(L)] == [189900]
+    # Lifecycle in the tick loop settles the in-window leg by an Expiry against
+    # QQQ's own spot at its expiry (120, not SPY's 90), a round trip of
+    # (20.00 - 1.00) * 100 * 100 - 100 = 189900 cents, the 100 being the
+    # commission on its opening fill (a lone contract raised to the USD 1.00
+    # minimum).
+    @test any(e isa Expiry && e.settlement_price == 120.0 && e.contract == inside for e in L.events) &&
+          [r.pnl for r in round_trips(L)] == [189900]
 
     # The finding's second assertion, a window-end mark of the past-the-window
     # leg as a PnL sample of 9.00, is dropped: under proposal decision 8 an open
     # lot at the window end is marked at the evaluation endpoint by the equity
-    # curve (slice 5), never force-settled into the realized series.
-    @test length(open_lots(book_effective(L, exp.to))) == 2
+    # curve (slice 5), never force-settled into the realized series. The
+    # in-window leg settles now, so the past-the-window lot is what is left.
+    @test [l.contract for l in open_lots(book_effective(L, exp.to))] == [past]
 end
 
 # src/experiment/config.jl:212 checks only input kinds, not Constant selectors;
