@@ -15,9 +15,10 @@
 #   match against the chain (and `slice.strikes` is a subset of chain
 #   strikes by construction in `build_surface`).
 # - If either leg's `invert_delta` returns `nothing` (target outside the
-#   observed-delta bracket on that wing), we return `Trade[]` rather than
+#   observed-delta bracket on that wing), we return `Order[]` rather than
 #   trading the other wing alone -- a one-legged strangle is a different
-#   structure.
+#   structure. The two legs go out as one `Order`, so the venue fills
+#   them whole or not at all.
 
 using Dates
 
@@ -36,7 +37,7 @@ The two legs are picked by target absolute delta (`put_delta`,
 - `expiry_interval::Period`    -- minimum DTE from entry (e.g. `Day(1)`)
 - `put_delta::Float64`         -- target `|Δ|` for the short put leg, in `(0, 1)`
 - `call_delta::Float64`        -- target `|Δ|` for the short call leg, in `(0, 1)`
-- `quantity::Float64`          -- contracts per leg, `> 0`
+- `quantity::Int`              -- contracts per leg, a positive integer
 """
 struct DailyShortStrangle <: Policy
     underlying      :: Underlying
@@ -44,30 +45,30 @@ struct DailyShortStrangle <: Policy
     expiry_interval :: Period
     put_delta       :: Float64
     call_delta      :: Float64
-    quantity        :: Float64
+    quantity        :: Int
 
     function DailyShortStrangle(underlying::Underlying, entry_time::Time,
                                 expiry_interval::Period,
-                                put_delta::Real, call_delta::Real, quantity::Real)
-        pd = Float64(put_delta);  cd = Float64(call_delta);  q = Float64(quantity)
+                                put_delta::Real, call_delta::Real, quantity::Integer)
+        pd = Float64(put_delta);  cd = Float64(call_delta)
         0.0 < pd < 1.0 || throw(ArgumentError("put_delta must be in (0, 1), got $put_delta"))
         0.0 < cd < 1.0 || throw(ArgumentError("call_delta must be in (0, 1), got $call_delta"))
-        q > 0.0        || throw(ArgumentError("quantity must be positive, got $quantity"))
+        quantity > 0   || throw(ArgumentError("quantity must be positive, got $quantity"))
         expiry_interval > Day(0) ||
             throw(ArgumentError("expiry_interval must be positive, got $expiry_interval"))
-        new(underlying, entry_time, expiry_interval, pd, cd, q)
+        new(underlying, entry_time, expiry_interval, pd, cd, Int(quantity))
     end
 end
 
 """
     DailyShortStrangle(; underlying, entry_time, expiry_interval,
-                       put_delta, call_delta, quantity=1.0)
+                       put_delta, call_delta, quantity=1)
 
 Keyword-argument constructor. `quantity` defaults to one contract per leg.
 """
 DailyShortStrangle(; underlying::Underlying, entry_time::Time,
                    expiry_interval::Period,
-                   put_delta::Real, call_delta::Real, quantity::Real=1.0) =
+                   put_delta::Real, call_delta::Real, quantity::Integer=1) =
     DailyShortStrangle(underlying, entry_time, expiry_interval,
                        put_delta, call_delta, quantity)
 
@@ -117,7 +118,7 @@ end
 
 Emit one candidate timestamp per calendar day in `[from, to]`, at the
 policy's `entry_time`. Candidates that fall outside the data's chain
-coverage produce `Trade[]` inside `decide` (no surface at that
+coverage produce `Order[]` inside `decide` (no surface at that
 instant), so non-trading days (weekends / holidays) are tolerated
 without consulting the data's timestamps first.
 """
@@ -136,29 +137,39 @@ function tick_times(p::DailyShortStrangle, ::MarketData,
     out
 end
 
+"""
+    decide(p::DailyShortStrangle, t, data::TimeCut, book::Book) -> Vector{Order}
+
+One `Order(:daily_short_strangle, [short put, short call])` with `Open`
+legs of `p.quantity` contracts each at the entry tick, or `Order[]` when
+the gate does not fire, no surface or chain is visible, no expiry lies
+on or after `t + expiry_interval`, or either wing cannot be placed. The
+book is read for nothing: this policy only opens, and lifecycle closes
+its lots (slice 3).
+"""
 function decide(p::DailyShortStrangle, t::DateTime,
                 data::TimeCut,
-                ::AbstractVector{Position})::Vector{Trade}
-    Time(t) == p.entry_time || return Trade[]                     # cheap gate
+                ::Book)::Vector{Order}
+    Time(t) == p.entry_time || return Order[]                     # cheap gate
     surface = only_or_missing(at(data, VolatilitySurface, p.underlying, t))
-    ismissing(surface) && return Trade[]
+    ismissing(surface) && return Order[]
     expiry = _first_expiry_on_or_after(surface, t + p.expiry_interval)
-    expiry === nothing && return Trade[]
+    expiry === nothing && return Order[]
     chain = at(data, OptionQuote, p.underlying, t)
-    isempty(chain) && return Trade[]
+    isempty(chain) && return Order[]
 
     K_put_raw  = invert_delta(surface, expiry, Put,  p.put_delta)
     K_call_raw = invert_delta(surface, expiry, Call, p.call_delta)
-    (K_put_raw === nothing || K_call_raw === nothing) && return Trade[]
+    (K_put_raw === nothing || K_call_raw === nothing) && return Order[]
 
     put_strikes  = _quoted_strikes(chain, expiry, p.underlying, Put)
     call_strikes = _quoted_strikes(chain, expiry, p.underlying, Call)
     K_put  = _snap_to_sorted(put_strikes,  K_put_raw)
     K_call = _snap_to_sorted(call_strikes, K_call_raw)
-    (K_put === nothing || K_call === nothing) && return Trade[]
+    (K_put === nothing || K_call === nothing) && return Order[]
 
-    return Trade[
-        Trade(p.underlying, K_put,  expiry, Put;  direction=-1, quantity=p.quantity),
-        Trade(p.underlying, K_call, expiry, Call; direction=-1, quantity=p.quantity),
-    ]
+    return Order[Order(:daily_short_strangle, [
+        Leg(ContractKey(p.underlying, K_put,  expiry, Put),  Short, p.quantity, Open),
+        Leg(ContractKey(p.underlying, K_call, expiry, Call), Short, p.quantity, Open),
+    ])]
 end

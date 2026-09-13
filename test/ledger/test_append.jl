@@ -725,6 +725,7 @@ end
     @test length(lots(book, 1)) == 2
     @test book == book_as_known(L, 4) == book_effective(L, _LG_FAR)
     @test last_sequence(L) == 4
+    @test check_join(L) === nothing
     _lg_check_book(book)
 end
 
@@ -755,6 +756,7 @@ end
     @test s.timestamps == [_LG_T_CLOSE]
     @test s.n_opens == 2 && s.n_closes == 2
     @test book == book_as_known(L, 10) == book_effective(L, _LG_FAR)
+    @test check_join(L) === nothing
     @test L.next_group == 2                      # a named group mints nothing
     @test (L.next_order_id, L.next_leg_id) == (3, 5)
 end
@@ -773,6 +775,7 @@ end
     @test open_lots(book) == [Lot(1, _LG_PUT470, Short, 1, 1, 0.85)]
     @test book.cash == 13000                     # 17000 - 4000
     @test rec.group == 1 && length(rec.observations) == 2
+    @test check_join(L) === nothing
     @test [r.pnl for r in round_trips(L)] == [4500]
 end
 
@@ -884,6 +887,7 @@ end
     @test open_groups(book) == [1]
     @test L.next_group == 2
     @test book.cash == 19370 + 15000
+    @test check_join(L) === nothing
 end
 
 @testset "record_order!: known_to defaults to the last sequence at the call" begin
@@ -898,4 +902,5 @@ end
     rec2 = record_order!(L, order; known_to=4, kw...)
     @test rec2.known_to == 4 && rec2.order_id == 3
     @test book_as_known(L, rec2.known_to) != book
+    @test check_join(L) === nothing
 end

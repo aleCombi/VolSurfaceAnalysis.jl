@@ -91,8 +91,9 @@ always visible in the experiment record.
 
 Missing-data policy: if `high`, `low`, or `close` is `missing`, the
 synthesized `bid` and `ask` are `missing` (and `mark = close` if present).
-Downstream `open_position` will then throw on the missing fill side -- a
-silent zero-spread fallback would invent a market that did not trade.
+Downstream the venue then refuses to price a leg whose executable side is
+missing (`UnpriceableLeg`) -- a silent zero-spread fallback would invent a
+market that did not trade.
 
 Throws `ArgumentError` when `λ` is outside `[0, 1]`.
 """

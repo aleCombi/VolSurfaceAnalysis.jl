@@ -54,9 +54,8 @@ mktempdir() do root
             c = first(filter(q -> q.option_type == Call, quotes))
             @test c.bid ≈ 1.02 && c.ask ≈ 1.065 && c.mark == 1.05 && c.volume == 12.0
             @test ismissing(c.iv) && ismissing(c.open_interest)
-            trd = Trade(c.underlying, c.strike, c.expiry, c.option_type; direction=+1, quantity=1.0)
-            pos = open_position(trd, c, 480.0)
-            @test pos.entry_price == c.ask
+            @test fill_price(:cross_spread, c.bid, c.ask, Long,  1) == 1.07   # the ask 1.065 rounded up to the tick
+            @test fill_price(:cross_spread, c.bid, c.ask, Short, 1) == 1.02   # the bid, already on the tick
         end
     end
 

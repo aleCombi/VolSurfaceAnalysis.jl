@@ -27,14 +27,14 @@ end
 
 @testset "declared_underlyings: what a policy fixes in its own configuration" begin
     @test declared_underlyings(NoOpPolicy()) == ()
-    p = DailyShortStrangle(_PL_UND, Time(15, 45), Day(1), 0.20, 0.20, 1.0)
+    p = DailyShortStrangle(_PL_UND, Time(15, 45), Day(1), 0.20, 0.20, 1)
     @test declared_underlyings(p) == (_PL_UND,)
 end
 
 @testset "NoOpPolicy: decide returns empty" begin
     f = _pl_fixture()
     cut = TimeCut(f.d, f.ts1)
-    @test decide(NoOpPolicy(), f.ts1, cut, Position[]) == Trade[]
+    @test decide(NoOpPolicy(), f.ts1, cut, Book()) == Order[]
 end
 
 # A custom Policy without a decide method must fall through to the
@@ -44,7 +44,7 @@ struct _UnimplementedPolicy <: Policy end
 @testset "Policy: missing decide method errors" begin
     f = _pl_fixture()
     cut = TimeCut(f.d, f.ts1)
-    @test_throws ErrorException decide(_UnimplementedPolicy(), f.ts1, cut, Position[])
+    @test_throws ErrorException decide(_UnimplementedPolicy(), f.ts1, cut, Book())
 end
 
 # ---- DailyShortStrangle ----------------------------------------------------
@@ -80,20 +80,27 @@ _pl_surface(f) = only_or_missing(at(f.d, VolatilitySurface, _PL_UND, f.ts))
 @testset "DailyShortStrangle: constructor validation" begin
     und = _PL_UND
     @test_throws ArgumentError DailyShortStrangle(und, Time(15, 45), Day(1),
-                                                  0.0,  0.20, 1.0)
+                                                  0.0,  0.20, 1)
     @test_throws ArgumentError DailyShortStrangle(und, Time(15, 45), Day(1),
-                                                  1.0,  0.20, 1.0)
+                                                  1.0,  0.20, 1)
     @test_throws ArgumentError DailyShortStrangle(und, Time(15, 45), Day(1),
-                                                  0.20, 1.5,  1.0)
+                                                  0.20, 1.5,  1)
     @test_throws ArgumentError DailyShortStrangle(und, Time(15, 45), Day(1),
-                                                  0.20, 0.20, 0.0)
+                                                  0.20, 0.20, 0)
+    @test_throws ArgumentError DailyShortStrangle(und, Time(15, 45), Day(1),
+                                                  0.20, 0.20, -2)
     @test_throws ArgumentError DailyShortStrangle(und, Time(15, 45), Day(0),
-                                                  0.20, 0.20, 1.0)
+                                                  0.20, 0.20, 1)
+    # quantity is a whole number of contracts: the constructor takes an Integer
+    @test_throws MethodError DailyShortStrangle(und, Time(15, 45), Day(1), 0.20, 0.20, 1.5)
+    @test_throws MethodError DailyShortStrangle(und, Time(15, 45), Day(1), 0.20, 0.20, 1.0)
     # Happy path with kwargs.
     p = DailyShortStrangle(; underlying=und, entry_time=Time(15, 45),
                            expiry_interval=Day(1),
                            put_delta=0.20, call_delta=0.20)
-    @test p.quantity == 1.0
+    @test p.quantity == 1
+    @test p.quantity isa Int
+    @test DailyShortStrangle(und, Time(15, 45), Day(1), 0.20, 0.20, Int8(3)).quantity === 3
 end
 
 @testset "DailyShortStrangle: _first_expiry_on_or_after / _snap_to_sorted / _quoted_strikes" begin
@@ -130,29 +137,38 @@ end
                            put_delta=0.20, call_delta=0.20)
     off_ts = DateTime(2024, 6, 3, 15, 46)   # one minute off
     cut = TimeCut(f.d, off_ts)
-    @test decide(p, off_ts, cut, Position[]) == Trade[]
+    @test decide(p, off_ts, cut, Book()) == Order[]
 end
 
-@testset "DailyShortStrangle: happy path opens two short legs at the right expiry" begin
+@testset "DailyShortStrangle: happy path emits one order with two short Open legs" begin
     f = _strangle_fixture()
     p = DailyShortStrangle(; underlying=_PL_UND,
                            entry_time=Time(15, 45),
                            expiry_interval=Day(1),
                            put_delta=0.20, call_delta=0.20)
     cut = TimeCut(f.d, f.ts)
-    trades = decide(p, f.ts, cut, Position[])
-    @test length(trades) == 2
+    orders = decide(p, f.ts, cut, Book())
+    @test orders isa Vector{Order}
+    @test length(orders) == 1
+    order = only(orders)
+    @test order.label == :daily_short_strangle
+    @test order.group === nothing                   # an opening order: the ledger mints the group
+    @test order.operation === nothing
+    legs = order.legs
+    @test length(legs) == 2
 
-    # Both legs short, same expiry == first slice after t + 1d.
-    @test all(tr.direction == -1 for tr in trades)
-    @test all(tr.quantity == 1.0  for tr in trades)
-    @test all(tr.expiry == f.e1 for tr in trades)
+    # Both legs short opens of one contract, same expiry == first slice after t + 1d.
+    @test all(leg.side == Short for leg in legs)
+    @test all(leg.intent == Open for leg in legs)
+    @test all(leg.quantity == 1 && leg.quantity isa Int for leg in legs)
+    @test all(leg.contract.expiry == f.e1 for leg in legs)
+    @test all(leg.contract.underlying == _PL_UND for leg in legs)
 
     # One Put, one Call. Put strike < spot < Call strike.
-    types = [tr.option_type for tr in trades]
+    types = [leg.contract.option_type for leg in legs]
     @test Call in types && Put in types
-    put_K  = trades[findfirst(tr -> tr.option_type == Put,  trades)].strike
-    call_K = trades[findfirst(tr -> tr.option_type == Call, trades)].strike
+    put_K  = legs[findfirst(leg -> leg.contract.option_type == Put,  legs)].contract.strike
+    call_K = legs[findfirst(leg -> leg.contract.option_type == Call, legs)].contract.strike
     @test put_K  < f.spot < call_K
 
     # Snap invariant: both strikes exist in the observed slice so
@@ -167,12 +183,19 @@ end
     @test abs(delta(surf, f.e1, call_K, Call)) ≈ 0.20 atol = 0.05
 
     # The same decision through the engine's fill path resolves both legs.
-    for tr in trades
-        @test resolve_quote(cut, tr, f.ts).strike == tr.strike
+    for leg in legs
+        @test resolve_quote(cut, leg.contract, f.ts).strike == leg.contract.strike
     end
+
+    # quantity is per leg
+    p2 = DailyShortStrangle(; underlying=_PL_UND, entry_time=Time(15, 45),
+                            expiry_interval=Day(1), put_delta=0.20, call_delta=0.20, quantity=2)
+    legs2 = only(decide(p2, f.ts, cut, Book())).legs
+    @test all(leg.quantity == 2 for leg in legs2)
+    @test [leg.contract for leg in legs2] == [leg.contract for leg in legs]
 end
 
-@testset "DailyShortStrangle: one-wing failure returns Trade[]" begin
+@testset "DailyShortStrangle: one-wing failure returns Order[]" begin
     f = _strangle_fixture()
     # 0.99999 |Δ| exceeds even the deepest-ITM put's |Δ| on the slice
     # (~0.99996 at K=520, T~1d, σ=20%) -> put invert returns nothing,
@@ -182,7 +205,7 @@ end
                            expiry_interval=Day(1),
                            put_delta=0.99999, call_delta=0.20)
     cut = TimeCut(f.d, f.ts)
-    @test decide(p, f.ts, cut, Position[]) == Trade[]
+    @test decide(p, f.ts, cut, Book()) == Order[]
 end
 
 @testset "DailyShortStrangle: tick_times emits one entry per calendar day" begin
@@ -218,7 +241,7 @@ end
           tick_times(p,  f.d, from, to)
 end
 
-@testset "DailyShortStrangle: no surface available -> Trade[]" begin
+@testset "DailyShortStrangle: no surface available -> Order[]" begin
     f = _strangle_fixture()
     later_ts = DateTime(2024, 6, 4, 15, 45)   # no chain at this ts in fixture
     p = DailyShortStrangle(; underlying=_PL_UND,
@@ -226,7 +249,7 @@ end
                            expiry_interval=Day(1),
                            put_delta=0.20, call_delta=0.20)
     cut = TimeCut(f.d, later_ts)
-    @test decide(p, later_ts, cut, Position[]) == Trade[]
+    @test decide(p, later_ts, cut, Book()) == Order[]
 end
 
 @testset "DailyShortStrangle: the cut hides the entry tick itself from an earlier cutoff" begin
@@ -234,5 +257,5 @@ end
     p = DailyShortStrangle(; underlying=_PL_UND, entry_time=Time(15, 45),
                            expiry_interval=Day(1), put_delta=0.20, call_delta=0.20)
     early_cut = TimeCut(f.d, f.ts - Minute(1))
-    @test decide(p, f.ts, early_cut, Position[]) == Trade[]     # surface at ts is invisible
+    @test decide(p, f.ts, early_cut, Book()) == Order[]     # surface at ts is invisible
 end

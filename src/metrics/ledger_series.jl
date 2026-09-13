@@ -13,8 +13,8 @@ multi-leg structure closed at one instant is one sample; with
 cents; `pnl` is converted to the USD `PnLSeries` carries at this one
 point, after summing. Timestamps are `closed_at`; `n_opens` and
 `n_closes` count `Open` and `Close` fills. Samples are ordered by
-`(timestamp, pnl)` exactly as `pnl_series(positions)` orders them, so
-path metrics read the same canonical order.
+the series' canonical `(timestamp, pnl)` rule, losses first within an
+instant, so path metrics read a deterministic order.
 
 `window_end_spot` is `NaN` and `n_unmarked` is `0`: the ledger neither
 force-settles nor skips an open lot (open lots stay open and are marked

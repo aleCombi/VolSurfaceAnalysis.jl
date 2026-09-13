@@ -13,7 +13,7 @@ end
 
 @testset "declared_underlyings: StaticAgent delegates to its policy" begin
     @test declared_underlyings(StaticAgent(NoOpPolicy())) == ()
-    p = DailyShortStrangle(_AG_UND, Time(15, 45), Day(1), 0.20, 0.20, 1.0)
+    p = DailyShortStrangle(_AG_UND, Time(15, 45), Day(1), 0.20, 0.20, 1)
     @test declared_underlyings(StaticAgent(p)) == (_AG_UND,)
 end
 
@@ -22,7 +22,7 @@ end
     cut = TimeCut(f.data, f.ts1)
     p = NoOpPolicy()
     a = StaticAgent(p)
-    @test current_policy(a, f.ts1, cut, Position[]) === p
+    @test current_policy(a, f.ts1, cut, Book()) === p
 end
 
 # A custom Agent without a current_policy method must fall through to the
@@ -32,5 +32,5 @@ struct _UnimplementedAgent <: Agent end
 @testset "Agent: missing current_policy method errors" begin
     f = _ag_fixture()
     cut = TimeCut(f.data, f.ts1)
-    @test_throws ErrorException current_policy(_UnimplementedAgent(), f.ts1, cut, Position[])
+    @test_throws ErrorException current_policy(_UnimplementedAgent(), f.ts1, cut, Book())
 end

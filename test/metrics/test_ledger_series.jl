@@ -28,7 +28,7 @@ end
     @test equity_curve(s) ≈ [50.0, 140.0]
 end
 
-@testset "pnl_series(ledger): ordering matches pnl_series(positions)" begin
+@testset "pnl_series(ledger): canonical (timestamp, pnl) order" begin
     # two groups closed at different instants, the earlier one a loss
     L = Ledger()
     g1 = mint_group!(L)
