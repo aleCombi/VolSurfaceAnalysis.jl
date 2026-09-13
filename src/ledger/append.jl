@@ -1,6 +1,9 @@
 # The writers the engine calls. Each builds its events, validates the
 # whole batch against the ledger and the book, appends it as one unit and
 # applies it to the book. Nothing is appended if any check fails.
+# `record_order!` is the structure-level writer: every leg of an order is
+# planned first, then committed in one batch, and the order record lands
+# only after the commit, so a structure is booked whole or not at all.
 #
 # Names avoid `Base.fill!` and `Base.append!`.
 
@@ -142,6 +145,19 @@ struct NonIntegralCash <: Exception
     value::Float64
 end
 
+"""
+    DuplicateExecution
+
+A `Fill` whose `execution_id` is already held by a fill in the ledger or
+earlier in the same batch. An execution report is one fact; the same
+report booked twice would double its cash. Checked in `commit!`.
+"""
+struct DuplicateExecution <: Exception
+    id::Int
+end
+
+Base.showerror(io::IO, e::DuplicateExecution) =
+    print(io, "DuplicateExecution: execution id ", e.id, " is already held by a fill")
 Base.showerror(io::IO, e::NothingToClose) =
     print(io, "NothingToClose: group ", e.group, " holds nothing to close on ", e.contract)
 Base.showerror(io::IO, e::ExceedsOpen) =
@@ -205,23 +221,140 @@ function record_fill!(L::Ledger, book::Book, leg::Leg, group::Int;
                 L.next_execution, leg.contract, leg.side, leg.intent, leg.quantity,
                 price, fill_rule)
     batch = LedgerEvent[fill]
-    if leg.intent == Close
-        candidates = Lot[l for l in _lots_at(book, group, leg.contract) if l.side != leg.side]
-        isempty(candidates) && throw(NothingToClose(group, leg.contract))
-        available = sum(l.remaining for l in candidates)
-        available >= leg.quantity ||
-            throw(ExceedsOpen(group, leg.contract, leg.quantity, available))
-        left = leg.quantity
-        for lot in candidates
-            left == 0 && break
-            q = min(left, lot.remaining)
-            push!(batch, Match(_header(L, length(batch), effective_at, recorded_at),
-                               group, lot.open_fill_id, event_id(fill), q))
-            left -= q
-        end
-    end
+    leg.intent == Close && _plan_close!(batch, L, book, Fill[], Dict{Int,Int}(), fill)
     commit!(L, book, batch)
     return batch
+end
+
+# The lots a close of `c` may still consume, summed: the book's lots for
+# its (group, contract) on the opposite side and the fills this batch
+# opened there, each less what the batch already consumed. The same
+# arithmetic `_available` applies per lot.
+function _closable(book::Book, opened::Vector{Fill}, consumed::Dict{Int,Int}, c::Fill)::Int
+    total = 0
+    for l in _lots_at(book, c.group, c.contract)
+        l.side != c.side || continue
+        total += l.remaining - get(consumed, l.open_fill_id, 0)
+    end
+    for f in opened
+        (f.group == c.group && f.contract == c.contract && f.side != c.side) || continue
+        total += f.quantity - get(consumed, event_id(f), 0)
+    end
+    return total
+end
+
+# The opening fill `oid`: from the fills this batch opened, else the ledger.
+function _opening(L::Ledger, opened::Vector{Fill}, oid::Int)::Fill
+    i = findfirst(f -> event_id(f) == oid, opened)
+    return i === nothing ? event(L, oid)::Fill : opened[i]
+end
+
+# Plan the matches of the closing fill `c` onto `batch`, FIFO within its
+# (group, contract) among the lots of the opposite side, using the
+# validator's own view of what is eligible (`_first_eligible`) and what is
+# left (`_available`) after the batch so far: `opened` are the fills this
+# batch opened, `consumed` what it consumed per opening fill, and both are
+# advanced here so a later leg plans against the book as it will be.
+# `NothingToClose` when no lot is eligible, `ExceedsOpen` when the eligible
+# lots hold less than the close. Builds values only; nothing is written.
+function _plan_close!(batch::Vector{LedgerEvent}, L::Ledger, book::Book,
+                      opened::Vector{Fill}, consumed::Dict{Int,Int}, c::Fill)::Nothing
+    _first_eligible(book, opened, consumed, c) === nothing &&
+        throw(NothingToClose(c.group, c.contract))
+    available = _closable(book, opened, consumed, c)
+    available >= c.quantity || throw(ExceedsOpen(c.group, c.contract, c.quantity, available))
+    left = c.quantity
+    while left > 0
+        oid = _first_eligible(book, opened, consumed, c)
+        o = _opening(L, opened, oid)
+        q = min(left, _available(book, opened, consumed, o))
+        push!(batch, Match(_header(L, length(batch), effective_at(c), recorded_at(c)),
+                           c.group, oid, event_id(c), q))
+        consumed[oid] = get(consumed, oid, 0) + q
+        left -= q
+    end
+    return nothing
+end
+
+"""
+    record_order!(L, book, order::Order;
+                  prices, observations, fees = zeros(Int, n),
+                  effective_at, recorded_at, known_to = last_sequence(L),
+                  fill_rule) -> OrderRecord
+
+The structure-level writer, the one the engine calls: book every leg of
+`order` as one transaction, whole or not at all, and record the order
+beside its events. Per leg, in leg order: `prices[k]` per share,
+`observations[k]` (what the leg was priced against), `fees[k]` in whole
+cents (a cost negative; a zero books no `Fee`). `known_to` is the ledger
+sequence the decision saw; the default is right for one order per tick,
+and the engine passes the value it captured before the tick's orders.
+
+In order: the shape is checked (at least one leg, every per-leg vector
+as long as the legs; `ArgumentError` otherwise); the group is
+`L.next_group` when `order.group === nothing`, else the named group,
+which must already be minted ([`DanglingReference`](@ref) `:group`
+otherwise); leg `k` gets order leg id `first_leg_id + k - 1` and
+execution id `L.next_execution + k - 1`; each leg's `Fill` is planned
+with, for a `Close` leg, its `Match`es against the book as it will be
+after the earlier legs, so a leg may close a lot the same order opened
+([`NothingToClose`](@ref), [`ExceedsOpen`](@ref)); one `Fee` per leg
+whose amount is non-zero follows the fills and matches; the
+[`OrderRecord`](@ref), including its observation vector, is then built;
+then one [`commit!`](@ref). After the commit only the record is pushed
+and `next_order_id`, `next_leg_id` and, when minted, `next_group` are
+advanced. On any validation failure the ledger, its
+counters, its orders and the book are unchanged. `decided_at` on the
+record is `recorded_at`, the tick that booked the order.
+"""
+function record_order!(L::Ledger, book::Book, order::Order;
+                       prices::AbstractVector{<:Real},
+                       observations::AbstractVector{LegObservation},
+                       fees::AbstractVector{<:Integer} = zeros(Int, length(order.legs)),
+                       effective_at::DateTime, recorded_at::DateTime,
+                       known_to::Int = last_sequence(L),
+                       fill_rule::Symbol)::OrderRecord
+    n = length(order.legs)
+    n >= 1 || throw(ArgumentError("record_order!: an order needs at least one leg"))
+    for (name, v) in (("prices", prices), ("observations", observations), ("fees", fees))
+        length(v) == n || throw(ArgumentError(
+            "record_order!: $(length(v)) $name for $n legs; one per leg is required"))
+    end
+    minted = order.group === nothing
+    g = minted ? L.next_group : order.group
+    (minted || 1 <= g < L.next_group) || throw(DanglingReference(:group, g))
+    order_id, first_leg_id = L.next_order_id, L.next_leg_id
+    batch    = LedgerEvent[]
+    fills    = Fill[]
+    opened   = Fill[]
+    consumed = Dict{Int,Int}()
+    for (k, leg) in enumerate(order.legs)
+        fill = Fill(_header(L, length(batch), effective_at, recorded_at), g,
+                    first_leg_id + k - 1, L.next_execution + k - 1, leg.contract,
+                    leg.side, leg.intent, leg.quantity, prices[k], fill_rule)
+        push!(batch, fill)
+        push!(fills, fill)
+        if leg.intent == Open
+            push!(opened, fill)
+        else
+            _plan_close!(batch, L, book, opened, consumed, fill)
+        end
+    end
+    for (k, amount) in enumerate(fees)
+        amount == 0 && continue
+        push!(batch, Fee(_header(L, length(batch), effective_at, recorded_at),
+                         event_id(fills[k]), Int(amount)))
+    end
+    record = OrderRecord(order_id, first_leg_id, g, recorded_at, known_to, order,
+                         collect(LegObservation, observations))
+    commit!(L, book, batch)
+    # All validation and record construction precede the commit. Beyond the
+    # vector growth here, only counter increments remain.
+    push!(L.orders, record)
+    L.next_order_id += 1
+    L.next_leg_id += n
+    minted && (L.next_group += 1)
+    return record
 end
 
 # The outcome an expiry carries: `Worthless` when intrinsic is zero,
@@ -278,6 +411,9 @@ replays fold the same numbers. The checks, each with its named failure:
   unlisted underlying is [`UnknownContract`](@ref));
 - a fill is effective at or before its contract's expiry ([`FillAfterExpiry`](@ref),
   already refused by the `Fill` constructor);
+- a fill's execution id is held by no fill in the ledger or earlier in
+  the batch ([`DuplicateExecution`](@ref)); the counter still moves to
+  one past the largest id seen;
 - every reference points to an earlier event of the right kind ([`DanglingReference`](@ref));
 - every reference points backward in effective time: a match's opening
   fill is effective at or before its closing fill and the match at the
@@ -405,6 +541,16 @@ function _check_expiry(L::Ledger, book::Book, seen, opened, consumed, e::Expiry)
     return nothing
 end
 
+# Whether execution id `id` is already held: by a fill earlier in this
+# batch, or by a fill in the ledger. The counter is one past the largest
+# id ever committed, so only an id below it can collide and the scan of
+# the events runs for those alone (never on the engine's path).
+function _execution_held(L::Ledger, executed::Set{Int}, id::Int)::Bool
+    id in executed && return true
+    id >= L.next_execution && return false
+    return any(e -> e isa Fill && e.execution_id == id, L.events)
+end
+
 function _validate(L::Ledger, book::Book, batch::AbstractVector{<:LedgerEvent})::Nothing
     last_recorded = isempty(L) ? typemin(DateTime) : recorded_at(L.events[end])
     for (k, e) in enumerate(batch)
@@ -426,6 +572,7 @@ function _validate(L::Ledger, book::Book, batch::AbstractVector{<:LedgerEvent}):
     seen     = Dict{Int,LedgerEvent}()   # batch events validated so far
     opened   = Fill[]                    # Open fills of this batch, in batch order
     consumed = Dict{Int,Int}()           # consumption by this batch, per opening fill
+    executed = Set{Int}()                # execution ids of this batch's fills so far
     n = length(batch)
     k = 1
     while k <= n
@@ -433,6 +580,9 @@ function _validate(L::Ledger, book::Book, batch::AbstractVector{<:LedgerEvent}):
         if e isa Fill
             effective_at(e) <= e.contract.expiry ||
                 throw(FillAfterExpiry(event_id(e), effective_at(e), e.contract.expiry))
+            _execution_held(L, executed, e.execution_id) &&
+                throw(DuplicateExecution(e.execution_id))
+            push!(executed, e.execution_id)
             seen[event_id(e)] = e
             k += 1
             if e.intent == Open

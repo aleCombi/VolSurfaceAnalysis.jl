@@ -5,11 +5,17 @@
 # comparable rather than evaporating into ad-hoc notebooks (see vision.md).
 #
 # Storage shape: Hive-partitioned parquet under `<root>/runs/run_id=<hash>/`.
-# Each run folder holds the verbatim input TOML plus four parquet files
-# (manifest, metrics, positions, pnl_series). Cross-run queries are just
-# DuckDB SQL against the partitioned trees -- this module does not invent
-# a query API. Same DuckDB-as-engine / parquet-as-storage pattern the
-# `data` module uses for input data.
+# Each run folder holds the verbatim input TOML plus six parquet files
+# (manifest, metrics, events, orders, order_legs, pnl_series). Cross-run
+# queries are just DuckDB SQL against the partitioned trees -- this module
+# does not invent a query API. Same DuckDB-as-engine / parquet-as-storage
+# pattern the `data` module uses for input data.
+#
+# The ledger is written as it is: one row per event with the kind's own
+# columns and NULLs elsewhere, one row per order and one per order leg
+# with its observation. `load_run` rebuilds it through the ledger's own
+# validated write path and the fill-to-order join, so a stored run that
+# breaks an invariant fails to load by name rather than loading wrong.
 #
 # Run identity is `full_hash(result.experiment)` -- the canonical hash of
 # the resolved experiment (see experiment/identity.jl), not the raw TOML
@@ -21,11 +27,12 @@
 using DuckDB
 using DuckDB: DBInterface
 
-# Manifest schema version, outside the run hash. Bumped once by the
-# data-kinds migration (every run id changed with the identity
-# projection); `load_run` refuses a run written under another version
-# rather than rebuilding an experiment its config cannot describe.
-const RUN_SCHEMA_VERSION = 2
+# Manifest schema version, outside the run hash. Bumped by the data-kinds
+# migration (every run id changed with the identity projection) and again
+# when the ledger replaced `positions.parquet` (slice 2 of the ledger
+# rebuild); `load_run` refuses a run written under another version rather
+# than rebuilding a result its files cannot describe.
+const RUN_SCHEMA_VERSION = 3
 
 """
     RunStore
@@ -125,9 +132,22 @@ function _write_parquet(store::RunStore, path::AbstractString,
     end
 end
 
-_dt_sql(d::DateTime) = "TIMESTAMP '$(Dates.format(d, "yyyy-mm-dd HH:MM:SS"))'"
+# Milliseconds, so a loaded ledger equals the saved one exactly.
+_dt_sql(d::DateTime) = "TIMESTAMP '$(Dates.format(d, "yyyy-mm-dd HH:MM:SS.sss"))'"
 _str_sql(s::AbstractString) = "'" * replace(String(s), "'" => "''") * "'"
 _otype_sql(t::OptionType) = t == Call ? "'C'" : "'P'"
+_side_sql(s::Side) = s == Long ? "'long'" : "'short'"
+_intent_sql(i::Intent) = i == Open ? "'open'" : "'close'"
+_outcome_sql(o::ExpiryOutcome) = o == Worthless ? "'worthless'" : "'cash_settled'"
+_opt_sql(x, f) = x === nothing || x === missing ? "NULL" : f(x)
+
+_otype_from(s) = String(s) == "C" ? Call : Put
+_side_from(s) = String(s) == "long" ? Long : Short
+_intent_from(s) = String(s) == "open" ? Open : Close
+_outcome_from(s) = String(s) == "worthless" ? Worthless : CashSettled
+_contract_from(r) = ContractKey(Underlying(String(r.underlying)), Float64(r.strike),
+                                DateTime(r.expiry), _otype_from(r.option_type))
+_opt_from(x, f) = x === missing ? missing : f(x)
 
 # DuckDB SQL has no bare NaN / Infinity literals -- they parse as
 # identifiers. Round-trip non-finite floats via a quoted cast.
@@ -155,7 +175,8 @@ is `full_hash(result.experiment)` -- the identity of the resolved
 experiment, independent of how its config was spelled. `config_toml`
 must rebuild `result.experiment` (same `full_hash` and same human
 `name`) or this throws `ArgumentError`, keeping the persisted config
-faithful to the saved result.
+faithful to the saved result. The ledger's event/order join is validated
+before the run directory is created or any file is written.
 
 `commit_sha` / `dirty` are the code provenance of the run (see
 [`code_provenance`](@ref)); they default to `("", true)` so a caller that
@@ -164,10 +185,12 @@ does not supply provenance records an unknown, uncacheable run.
 Writes:
 - `config.toml` -- the bytes passed in, verbatim.
 - `manifest.parquet` -- one row of run-level metadata (incl. `core_hash`,
-  `commit_sha`, `dirty`).
+  `commit_sha`, `dirty`, `n_events`, `n_orders`).
 - `metrics.parquet` -- long form, one row per `(metric_name, value)`.
-- `positions.parquet` -- one row per leg in `result.positions`.
-- `pnl_series.parquet` -- one row per round trip in `result.pnl_series`.
+- `events.parquet` -- one row per ledger event in sequence order.
+- `orders.parquet` -- one row per order record.
+- `order_legs.parquet` -- one row per order leg with its observation.
+- `pnl_series.parquet` -- one row per sample in `result.pnl_series`.
 
 If a folder for this id already exists, its contents are overwritten:
 same resolved experiment means same id, so re-saving is idempotent in
@@ -193,6 +216,7 @@ function save_run(store::RunStore, result::ExperimentResult,
     config_exp.name == result.experiment.name || throw(ArgumentError(
         "save_run: config_toml name \"$(config_exp.name)\" does not match " *
         "result.experiment name \"$(result.experiment.name)\""))
+    check_join(result.ledger)
     dir = run_dir(store, id)
     mkpath(dir)
 
@@ -202,7 +226,9 @@ function save_run(store::RunStore, result::ExperimentResult,
 
     _write_manifest(store, dir, id, result; commit_sha=commit_sha, dirty=dirty)
     _write_metrics(store, dir, id, result)
-    _write_positions(store, dir, id, result)
+    _write_events(store, dir, id, result.ledger)
+    _write_orders(store, dir, id, result.ledger)
+    _write_order_legs(store, dir, id, result.ledger)
     _write_pnl_series(store, dir, id, result)
 
     return id
@@ -219,7 +245,8 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         name VARCHAR,
         from_ts TIMESTAMP,
         to_ts TIMESTAMP,
-        n_positions BIGINT,
+        n_events BIGINT,
+        n_orders BIGINT,
         n_opens BIGINT,
         n_closes BIGINT,
         n_unmarked BIGINT,
@@ -235,7 +262,8 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         _str_sql(exp.name),
         _dt_sql(exp.from),
         _dt_sql(exp.to),
-        string(length(result.positions)),
+        string(length(result.ledger)),
+        string(length(result.ledger.orders)),
         string(s.n_opens),
         string(s.n_closes),
         string(s.n_unmarked),
@@ -261,45 +289,156 @@ function _write_metrics(store::RunStore, dir::AbstractString, id::AbstractString
     _write_parquet(store, joinpath(dir, "metrics.parquet"), schema, inserts)
 end
 
-function _write_positions(store::RunStore, dir::AbstractString, id::AbstractString,
-                          result::ExperimentResult)
+# One row per event in sequence order: the header, the kind, and the
+# kind's own columns; everything the kind lacks is NULL. `group` is a SQL
+# keyword, so the column is `group_id`.
+const _EVENTS_SCHEMA = """(
+    run_id VARCHAR,
+    sequence BIGINT,
+    id BIGINT,
+    kind VARCHAR,
+    effective_at TIMESTAMP,
+    recorded_at TIMESTAMP,
+    group_id BIGINT,
+    order_leg_id BIGINT,
+    execution_id BIGINT,
+    underlying VARCHAR,
+    strike DOUBLE,
+    expiry TIMESTAMP,
+    option_type VARCHAR,
+    side VARCHAR,
+    intent VARCHAR,
+    quantity BIGINT,
+    price DOUBLE,
+    fill_rule VARCHAR,
+    open_fill_id BIGINT,
+    close_fill_id BIGINT,
+    settlement_price DOUBLE,
+    outcome VARCHAR,
+    source_id BIGINT,
+    amount BIGINT
+)"""
+
+# The kind-specific columns of one event, in schema order after
+# `recorded_at`: group_id .. amount.
+_event_columns(e::Fill) = [
+    string(e.group), string(e.order_leg_id), string(e.execution_id),
+    _str_sql(ticker(e.contract.underlying)), _f_sql(e.contract.strike),
+    _dt_sql(e.contract.expiry), _otype_sql(e.contract.option_type),
+    _side_sql(e.side), _intent_sql(e.intent), string(e.quantity), _f_sql(e.price),
+    _str_sql(String(e.fill_rule)),
+    "NULL", "NULL", "NULL", "NULL", "NULL", "NULL",
+]
+_event_columns(e::Match) = [
+    string(e.group), "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", string(e.quantity), "NULL", "NULL",
+    string(e.open_fill_id), string(e.close_fill_id), "NULL", "NULL", "NULL", "NULL",
+]
+_event_columns(e::Expiry) = [
+    string(e.group), "NULL", "NULL",
+    _str_sql(ticker(e.contract.underlying)), _f_sql(e.contract.strike),
+    _dt_sql(e.contract.expiry), _otype_sql(e.contract.option_type),
+    _side_sql(e.side), "NULL", string(e.quantity), "NULL", "NULL",
+    string(e.open_fill_id), "NULL", _f_sql(e.settlement_price), _outcome_sql(e.outcome),
+    "NULL", "NULL",
+]
+_event_columns(e::Fee) = [
+    "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL", "NULL",
+    "NULL", "NULL", "NULL", "NULL", string(e.source_id), string(e.amount),
+]
+
+_kind_sql(::Fill) = "'fill'"
+_kind_sql(::Match) = "'match'"
+_kind_sql(::Expiry) = "'expiry'"
+_kind_sql(::Fee) = "'fee'"
+
+function _write_events(store::RunStore, dir::AbstractString, id::AbstractString, L::Ledger)
+    inserts = String[]
+    for e in L.events
+        cols = vcat([_str_sql(id), string(sequence(e)), string(event_id(e)), _kind_sql(e),
+                     _dt_sql(effective_at(e)), _dt_sql(recorded_at(e))],
+                    _event_columns(e))
+        push!(inserts, "INSERT INTO _writebuf VALUES (" * join(cols, ", ") * ")")
+    end
+    _write_parquet(store, joinpath(dir, "events.parquet"), _EVENTS_SCHEMA, inserts)
+end
+
+function _write_orders(store::RunStore, dir::AbstractString, id::AbstractString, L::Ledger)
     schema = """(
         run_id VARCHAR,
+        order_id BIGINT,
+        first_leg_id BIGINT,
+        label VARCHAR,
+        group_id BIGINT,
+        operation BIGINT,
+        decided_at TIMESTAMP,
+        known_to BIGINT
+    )"""
+    inserts = String[]
+    for r in L.orders
+        push!(inserts,
+              "INSERT INTO _writebuf VALUES (" *
+              join([
+                  _str_sql(id),
+                  string(r.order_id),
+                  string(r.first_leg_id),
+                  _str_sql(String(r.order.label)),
+                  string(r.group),
+                  _opt_sql(r.order.operation, string),
+                  _dt_sql(r.decided_at),
+                  string(r.known_to),
+              ], ", ") * ")")
+    end
+    _write_parquet(store, joinpath(dir, "orders.parquet"), schema, inserts)
+end
+
+function _write_order_legs(store::RunStore, dir::AbstractString, id::AbstractString, L::Ledger)
+    schema = """(
+        run_id VARCHAR,
+        order_id BIGINT,
+        order_leg_id BIGINT,
         leg_idx BIGINT,
         underlying VARCHAR,
         strike DOUBLE,
         expiry TIMESTAMP,
         option_type VARCHAR,
-        direction INTEGER,
-        quantity DOUBLE,
-        entry_price DOUBLE,
-        entry_spot DOUBLE,
-        entry_bid DOUBLE,
-        entry_ask DOUBLE,
-        entry_timestamp TIMESTAMP
+        side VARCHAR,
+        intent VARCHAR,
+        quantity BIGINT,
+        quote_at TIMESTAMP,
+        bid DOUBLE,
+        ask DOUBLE,
+        spot DOUBLE,
+        spot_at TIMESTAMP
     )"""
     inserts = String[]
-    for (i, p) in enumerate(result.positions)
-        bid = ismissing(p.entry_bid) ? "NULL" : _f_sql(p.entry_bid)
-        ask = ismissing(p.entry_ask) ? "NULL" : _f_sql(p.entry_ask)
+    for r in L.orders, (k, leg) in enumerate(r.order.legs)
+        o = r.observations[k]
         push!(inserts,
               "INSERT INTO _writebuf VALUES (" *
               join([
                   _str_sql(id),
-                  string(i),
-                  _str_sql(ticker(p.trade.underlying)),
-                  _f_sql(p.trade.strike),
-                  _dt_sql(p.trade.expiry),
-                  _otype_sql(p.trade.option_type),
-                  string(p.trade.direction),
-                  _f_sql(p.trade.quantity),
-                  _f_sql(p.entry_price),
-                  _f_sql(p.entry_spot),
-                  bid, ask,
-                  _dt_sql(p.entry_timestamp),
+                  string(r.order_id),
+                  string(r.first_leg_id + k - 1),
+                  string(k),
+                  _str_sql(ticker(leg.contract.underlying)),
+                  _f_sql(leg.contract.strike),
+                  _dt_sql(leg.contract.expiry),
+                  _otype_sql(leg.contract.option_type),
+                  _side_sql(leg.side),
+                  _intent_sql(leg.intent),
+                  string(leg.quantity),
+                  _dt_sql(o.quote_at),
+                  _opt_sql(o.bid, _f_sql),
+                  _opt_sql(o.ask, _f_sql),
+                  _f_sql(o.spot),
+                  _dt_sql(o.spot_at),
               ], ", ") * ")")
     end
-    _write_parquet(store, joinpath(dir, "positions.parquet"), schema, inserts)
+    _write_parquet(store, joinpath(dir, "order_legs.parquet"), schema, inserts)
 end
 
 function _write_pnl_series(store::RunStore, dir::AbstractString, id::AbstractString,
@@ -333,22 +472,31 @@ const _INT_METRIC_KEYS = (:n_round_trips, :n_opens, :n_closes)
     load_run(store::RunStore, run_id::AbstractString) -> ExperimentResult
 
 Rehydrate a previously [`save_run`](@ref)-saved run back into an
-`ExperimentResult`. Reads the four parquet artifacts plus the saved
+`ExperimentResult`. Reads the six parquet artifacts plus the saved
 `config.toml`, rebuilds the live `Experiment` via
-[`load_experiment_str`](@ref), and reconstructs `positions`,
-`pnl_series`, and the `metrics` NamedTuple (preserving the integer
-types of `n_round_trips`, `n_opens`, `n_closes`).
+[`load_experiment_str`](@ref), rebuilds the ledger, and reconstructs
+`pnl_series` and the `metrics` NamedTuple (preserving the integer types
+of `n_round_trips`, `n_opens`, `n_closes`).
+
+The ledger is rebuilt through its own write path: every event is built
+through its constructor in sequence order and committed to a fresh
+`Ledger` as one batch through `commit!` (the book is empty, so FIFO
+among batch-opened lots is sequence order), so a loaded ledger has
+passed every append-time check; the order records are rebuilt from the
+two order tables, every counter is set one past the largest id seen
+(groups included), and `check_join` runs last. A load that fails a
+check throws that check's named failure; it never drops the join.
 
 The data declared by the saved config does not need to be present on
 disk: `Experiment.data` holds provider specs, which are pure values, so
 the rebuilt experiment only fails at `open_data` (i.e. at
 `run_experiment`) if the data has moved. Inspecting the persisted
-fields (`positions`, `pnl_series`, `metrics`) needs no data at all.
+fields (`ledger`, `pnl_series`, `metrics`) needs no data at all.
 
 Throws `ArgumentError` if the run folder or any of the expected files
 is missing, or if the manifest's `schema_version` is absent or differs
-from `RUN_SCHEMA_VERSION` (a run written before the data-kinds
-migration): rerun its config to regenerate it.
+from `RUN_SCHEMA_VERSION` (a run written before the ledger replaced
+`positions.parquet`): rerun its config to regenerate it.
 """
 function load_run(store::RunStore, run_id::AbstractString)::ExperimentResult
     _assert_open(store)
@@ -358,7 +506,7 @@ function load_run(store::RunStore, run_id::AbstractString)::ExperimentResult
     manifest = _load_manifest(store, dir)
     manifest.schema_version == RUN_SCHEMA_VERSION || throw(ArgumentError(
         "load_run: run $run_id was written with manifest schema_version " *
-        "$(manifest.schema_version) (pre data-kinds); this store reads version " *
+        "$(manifest.schema_version); this store reads version " *
         "$RUN_SCHEMA_VERSION only -- rerun the config to regenerate it"))
 
     cfg_path = joinpath(dir, "config.toml")
@@ -366,11 +514,11 @@ function load_run(store::RunStore, run_id::AbstractString)::ExperimentResult
     config_toml = read(cfg_path, String)
     exp = load_experiment_str(config_toml)
 
-    positions = _load_positions(store, dir)
+    ledger = _load_ledger(store, dir)
     series = _load_pnl_series(store, dir, manifest)
     metrics = _load_metrics(store, dir, exp.outputs.metrics)
 
-    return ExperimentResult(exp, positions, series, metrics)
+    return ExperimentResult(exp, ledger, series, metrics)
 end
 
 function _select_rows(store::RunStore, path::AbstractString, sql::AbstractString)
@@ -395,27 +543,76 @@ function _load_manifest(store::RunStore, dir::AbstractString)
             schema_version=version)
 end
 
-function _load_positions(store::RunStore, dir::AbstractString)::Vector{Position}
-    path = joinpath(dir, "positions.parquet")
-    rows = _select_rows(store, path,
-        "SELECT leg_idx, underlying, strike, expiry, option_type, direction, " *
-        "quantity, entry_price, entry_spot, entry_bid, entry_ask, entry_timestamp " *
-        "FROM '$(_sql_pq_path(path))' ORDER BY leg_idx")
-    out = Position[]
-    for r in rows
-        u = Underlying(String(r.underlying))      # per row: the ledger may span symbols
-        otype = String(r.option_type) == "C" ? Call : Put
-        trade = Trade(u, Float64(r.strike), DateTime(r.expiry), otype;
-                      direction=Int(r.direction), quantity=Float64(r.quantity))
-        bid = r.entry_bid === missing ? missing : Float64(r.entry_bid)
-        ask = r.entry_ask === missing ? missing : Float64(r.entry_ask)
-        push!(out, Position(trade,
-                            Float64(r.entry_price),
-                            Float64(r.entry_spot),
-                            bid, ask,
-                            DateTime(r.entry_timestamp)))
+# One event from its row, through the kind's constructor so every
+# construction-time check runs on a stored event too.
+function _event_from(r)::LedgerEvent
+    h = EventHeader(Int(r.id), DateTime(r.effective_at), DateTime(r.recorded_at), Int(r.sequence))
+    kind = String(r.kind)
+    if kind == "fill"
+        return Fill(h, Int(r.group_id), Int(r.order_leg_id), Int(r.execution_id), _contract_from(r),
+                    _side_from(r.side), _intent_from(r.intent), Int(r.quantity), Float64(r.price),
+                    Symbol(String(r.fill_rule)))
+    elseif kind == "match"
+        return Match(h, Int(r.group_id), Int(r.open_fill_id), Int(r.close_fill_id), Int(r.quantity))
+    elseif kind == "expiry"
+        return Expiry(h, Int(r.group_id), Int(r.open_fill_id), _contract_from(r), _side_from(r.side),
+                      Int(r.quantity), Float64(r.settlement_price), _outcome_from(r.outcome))
+    elseif kind == "fee"
+        return Fee(h, Int(r.source_id), Int(r.amount))
     end
-    return out
+    throw(ArgumentError("load_run: unknown event kind \"$kind\" at sequence $(r.sequence)"))
+end
+
+function _load_ledger(store::RunStore, dir::AbstractString)::Ledger
+    events_path = joinpath(dir, "events.parquet")
+    rows = _select_rows(store, events_path,
+        "SELECT * FROM '$(_sql_pq_path(events_path))' ORDER BY sequence")
+    L, book = Ledger(), Book()
+    # One batch through the validated write path: ids and sequences must
+    # continue a fresh ledger's counters, references must point backward,
+    # matches must be FIFO, cash must be whole cents -- as when written.
+    commit!(L, book, LedgerEvent[_event_from(r) for r in rows])
+
+    orders_path = joinpath(dir, "orders.parquet")
+    order_rows = _select_rows(store, orders_path,
+        "SELECT * FROM '$(_sql_pq_path(orders_path))' ORDER BY order_id")
+    legs_path = joinpath(dir, "order_legs.parquet")
+    leg_rows = _select_rows(store, legs_path,
+        "SELECT * FROM '$(_sql_pq_path(legs_path))' ORDER BY order_id, leg_idx")
+    legs_by_order = Dict{Int,Vector{Any}}()
+    for r in leg_rows
+        push!(get!(() -> Any[], legs_by_order, Int(r.order_id)), r)
+    end
+    # Whether the policy named the group or the ledger minted it is not a
+    # column: the first record of a group (by order id) minted it, since
+    # a group can only be named once minted, and only by a later order.
+    minted = Set{Int}()
+    for r in order_rows
+        oid = Int(r.order_id)
+        g = Int(r.group_id)
+        own_group = g in minted ? g : nothing
+        push!(minted, g)
+        lrows = get(legs_by_order, oid, Any[])
+        legs = Leg[Leg(_contract_from(l), _side_from(l.side), Int(l.quantity), _intent_from(l.intent))
+                   for l in lrows]
+        obs = LegObservation[LegObservation(DateTime(l.quote_at), _opt_from(l.bid, Float64),
+                                            _opt_from(l.ask, Float64), Float64(l.spot),
+                                            DateTime(l.spot_at)) for l in lrows]
+        order = Order(Symbol(String(r.label)), legs; group = own_group,
+                      operation = r.operation === missing ? nothing : Int(r.operation))
+        push!(L.orders, OrderRecord(oid, Int(r.first_leg_id), g, DateTime(r.decided_at),
+                                    Int(r.known_to), order, obs))
+    end
+    # Every counter one past the largest id seen (`commit!` moved the
+    # event, sequence and execution counters already).
+    groups = Int[group(e) for e in L.events if !(e isa Fee)]
+    append!(groups, Int[r.group for r in L.orders])
+    L.next_group    = isempty(groups) ? 1 : maximum(groups) + 1
+    L.next_order_id = isempty(L.orders) ? 1 : maximum(r.order_id for r in L.orders) + 1
+    L.next_leg_id   = isempty(L.orders) ? 1 :
+                      maximum(r.first_leg_id + length(r.order.legs) - 1 for r in L.orders) + 1
+    check_join(L)
+    return L
 end
 
 function _load_pnl_series(store::RunStore, dir::AbstractString,

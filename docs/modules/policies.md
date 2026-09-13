@@ -3,11 +3,11 @@
 Policy abstraction: a pure decision function the backtest engine
 calls once per tick (after the [`Agent`](agents.md) hands one over).
 A policy holds its immutable configuration (schedules, parameters,
-fitted models) and implements [`decide`](@ref) to emit *trade
-deltas* -- new orders the engine should fill. Closes are emitted as
-counter-trades (opposite direction, same contract), so the policy
-never mutates state and the engine never asks "keep or close this
-position?".
+fitted models) and implements [`decide`](@ref) to emit *orders* --
+structure-level instructions with declared intent per leg -- given the
+book. A close is a `Close` leg in an order naming the group it closes,
+never a counter-trade, so the policy never mutates state and the
+engine never guesses intent from direction.
 
 Anything that changes between ticks -- refit cadence, parameter
 learning, policy swaps over time -- belongs to the [`agents`](agents.md)
@@ -19,27 +19,26 @@ which it was handed out.
 ```mermaid
 flowchart LR
     Engine[Backtest engine] --> Cut[TimeCut]
-    Engine --> Ledger[positions]
+    Engine --> Book[Book]
     Engine --> Clock[t]
     Cut --> D([decide])
-    Ledger --> D
+    Book --> D
     Clock --> D
     Policy[Policy config] --> D
-    D --> Orders[Vector Trade]
+    D --> Orders[Vector Order]
     Orders --> Engine
 ```
 
 The engine builds the time-cut data view, asks the agent for the
-current policy, then hands `(t, cut, positions)` to `decide` to
-produce the orders for this tick.
+current policy, then hands `(t, cut, book)` to `decide` to produce the
+orders for this tick.
 
 ## The abstraction
 
 ```julia
 abstract type Policy end
 
-decide(p::Policy, t::DateTime, data::TimeCut,
-       positions::AbstractVector{Position}) -> Vector{Trade}
+decide(p::Policy, t::DateTime, data::TimeCut, book::Book) -> Vector{Order}
 
 tick_times(p::Policy, data::MarketData, from, to) -> Union{Nothing, Vector{DateTime}}
 
@@ -48,18 +47,32 @@ declared_underlyings(p::Policy) -> Tuple of Underlying
 
 One decision method, four arguments, one return value. Concrete
 policies subtype `Policy` and implement `decide`. The empty return
-`Trade[]` is the "do nothing this tick" case and must be cheap.
+`Order[]` is the "do nothing this tick" case and must be cheap.
 Policies read data by kind and selector (`at(data, OptionQuote, u, t)`,
 `only_or_missing(at(data, VolatilitySurface, u, t))`), never by
 storage; "empty means absent" is the convention for every shape.
+
+An `Order` is a label, its legs (each a `ContractKey`, a side, an
+integer number of contracts and an `Open` / `Close` intent), the group
+it opens into or closes, and an optional operation id linking the two
+orders of a roll. An opening order leaves `group` as `nothing` and the
+ledger mints one; **a close is a `Close` leg in an order naming the
+group it closes** (`open_groups(book)`, `lots(book, g)`), never a
+counter-trade. The engine books every order whole or not at all.
+
+`book` is the engine's own fold of the ledger as known at this tick:
+open lots per group and contract, plus cash, equal to
+`book_as_known(L, known_to)` for the order records the tick produces. A
+policy reads it and **must not mutate it**: it is handed by reference,
+not copied per tick.
 
 `declared_underlyings` reports the underlyings a policy fixes in its own
 configuration, known without running it; the default is empty, meaning
 "cannot be checked at load". `load_experiment` uses it to enforce that an
 experiment ticks and trades on one underlying: the clock selector answers
-*when* to step, settlement and fills resolve prices per trade, and
-asserting the two agree is what keeps that safe. A policy that chooses
-its underlying per tick declares nothing and is simply not checked.
+*when* to step, fills resolve prices per leg, and asserting the two agree
+is what keeps that safe. A policy that chooses its underlying per tick
+declares nothing and is simply not checked.
 
 `tick_times` is the optional sparse-schedule override: return the
 candidate timestamps in `[from, to]` (sorted, unique) and the engine
@@ -71,7 +84,7 @@ exist in the data.
 
 ```julia
 struct NoOpPolicy <: Policy end
-decide(::NoOpPolicy, _, _, _) = Trade[]
+decide(::NoOpPolicy, _, _, _) = Order[]
 ```
 
 The trivial policy. Useful as a smoke test for the engine and as
@@ -81,9 +94,10 @@ a base case in property tests.
 
 | Decision | Why |
 |---|---|
-| **Policy returns trade deltas, not a portfolio** | A policy's natural output is "orders to fire," not "the portfolio I want after this tick." Deltas keep the policy small (no need to redeclare unchanged positions), make the no-op case trivially `Trade[]`, and let the engine own the open-vs-close translation in one place. |
-| **Closes are counter-trades** | Rather than a separate `Close` action type or a mutable `Position`, a close is a regular `Trade` with opposite direction on the same contract. The ledger ends up holding both sides; net-open is a view (`sum(direction * quantity)` per contract). Keeps `Position` immutable and the engine path uniform: every order goes through `open_position`. A dedicated `closed::Vector{...}` register is a later convenience, not a primitive. |
-| **Stateless `decide`** | The policy struct holds only configuration. Any "state" the recurrence might want (rolling windows, last-action time, fitted predictions) is either derivable from `(t, data, positions)` plus config, or it belongs to an [`Agent`](agents.md) that hands out a fresh Policy when state advances. Stateless `decide` is easier to test (no setup), easier to replay deterministically, and avoids confusion about whether to mutate or rebuild between ticks. |
+| **Policy returns orders, not a portfolio** | A policy's natural output is "orders to fire," not "the portfolio I want after this tick." Orders keep the policy small (no need to redeclare unchanged positions), make the no-op case trivially `Order[]`, and let the ledger own the open-vs-close bookkeeping in one place. |
+| **Intent is declared; a close names its group** | A counter-trade left the engine to guess intent from direction, and guessed wrong at a side flip. A `Close` leg naming a group is what a broker ticket says (position effect O/C), matches only within that group, and is refused when there is nothing to close, so a policy's mistake is a named failure at fill time rather than a silent new lot. |
+| **The book, not the fill log, is what a policy sees** | The book is the view by replay a live loop hands a policy too: open lots per group and contract, plus cash. A policy that wants "what do I hold" reads it directly instead of netting a fill vector; it never sees expired legs as live once lifecycle is booked (slice 3). |
+| **Stateless `decide`** | The policy struct holds only configuration. Any "state" the recurrence might want (rolling windows, last-action time, fitted predictions) is either derivable from `(t, data, book)` plus config, or it belongs to an [`Agent`](agents.md) that hands out a fresh Policy when state advances. Stateless `decide` is easier to test (no setup), easier to replay deterministically, and avoids confusion about whether to mutate or rebuild between ticks. |
 | **No-lookahead is a type, not a convention** | `decide` accepts a [`TimeCut`](market_data.md), not the bare map. Every shape is empty strictly after `t`, and reads a derived provider makes on the policy's behalf go through the same cut. The legacy codebase enforced the same property via `HistoricalView` passed at runtime; the rebuild moves it into the function signature and into the data layer. |
 | **`t` is an explicit argument** | Even though `data` is cut at `t`, schedule-driven policies that want to ask "is this my entry time?" shouldn't have to dig through `timestamps(data, ...)` for it. Making `t` explicit also gives the engine a trivially-cheap crosscheck against the cutoff. |
 | **Gate inside `decide`, schedule with `tick_times`** | The engine's grid is the declared clock; a scheduled policy still gates inside `decide` (cheap, correct on any clock) and may narrow the engine's calls with `tick_times`. The window end stays a clock property, so the schedule can never move the settlement. |
@@ -100,12 +114,13 @@ a base case in property tests.
   policies only react to one tick at a time.
 - How a policy changes over time. That belongs to the
   [`agents`](agents.md) layer.
-- Quote resolution. The engine maps each returned `Trade` to an
-  `OptionQuote` and a `Position`; policies never touch the chain
-  directly to fill (they may inspect chains/surfaces to *decide*).
-- Position lifecycle. A close is a counter-trade emitted by the
-  policy and filled like any other order; there is no `close!`
-  primitive.
+- Quote resolution and pricing. The engine prices each leg of a
+  returned `Order` through the venue and books it in the ledger;
+  policies never touch the chain directly to fill (they may inspect
+  chains/surfaces to *decide*).
+- Lot lifecycle. A close is a `Close` leg emitted by the policy and
+  booked like any other order; there is no `close!` primitive, and
+  expiries are booked by the engine's lifecycle step (slice 3).
 - Reporting / PnL aggregation. Policies return orders, not P&L.
   Computing performance is downstream.
 
@@ -125,33 +140,38 @@ struct DailyShortStrangle <: Policy
     expiry_interval :: Period
     put_delta       :: Float64       # target |Δ| in (0, 1)
     call_delta      :: Float64       # target |Δ| in (0, 1)
-    quantity        :: Float64
+    quantity        :: Int           # contracts per leg
 end
 
-function decide(p::DailyShortStrangle, t::DateTime,
-                data::TimeCut, ::AbstractVector{Position})
-    Time(t) == p.entry_time || return Trade[]                  # cheap gate
+function decide(p::DailyShortStrangle, t::DateTime, data::TimeCut, ::Book)
+    Time(t) == p.entry_time || return Order[]                  # cheap gate
     surface = only_or_missing(at(data, VolatilitySurface, p.underlying, t))
-    ismissing(surface) && return Trade[]
+    ismissing(surface) && return Order[]
     expiry  = _first_expiry_on_or_after(surface, t + p.expiry_interval)
-    expiry === nothing && return Trade[]
-    chain   = at(data, OptionQuote, p.underlying, t); isempty(chain) && return Trade[]
+    expiry === nothing && return Order[]
+    chain   = at(data, OptionQuote, p.underlying, t); isempty(chain) && return Order[]
 
     K_put_raw  = invert_delta(surface, expiry, Put,  p.put_delta)
     K_call_raw = invert_delta(surface, expiry, Call, p.call_delta)
-    (K_put_raw === nothing || K_call_raw === nothing) && return Trade[]
+    (K_put_raw === nothing || K_call_raw === nothing) && return Order[]
 
     put_strikes  = _quoted_strikes(chain, expiry, p.underlying, Put)
     call_strikes = _quoted_strikes(chain, expiry, p.underlying, Call)
     K_put  = _snap_to_sorted(put_strikes,  K_put_raw)
     K_call = _snap_to_sorted(call_strikes, K_call_raw)
-    (K_put === nothing || K_call === nothing) && return Trade[]
-    return Trade[
-        Trade(p.underlying, K_put,  expiry, Put;  direction=-1, quantity=p.quantity),
-        Trade(p.underlying, K_call, expiry, Call; direction=-1, quantity=p.quantity),
-    ]
+    (K_put === nothing || K_call === nothing) && return Order[]
+    return Order[Order(:daily_short_strangle, [
+        Leg(ContractKey(p.underlying, K_put,  expiry, Put),  Short, p.quantity, Open),
+        Leg(ContractKey(p.underlying, K_call, expiry, Call), Short, p.quantity, Open),
+    ])]
 end
 ```
+
+The two legs go out as one `Order`, so the venue fills them whole or
+not at all and the ledger samples them as one structure. `quantity` is
+an integer number of contracts (the config loader accepts `1` and
+`1.0`, refuses `1.5`); the policy only opens, and lifecycle closes its
+lots (slice 3).
 
 Three properties worth noting:
 
@@ -169,7 +189,7 @@ Three properties worth noting:
   the authoritative fix.
 - **One-wing failure = skip the entry.** If `invert_delta` returns
   `nothing` for either leg (target |Δ| outside the slice's observed
-  bracket on that wing), the policy returns `Trade[]` rather than
+  bracket on that wing), the policy returns `Order[]` rather than
   trading the surviving leg alone. A one-legged "strangle" is a
   different structure and silently degrading would corrupt backtests.
 
@@ -179,18 +199,17 @@ Three properties worth noting:
   micro-state through (e.g. an intra-tick counter). Today that
   belongs to the surrounding Agent; if a pattern emerges where the
   state really is Policy-scoped, the signature can grow to
-  `decide(p, t, data, positions, state) -> (orders, state')` with a
+  `decide(p, t, data, book, state) -> (orders, state')` with a
   default `init_state(p, _) = nothing`.
 - **Structures (iron condor, strangle, vertical) as first-class.**
   Today legs are constructed inline -- `DailyShortStrangle` builds two
-  `Trade`s directly in `decide`. A scheduled iron condor would follow
+  `Leg`s directly in `decide`. A scheduled iron condor would follow
   the same shape, swapping `invert_delta` for a 4-strike selector and
-  returning four `Trade`s. Once two or three such policies exist, a
-  `structures` module with `IronCondor{Trade}` -> `IronCondor{Position}`
-  becomes worth introducing -- it would attach helpers (credit,
-  max-loss, wing-width, breakevens) and let policies return structures
-  whose `legs` decompose into trades. Deferred until the duplication
-  tells us what the helper surface should expose.
+  returning one four-leg `Order`. Once two or three such policies
+  exist, a `structures` module with helpers (credit, max-loss,
+  wing-width, breakevens) that decompose into legs becomes worth
+  introducing. Deferred until the duplication tells us what the helper
+  surface should expose.
 - **Live-trading bridge.** The same `decide` signature can drive a
   live loop: replace the backtest engine with one that resolves
   quotes from a broker feed instead of the quote chain, with the same

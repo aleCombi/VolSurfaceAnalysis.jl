@@ -20,8 +20,7 @@ buffers, fitted-model registry) and implement [`current_policy`](@ref).
 abstract type Agent end
 
 """
-    current_policy(agent::Agent, t::DateTime, data::TimeCut,
-                   positions::AbstractVector{Position}) -> Policy
+    current_policy(agent::Agent, t::DateTime, data::TimeCut, book::Book) -> Policy
 
 Return the [`Policy`](@ref) the agent wants the engine to use at time
 `t`. Called once per tick by [`run_backtest`](@ref) before `decide`.
@@ -30,12 +29,13 @@ The returned Policy must be valid for at least this tick. An agent
 that refits periodically returns the same Policy on every tick between
 refits, and a fresh one on the tick where the refit fires.
 
-`data` and `positions` are passed in case the refit logic needs to
-inspect the current data view or ledger (e.g. "refit only on the first
-tick of a new month, using the lookback window in `data`"). Stateless,
-schedule-free agents simply ignore them.
+`data` and `book` are passed in case the refit logic needs to inspect
+the current data view or the book (e.g. "refit only on the first tick
+of a new month, using the lookback window in `data`"; "size by current
+exposure"). `book` is the engine's own fold and must not be mutated.
+Stateless, schedule-free agents simply ignore them.
 """
-function current_policy(::Agent, ::DateTime, ::TimeCut, ::AbstractVector{Position})::Policy
+function current_policy(::Agent, ::DateTime, ::TimeCut, ::Book)::Policy
     error("current_policy not implemented for this Agent")
 end
 
@@ -50,7 +50,7 @@ struct StaticAgent{P<:Policy} <: Agent
     policy::P
 end
 
-current_policy(a::StaticAgent, ::DateTime, ::TimeCut, ::AbstractVector{Position}) = a.policy
+current_policy(a::StaticAgent, ::DateTime, ::TimeCut, ::Book) = a.policy
 
 """
     declared_underlyings(agent::Agent) -> Tuple of Underlying

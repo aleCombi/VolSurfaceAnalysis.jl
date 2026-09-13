@@ -31,11 +31,10 @@ on the runtime path knows a name. Every kind carries:
   quotes). Every kind defines it. It is what lets a reader apply the
   duplicate rule below without knowing the kind.
 
-One non-kind type also implements `selector`: `Trade`, in
-[`positions`](positions.md), whose selector is its underlying. It has no
-`timestamp` and no provider serves it, so `selector_type` stays a trait on
-kinds only — but the engine and the settlement closure both ask "the spot
-for this leg", and this is the vocabulary for that question.
+No non-kind type implements `selector`. The engine asks "the spot for
+this leg" by naming the leg's contract's underlying directly
+(`at(cut, SpotPrice, contract.underlying, t)`), so `selector_type` stays
+a trait on kinds only.
 
 *Bar-time allowance.* Polygon minute bars are stamped at the bar open
 while their close, high and low are knowable only at bar end. The open

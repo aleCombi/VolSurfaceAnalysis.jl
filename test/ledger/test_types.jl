@@ -96,6 +96,8 @@ end
     @test LedgerEvent === Union{Fill,Match,Expiry,Fee}
     @test eltype(Ledger().events) === LedgerEvent
     @test !(Lot <: LedgerEvent) && !(Leg <: LedgerEvent) && !(Order <: LedgerEvent)
+    @test !(OrderRecord <: LedgerEvent) && !(LegObservation <: LedgerEvent)
+    @test eltype(Ledger().orders) === OrderRecord
 end
 
 @testset "types: the module knows no quotes, spots or time cut" begin
@@ -140,14 +142,64 @@ end
     L = Ledger()
     @test length(L) == 0
     @test isempty(L)
+    @test isempty(L.orders)
     @test L.next_id == 1
     @test L.next_sequence == 1
     @test L.next_group == 1
     @test L.next_execution == 1
+    @test L.next_order_id == 1
+    @test L.next_leg_id == 1
     # an id the ledger never minted is a named failure, not a bare KeyError
     @test_throws DanglingReference VolSurfaceAnalysis.event(L, 1)
     err = try VolSurfaceAnalysis.event(L, 1); nothing catch e; e end
     @test err isa DanglingReference && err.field == :event_id && err.id == 1
     @test occursin("DanglingReference", sprint(showerror, err))
-    @test sprint(show, L) == "Ledger(0 events)"
+    @test sprint(show, L) == "Ledger(0 events, 0 orders)"
+end
+
+@testset "types: the order journal records construct and are immutable" begin
+    obs = LegObservation(_LG_T_OPEN, 0.84, 0.86, 480.0, _LG_T_OPEN)
+    @test obs.quote_at == _LG_T_OPEN && obs.bid == 0.84 && obs.ask == 0.86
+    @test obs.spot == 480.0 && obs.spot_at == _LG_T_OPEN
+    @test !ismutable(obs)
+    # either side of the quote may be missing, as the source allows
+    half = LegObservation(_LG_T_OPEN, missing, 0.86, 480.0, _LG_T_OPEN)
+    @test ismissing(half.bid) && half.ask == 0.86
+    order = Order(:strangle, [Leg(_LG_PUT470, Short, 1, Open), Leg(_LG_CALL490, Short, 1, Open)])
+    rec = OrderRecord(1, 1, 1, _LG_T_OPEN, 0, order, [obs, obs])
+    @test rec.order_id == 1 && rec.first_leg_id == 1 && rec.group == 1
+    @test rec.decided_at == _LG_T_OPEN && rec.known_to == 0
+    @test rec.order === order
+    @test length(rec.observations) == 2
+    @test !ismutable(rec)
+    @test_throws ErrorException rec.order_id = 2
+end
+
+@testset "types: last_sequence is the boundary of everything known so far" begin
+    @test last_sequence(Ledger()) == 0
+    L, _ = _lg_case_round_trip()                 # three events, sequences 1 to 3
+    @test last_sequence(L) == 3 == sequence(L.events[end])
+    @test book_as_known(L, last_sequence(L)) == book_effective(L, _LG_FAR)
+end
+
+@testset "types: order_leg finds the record and the leg index for every minted leg id" begin
+    L, _ = _lg_case_strangle_closed()            # two orders of two legs: leg ids 1 to 4
+    @test length(L.orders) == 2
+    r1, r2 = L.orders
+    @test order_leg(L, 1) == (r1, 1)
+    @test order_leg(L, 2) == (r1, 2)
+    @test order_leg(L, 3) == (r2, 1)
+    @test order_leg(L, 4) == (r2, 2)
+    for id in 1:4
+        r, k = order_leg(L, id)
+        @test r.first_leg_id + k - 1 == id
+        @test r.order.legs[k].contract == (isodd(id) ? _LG_PUT470 : _LG_CALL490)
+    end
+    # an unminted leg id is a named failure
+    @test_throws DanglingReference order_leg(L, 9)
+    err = try order_leg(L, 9); nothing catch e; e end
+    @test err isa DanglingReference && err.field == :order_leg_id && err.id == 9
+    @test occursin("DanglingReference", sprint(showerror, err))
+    @test_throws DanglingReference order_leg(L, 0)
+    @test_throws DanglingReference order_leg(Ledger(), 1)
 end

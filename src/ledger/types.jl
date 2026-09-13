@@ -1,5 +1,6 @@
 # Ledger vocabulary: the order a policy emits, the four event kinds the
-# engine books, their shared header, and the append-only container.
+# engine books, their shared header, the order journal that records what
+# a decision saw, and the append-only container.
 #
 # Identity vocabulary (`Underlying`, `OptionType`, `Call`, `Put`) comes
 # from `data/quotes.jl`. Nothing here refers to quotes, spots or the time
@@ -25,7 +26,7 @@ side_sign(s::Side)::Int = s == Long ? 1 : -1
     ContractKey
 
 Identity of one listed option contract: `underlying`, `strike`, `expiry`
-and `option_type`. `Trade` minus direction and quantity.
+and `option_type`: what a `Leg` names, without side or quantity.
 """
 struct ContractKey
     underlying::Underlying
@@ -211,29 +212,102 @@ exhaustive; the container is a vector over it.
 """
 const LedgerEvent = Union{Fill,Match,Expiry,Fee}
 
+# ---- the order journal -----------------------------------------------
+#
+# What a decision saw, recorded beside the events it produced. The
+# records hold plain numbers and timestamps: the engine resolves the
+# quote and the spot, the ledger records them without knowing the types
+# that carried them.
+
+"""
+    LegObservation
+
+What one leg was priced against: the quote's `bid` and `ask` (either may
+be `missing`, as the source allows) at `quote_at`, and the `spot` of the
+leg's own underlying at `spot_at`. A fill carries none of this; the
+observation is what lets `check_join` recompute a research fill's price
+from the rule it names.
+"""
+struct LegObservation
+    quote_at :: DateTime
+    bid      :: Union{Float64,Missing}
+    ask      :: Union{Float64,Missing}
+    spot     :: Float64
+    spot_at  :: DateTime
+end
+
+"""
+    OrderRecord
+
+One order as recorded by [`record_order!`](@ref): `order_id`;
+`first_leg_id`, so leg `k` of `order` has order leg id
+`first_leg_id + k - 1`; the `group` minted or named for it;
+`decided_at`, the tick; `known_to`, the ledger sequence the decision
+could see (`book_as_known(L, known_to)` is the book the policy was
+handed); the `order` as the policy emitted it; and one observation per
+leg.
+"""
+struct OrderRecord
+    order_id     :: Int
+    first_leg_id :: Int
+    group        :: Int
+    decided_at   :: DateTime
+    known_to     :: Int
+    order        :: Order
+    observations :: Vector{LegObservation}
+end
+
 """
     Ledger
 
 The append-only journal of economic facts. `events` is in sequence
-order; the counters are private to the writers in `append.jl`. `id` and
-`sequence` are separate counters that coincide in a fresh ledger and are
-never used for each other: events are looked up by id through
-[`event`](@ref), not by index.
+order; `orders` is the order journal, one record per order in order-id
+order, recorded beside the events each order produced and read by
+nothing that folds cash. The counters are private to the writers in
+`append.jl`. `id` and `sequence` are separate counters that coincide in
+a fresh ledger and are never used for each other: events are looked up
+by id through [`event`](@ref), not by index.
 """
 mutable struct Ledger
     events::Vector{LedgerEvent}
+    orders::Vector{OrderRecord}
     next_id::Int
     next_sequence::Int
     next_group::Int
     next_execution::Int
+    next_order_id::Int
+    next_leg_id::Int
     index::Dict{Int,Int}   # event id -> position in `events`
 end
 
-Ledger() = Ledger(LedgerEvent[], 1, 1, 1, 1, Dict{Int,Int}())
+Ledger() = Ledger(LedgerEvent[], OrderRecord[], 1, 1, 1, 1, 1, 1, Dict{Int,Int}())
 
 Base.length(L::Ledger) = length(L.events)
 Base.isempty(L::Ledger) = isempty(L.events)
-Base.show(io::IO, L::Ledger) = print(io, "Ledger(", length(L), " events)")
+Base.show(io::IO, L::Ledger) = print(io, "Ledger(", length(L), " events, ", length(L.orders), " orders)")
+
+"""
+    last_sequence(L::Ledger) -> Int
+
+The sequence of the last event appended; `0` when the ledger is empty.
+The boundary `book_as_known` needs for "everything known so far".
+"""
+last_sequence(L::Ledger)::Int = L.next_sequence - 1
+
+"""
+    order_leg(L::Ledger, id::Int) -> (OrderRecord, Int)
+
+The order record holding order leg `id` and the index `k` of that leg
+in `record.order.legs`. Throws [`DanglingReference`](@ref)
+(`:order_leg_id`) for an id no record covers.
+"""
+function order_leg(L::Ledger, id::Int)::Tuple{OrderRecord,Int}
+    for r in L.orders
+        k = id - r.first_leg_id + 1
+        1 <= k <= length(r.order.legs) && return (r, k)
+    end
+    throw(DanglingReference(:order_leg_id, id))
+end
 
 """
     event(L::Ledger, id::Int) -> LedgerEvent

@@ -22,61 +22,70 @@ Progress toward vision:
 2. **Modelling** (vol surface) -- done. `Curve` types, `RateCurve` /
    `DivCurve` kinds, the `surfaces` module, and the `SurfaceFrom`
    provider with a bounded, cut-independent surface cache.
-3. **Positions** -- done. `Trade` / `Position` records and the pure
-   `payoff` / `open_position` / `entry_cost` / `realized_pnl` primitives.
-4. **Policy + Agent + backtesting** -- minimal slice landed.
-   `Policy` abstract type with stateless `decide(p, t, cut, positions)
-   -> Vector{Trade}`; `Agent` abstract type with `current_policy(a, t,
-   cut, positions) -> Policy` (the layer that owns refit / learning /
-   policy evolution); `StaticAgent` wraps a fixed Policy.
-   `TimeCut` gives no-lookahead a supported-interface guarantee;
-   `run_backtest(agent, data, from, to, clock)` drives the tick loop on
-   the experiment's declared `Clock` and
-   `run_backtest(policy, ...)` is a `StaticAgent` wrapper for
-   training / evaluation. Returns a bare `Vector{Position}` ledger.
-   Reporting, result wrappers, and concrete policy / agent types
-   (iron condor, strangle, walk-forward refit, ...) are next.
-5. **Metric computation** -- done. `PnLSeries`
-   (`src/metrics/pnl_series.jl`) is the canonical per-round-trip PnL
-   series: it FIFO-matches position fills, emits one PnL sample per
-   closed round trip or honestly settled residual lot, and counts
-   unmarked residuals. Always-on core metrics (`total_pnl`,
-   `n_round_trips`, `n_opens`, `n_closes`, `hit_rate`) are computed
-   for every result. Optional metrics (`sharpe`, `sortino`,
+3. **Ledger** -- the journal of economic facts
+   (`docs/modules/ledger.md`): `Order` with declared intent per leg,
+   `Fill` / `Match` / `Expiry` / `Fee` events with a bitemporal header,
+   the order journal (`OrderRecord`, `LegObservation`) recording what
+   each decision saw, `Book` by replay (as known by sequence, as true by
+   effective time), `round_trips`, cash in whole USD cents, and one
+   validated write path with named failures; `record_order!` books a
+   structure whole or not at all with the group minted inside the
+   transaction. Replaced the `positions` module (slice 2 of the ledger
+   rebuild).
+4. **Policy + Agent + backtesting** -- on the ledger. `Policy` with
+   stateless `decide(p, t, cut, book::Book) -> Vector{Order}`; `Agent`
+   with `current_policy(a, t, cut, book) -> Policy` (the layer that owns
+   refit / learning / policy evolution); `StaticAgent` wraps a fixed
+   Policy. `TimeCut` gives no-lookahead a supported-interface guarantee;
+   `run_backtest(agent, data, from, to, clock; fill_rule, cost_model,
+   tick_cents)` drives the tick loop on the experiment's declared
+   `Clock`, prices every leg of every order through the simulated venue
+   (`docs/modules/backtest.md`: `:cross_spread` on the tick, IBKR Pro's
+   US options commissions as `Fee` events) before anything is written,
+   and returns a `Ledger`; per-record `check_join` validates the
+   fill-to-order join at each append. Lifecycle (expiries in the tick
+   loop) is slice 3.
+5. **Metric computation** -- on the ledger. `PnLSeries` is built by
+   `pnl_series(::Ledger)` from the ledger's round trips, one sample per
+   structure closed at one instant, in USD. Always-on core metrics
+   (`total_pnl`, `n_round_trips`, `n_opens`, `n_closes`, `hit_rate`)
+   are computed for every result. Optional metrics (`sharpe`, `sortino`,
    `max_drawdown`, `volatility`, `profit_factor`) are selected by
    symbol through `compute_metrics`; the `_METRIC_TABLE` in
    `src/metrics/dispatch.jl` maps each symbol to its function and
    default kwargs. Per-experiment overrides flow through
-   `OutputSpec.metric_params`.
+   `OutputSpec.metric_params`. `window_end_spot` and `n_unmarked` are
+   placeholders until slice 5 brings the structure series and the
+   equity curve.
 6. **Experiment orchestration** -- end-to-end runnable.
    `Experiment` wires `(Agent, MarketData specs, Clock, [from, to],
    OutputSpec)` into a single rerunnable record; `run_experiment(exp)`
-   opens the data for the run and returns an
-   `ExperimentResult` with positions, the `PnLSeries` (per-leg
-   settled), and the computed metrics. Outputs are declared in config:
-   an `[outputs]` table (`metrics`, per-metric params, `artifacts`)
-   resolves to an `OutputSpec`, defaulting to all registered metrics and
-   the default artifact set when omitted. TOML configs (`[data.<kind>]`
-   tables plus a `clock`) resolve via `load_experiment` (stdlib `TOML`
-   + per-sum-type builder registries);
+   opens the data for the run and returns an `ExperimentResult` with
+   the ledger, the `PnLSeries` and the computed metrics; open lots at
+   the window end stay open, nothing is force-settled. Outputs are
+   declared in config: an `[outputs]` table (`metrics`, per-metric
+   params, `artifacts`) resolves to an `OutputSpec`, defaulting to all
+   registered metrics and the default artifact set when omitted. TOML
+   configs (`[data.<kind>]` tables plus a `clock`) resolve via
+   `load_experiment` (stdlib `TOML` + per-sum-type builder registries);
    `scripts/run_experiment.jl <config.toml> [--save] [--out-dir <dir>]`
    prints the result, and optionally persists it / renders artifacts.
    Parallel sweeps are future work.
 7. **Persistence + identity** -- `RunStore` writes runs to a
    Hive-partitioned parquet tree at `<root>/runs/run_id=<full_hash>/`
-   (config.toml verbatim, manifest / metrics / positions / pnl_series
-   parquet, and an `artifacts/` subdir). Identity is canonical and
-   layered: `full_hash(experiment)` is the run id; `core_hash` (data +
-   clock + agent + window) is shared by output variations of one
-   backtest. Both
-   come from a `to_dict` projection (`experiment/identity.jl`) over the
-   *resolved* experiment, so whitespace / key order / `name` / cache
-   knobs don't fork ids. Every run records code provenance
-   (`commit_sha` / `dirty` from `code_provenance`). `save_run` writes,
-   `load_run` reads back into an `ExperimentResult` (specs are pure
-   values, so loading works off-machine; a manifest `schema_version`
-   guards the one-time id break of the data-kinds migration). Cross-run
-   queries are DuckDB
+   (config.toml verbatim, manifest / metrics / events / orders /
+   order_legs / pnl_series parquet, and an `artifacts/` subdir).
+   Identity is canonical and layered: `full_hash(experiment)` is the
+   run id; `core_hash` (data + clock + agent + window) is shared by
+   output variations of one backtest. Both come from a `to_dict`
+   projection (`experiment/identity.jl`) over the *resolved* experiment,
+   so whitespace / key order / `name` / cache knobs don't fork ids.
+   Every run records code provenance (`commit_sha` / `dirty` from
+   `code_provenance`). `save_run` writes, `load_run` rebuilds the ledger
+   through `commit!` and `check_join` and reads back into an
+   `ExperimentResult` (specs are pure values, so loading works
+   off-machine; the manifest `schema_version`, now 3, refuses runs
+   written under the positions schema). Cross-run queries are DuckDB
    SQL against the parquet glob. Compute reuse (skip the backtest on a
    `core_hash` hit) and a curation gate are the next slices.
 
@@ -90,18 +99,18 @@ fixed quantity, expiry by interval). TOML builder + smoke config under
 `configs/`; `scripts/delta_map_demo.jl` visualizes the strike↔|Δ| map
 for sanity checks against real SPY surfaces.
 
-Step 5 / 6 then gained per-leg expiry settlement: `pnl_series` takes a
-caller-supplied `settle(trade) -> Union{Float64, Missing}` closure
-instead of a single scalar. Each residual lot settles at the spot of
-**its own trade's underlying** at `min(trade.expiry, window_end)`, the
-same selector the engine priced its fill against, and is stamped at the
-leg's own expiry; a lot whose spot is missing there counts in
-`PnLSeries.n_unmarked` and is excluded from realized PnL (no silent
-fallback). `window_end_spot` is provenance only. The clock selector says
-*when* to step, not whose price, so `load_experiment` asserts a declared
-policy underlying matches it -- one experiment, one underlying.
-`scripts/run_experiment.jl --out-dir <dir>` renders the equity-curve
-artifact from any config (via `scripts/lib/artifacts.jl` + `viz/pnl.jl`).
+Step 5 / 6 had gained per-leg expiry settlement through a caller-supplied
+`settle(trade)` closure in `pnl_series`, marking each residual lot at its
+own underlying's spot at `min(expiry, window_end)`. The ledger rebuild
+superseded it: settlement is a lifecycle event booked in the tick loop
+(slice 3), open lots at the window end stay open until the equity curve
+marks them (slice 5), and the closure, the window-end spot lookup and
+the fill-vector builder are gone with slice 2. What survives: the clock
+selector says *when* to step, not whose price, and `load_experiment`
+asserts a declared policy underlying matches it -- one experiment, one
+underlying. `scripts/run_experiment.jl --out-dir <dir>` renders the
+equity-curve artifact from any config (via `scripts/lib/artifacts.jl` +
+`viz/pnl.jl`).
 
 The review of the data-kinds branch (PR #9) found six correctness
 defects that were one stance: an unanswerable question reported as an
@@ -112,9 +121,9 @@ question and the map-level shapes check it; two spot rows at one instant
 collapse if identical and throw `ConflictingRecords` if they disagree,
 on every spot shape including `asof`; the surface `asof` walks back under
 a `lookback_ticks` bound and throws `DerivationExhausted` past it; a
-`Constant` honours its visibility stamp in every shape; settlement
-follows each lot's own trade, with `load_experiment` asserting a declared
-policy underlying matches the clock selector. The partition convention is
+`Constant` honours its visibility stamp in every shape; every leg is
+priced against its own underlying, with `load_experiment` asserting a
+declared policy underlying matches the clock selector. The partition convention is
 time-ordered with a one-day spill allowance, and SQL range bounds keep
 millisecond precision. One regression testset per finding lives in
 `test/regressions/test_review_findings.jl` and is part of the gate.
@@ -181,10 +190,30 @@ failed.** What the review deferred is in the backlog below.
   found the fill review's construction-time post-expiry check missing:
   `FillAfterExpiry` is now thrown by the `Fill` constructor too, and
   every rejection in every failure testset checks the ledger snapshot
-  and the book. **Gate: 2306 passed, 0 failed,
-  1 broken.** The one Broken is the structure-atomicity testset,
-  known-broken until slice 2's `record_order!` lands (it then records an
-  unexpected pass, the signal to flip it to `@test`). Next: slice 2.
+  and the book. Gate after hardening: 2306 passed, 0 failed, 1 broken,
+  the structure-atomicity testset waiting for slice 2. **Slice 2 landed
+  2026-09-12** ([ledger-slice2.md](proposals/ledger-slice2.md)): the
+  engine computes, the ledger records. `decide` takes the `Book` and
+  returns `Order`s; the venue (`src/backtest/execution.jl`) prices every
+  leg through `:cross_spread` on the class's tick and IBKR Pro's US
+  options commissions as `Fee` events; `record_order!` books a
+  structure whole or not at all with the group minted inside the
+  transaction; the order journal (`OrderRecord`, `LegObservation`) lives
+  in the `Ledger` and `check_join` validates the fill-to-order join at
+  each engine append, before persistence write and on load;
+  `DuplicateExecution` refuses a repeated
+  execution id; `positions` is retired and persistence writes
+  `events` / `orders` / `order_legs` under schema version 3, so stored
+  runs written under version 2 (the ten-year strangle
+  `5700d3f242f8132e`) rerun from their configs. The structure-atomicity
+  testset is `@test`. **Gate after the slice 2 fix round: 2893 passed,
+  0 failed, 0 errored,
+  2 broken.** The two Broken wait for slice 3: an expiry inside the
+  window is booked as an `Expiry` (`test/experiment/test_experiment.jl`)
+  and the PR #9 regression "settlement uses trade underlying" settles
+  its in-window leg by an `Expiry` against the lot's own underlying
+  (`test/regressions/test_review_findings.jl`). Next: slice 3, lifecycle
+  in the tick loop; then the one auditable strangle run.
 
 ## Backlog
 

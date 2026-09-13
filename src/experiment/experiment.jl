@@ -1,9 +1,9 @@
 # Experiment: the one-shot orchestrator that wires
 # (Agent, MarketData, Clock, time window, requested metrics) into a
-# single rerunnable record. `run_experiment(exp)` opens the data, does
-# the backtest, builds the canonical `PnLSeries` (marked to spot at the
-# window end), and returns an `ExperimentResult` carrying the originating
-# `Experiment` for provenance and rerun.
+# single rerunnable record. `run_experiment(exp)` opens the data, runs
+# the backtest to a `Ledger`, builds the canonical `PnLSeries` from the
+# ledger's round trips, and returns an `ExperimentResult` carrying the
+# originating `Experiment` for provenance and rerun.
 #
 # Train/val/test splits, refit cadence, and learning live inside the
 # `Agent`; the `Experiment` only sees the evaluation window.
@@ -88,97 +88,56 @@ Experiment(; name::AbstractString, agent::Agent, data::MarketData, clock::Clock,
 """
     ExperimentResult
 
-Output of [`run_experiment`](@ref): the ledger, the canonical PnL
-intermediate, the computed metrics, and the originating `Experiment`
-itself so the run can be reproduced via
-`run_experiment(result.experiment)`.
+Output of [`run_experiment`](@ref): the ledger (events and the order
+journal), the canonical PnL intermediate built from it, the computed
+metrics, and the originating `Experiment` itself so the run can be
+reproduced via `run_experiment(result.experiment)`.
 
 # Fields
 - `experiment::Experiment`
-- `positions::Vector{Position}`
+- `ledger::Ledger`
 - `pnl_series::PnLSeries`
 - `metrics::NamedTuple`
 """
 struct ExperimentResult
     experiment :: Experiment
-    positions  :: Vector{Position}
+    ledger     :: Ledger
     pnl_series :: PnLSeries
     metrics    :: NamedTuple
-end
-
-# Build the per-leg settle closure for `run_experiment`, over the opened
-# reader map `d`.
-#
-# The spot is resolved for the LOT'S OWN trade, at `min(expiry,
-# window_end)`: a leg held to expiry inside the window settles at its
-# expiration spot, a leg still open past the window is marked at the
-# window end. One lookup covers both. When the spot is absent there the
-# closure returns `missing`, so `pnl_series` counts the lot in
-# `n_unmarked` rather than silently substituting a number nobody checked.
-#
-# A clock is a tick grid -- a kind plus a selector, meaning "step wherever
-# records of this kind exist for this selector". Its selector answers
-# *when*, not *whose price*. Reading it as an answer to the second is what
-# let a QQQ leg under a SPY clock fill against QQQ and settle against SPY;
-# the engine has priced fills per trade since the data-kinds rewrite.
-# `load_experiment` asserts the clock selector and the agent's declared
-# underlyings agree, which is what makes the past-the-window branch safe
-# by construction rather than by assumption.
-#
-# TODO: fall back to a surface-based theoretical mark when the spot at the
-# settlement instant is unavailable but a surface near it is.
-function _build_settle(d::MarketData, window_end::DateTime)
-    function settle(trd::Trade)::Union{Float64,Missing}
-        ts = min(trd.expiry, window_end)
-        s = only_or_missing(at(d, SpotPrice, selector(trd), ts))
-        return ismissing(s) ? missing : s.price
-    end
-    return settle
 end
 
 """
     run_experiment(exp::Experiment) -> ExperimentResult
 
-Open `exp.data`, run the backtest on `exp.clock`, build the canonical
-[`PnLSeries`](@ref) with per-leg settlement, compute always-on metrics
-plus any metrics requested by symbol, close the data, and return the
-result.
+Open `exp.data`, run the backtest on `exp.clock` with the venue's
+defaults (`run_backtest`'s `fill_rule`, `cost_model` and `tick_cents`;
+there is deliberately no keyword here, since a value that changes
+results must be in the run id, which slice 4 arranges), build the
+canonical [`PnLSeries`](@ref) from the ledger's round trips, compute
+always-on metrics plus any metrics requested by symbol, close the data,
+and return the result.
 
-**Each residual lot settles at its own trade's underlying**, at
-`min(trade.expiry, window_end)`: a leg held to expiry inside the window
-uses its expiration spot, a leg still open past the window is marked at
-the window end, and both are looked up for that leg's own selector -- the
-same selector the engine priced its fill against. A lot whose underlying
-is served but has no spot at that instant is counted in `n_unmarked` and
-skipped from the realized PnL; one on an underlying nothing serves throws
-`UnservedSelector`.
-
-The **window end is the last clock tick** at or before `exp.to`: the
-timestamp of `asof` on the clock's kind and selector, one partition
-walk and no scan. The spot at that tick is resolved for the clock
-underlying and recorded on the series as `window_end_spot`, for
-provenance; no computation reads it. Errors loudly if there is no clock
-tick in the window, that spot is missing, or any requested metric symbol
-is unknown.
+Open lots at the window end stay open and contribute nothing to the
+series until the equity curve of slice 5 marks them; nothing is
+force-settled, and expiries inside the window are booked by the
+lifecycle of slice 3. Errors loudly if there is no clock tick in the
+window, if the clock's selector is not an `Underlying` (an experiment
+ticks on an underlying's grid), or if any requested metric symbol is
+unknown.
 """
 function run_experiment(exp::Experiment)::ExperimentResult
     u = exp.clock.sel
     u isa Underlying || error(
-        "run_experiment: the clock selector must be an Underlying (window-end spot), " *
-        "got $(typeof(u)) for experiment $(exp.name)")
+        "run_experiment: the clock selector must be an Underlying (an experiment ticks " *
+        "on an underlying's grid), got $(typeof(u)) for experiment $(exp.name)")
     with_data(exp.data) do d
-        positions = run_backtest(exp.agent, d, exp.from, exp.to, exp.clock)
+        ledger = run_backtest(exp.agent, d, exp.from, exp.to, exp.clock)
         last_block = asof(d, kind(exp.clock), u, exp.to)
         (isempty(last_block) || first(last_block).timestamp < exp.from) && error(
             "run_experiment: no clock ticks in [$(exp.from), $(exp.to)] " *
             "for experiment $(exp.name)")
-        window_end = first(last_block).timestamp
-        spot = only_or_missing(at(d, SpotPrice, u, window_end))
-        ismissing(spot) && error(
-            "run_experiment: window-end spot missing at $(window_end) for experiment $(exp.name)")
-        settle = _build_settle(d, window_end)
-        series = pnl_series(positions; settle=settle, window_end_spot=spot.price)
+        series = pnl_series(ledger)
         metrics = compute_metrics(series, exp.outputs.metrics; kwargs=exp.outputs.metric_params)
-        ExperimentResult(exp, positions, series, metrics)
+        ExperimentResult(exp, ledger, series, metrics)
     end
 end

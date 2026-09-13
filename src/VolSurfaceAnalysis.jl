@@ -21,8 +21,6 @@ include("surfaces/bs.jl")
 include("surfaces/surface.jl")
 include("surfaces/build.jl")
 include("surfaces/surface_from.jl")
-include("positions/trade.jl")
-include("positions/position.jl")
 include("ledger/contracts.jl")
 include("ledger/types.jl")
 include("ledger/cash.jl")
@@ -32,6 +30,7 @@ include("ledger/round_trips.jl")
 include("policies/policy.jl")
 include("policies/daily_short_strangle.jl")
 include("agents/agent.jl")
+include("backtest/execution.jl")
 include("backtest/engine.jl")
 include("metrics/pnl_series.jl")
 include("metrics/ledger_series.jl")
@@ -68,7 +67,6 @@ export OptionType, Call, Put,
        invert_delta,
        build_surface,
        bs_price, bs_delta, bs_gamma, bs_vega, implied_vol, time_to_expiry,
-       Trade, Position, payoff, open_position, entry_cost, realized_pnl,
        ExerciseStyle, American, European,
        SettlementStyle, AMSettled, PMSettled,
        Delivery, Physical, Cash,
@@ -77,19 +75,22 @@ export OptionType, Call, Put,
        ExpiryOutcome, Worthless, CashSettled,
        ContractKey, Leg, Order, EventHeader,
        Fill, Match, Expiry, Fee, LedgerEvent, Ledger,
+       LegObservation, OrderRecord, last_sequence, order_leg,
        header, event_id, effective_at, recorded_at, sequence, group, side_sign,
        intrinsic, cash,
        Lot, Book, apply!, open_lots, lots, open_groups,
        book_as_known, book_effective,
-       mint_group!, record_fill!, record_expiry!, record_fee!, commit!,
+       mint_group!, record_fill!, record_expiry!, record_fee!, record_order!, commit!,
        NothingToClose, ExceedsOpen, FillAfterExpiry, DanglingReference,
        MatchMismatch, SequenceGap, NonPositiveQuantity, NonIntegralCash,
-       InvalidPrice, RecordedOutOfOrder,
+       InvalidPrice, RecordedOutOfOrder, DuplicateExecution,
        RoundTrip, round_trips,
        Policy, NoOpPolicy, DailyShortStrangle, decide, tick_times,
        declared_underlyings,
        Agent, StaticAgent, current_policy,
-       resolve_quote, run_backtest,
+       fill_price, commission,
+       resolve_quote, fill_legs, check_join, run_backtest,
+       UnpriceableLeg, JoinViolation,
        PnLSeries, pnl_series, equity_curve,
        total_pnl, n_round_trips, hit_rate,
        sharpe, sortino, max_drawdown, volatility, profit_factor,
