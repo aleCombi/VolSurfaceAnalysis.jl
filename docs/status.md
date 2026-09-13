@@ -260,67 +260,26 @@ failed.** What the review deferred is in the backlog below.
   each settling at the previous session's close) -- plus a ninth instant,
   the final pair, whose 2026-03-30 expiry is *past* the window end and so
   is never examined: those two lots stay open, as decision 8 says they
-  should. **Review fix, finding 1:** lifecycle runs before the fill, so
-  a lot opened at the very instant its contract expires escaped the
-  interval that would have settled it -- and every later one, including
-  the window-end pass -- and stayed open with no `Expiry` and no
-  warning. The venue is now stricter than the ledger about expiry:
-  `fill_legs` refuses a leg whose contract expires at or before the tick
-  (`UnpriceableLeg(:expired_contract)`), which is what the interval's
-  completeness rests on. `src/ledger/` is untouched; it still accepts a
-  fill effective at the expiry instant. **Review fix, finding 2:** the
-  reference window ended at the candidate date's 16:00 ET whatever the
-  contract's own expiry, so an intraday expiry settled at a print from
-  after it expired -- allowed by the tick's cut, but incoherent in the
-  effective-time replay, where the `Expiry`'s own instant carried a
-  price that did not exist then. The window now ends at the earlier of
-  16:00 ET and the expiry; under the 16:00 ET convention the parser
-  stamps, nothing moves, which is why the ten-year run was right. And
-  `settlement_price` now has a stated domain: a cut that cannot see the
-  settlement session's close is
-  `UnpriceableLeg(:no_session_close)` rather than a provisional morning
-  print blessed as a settlement (design rule 7). The tick loop cannot
-  reach it; a direct caller of the exported lifecycle step can.
-  **Review fix, finding 3:** the reference window was read with `isempty`
-  and then `last` -- indexing, and two traversals -- while `between`
-  promises only an iterable. A provider that streams its range, the shape
-  `ParquetBarsReader` already returns for `OptionBar`, would have thrown
-  a `MethodError` on `lastindex` there; the defect was latent only
-  because both spot readers happen to return vectors. Settlement is the
-  single consumer of `between` outside `market_data`, and it now consumes
-  each window once, keeping the last record. **Review fixes, findings
-  4-6, are prose:** the tick order and the policy doc promised that a
-  policy never sees an expired leg, which D4's gap path contradicts --
-  an unsettleable lot stays open and stays in the book handed to every
-  later decision, and `lot.contract.expiry <= t` is what a policy reads
-  to tell it apart. A recording policy on the gap fixture now pins that.
-  The schema-3 reassurance above was the same kind of overclaim and is
-  corrected in place. And D1's equality is this engine's choice, not the
-  ledger's rule: `_check_expiry` permits settlement at or after the
-  contract's expiry, which is what makes an expiry booked at a later
-  tick legal.
-  **Second review round, two more.** The expiry bound of the reference
-  window could invert it: a contract expiring before 09:30 ET on its
-  listed date produced the window `[09:30, expiry]`, which no print can
-  satisfy, and the fall-through blamed the data for a gap complete data
-  could not close. That contract is the AM-settled one -- SPX-style
-  options settle against the *opening* print -- and `SettlementStyle`
-  has carried `AMSettled` with no user since the ledger landed, every
-  underlying in the contract table being `PMSettled`. So `:session_close`
-  now names it, `UnpriceableLeg(:pre_open_expiry)`, and the rule that
-  would serve it, `:session_open`, is recorded as future work beside
-  `_SETTLEMENT_RULES` rather than approximated by walking back to a
-  session the contract never settled against. The check is the listed
-  date's alone -- a walked-back date closes before the expiry, so its
-  window is always the whole session -- and only when the calendar calls
-  that date open; a pre-open expiry on a closed date still walks back,
-  across a DST change if need be. Nothing on real data moves: the
-  parser stamps every expiry at 16:00 ET. And the predicate the prose
-  handed a policy for spotting an unsettleable expired lot was
-  `expiry < t` where the interval is `prev < expiry <= t`, so at a tick
-  exactly at an expiry it called the warned-about lot live; it is `<=`
-  here, in both module docs, and in the test that had encoded the same
-  error.
+  should. Two rounds of review closed eight findings; the shape they left is
+  the shape above, plus four boundaries worth keeping here. **The venue
+  is stricter than the ledger about expiry**: `fill_legs` refuses a leg
+  whose contract expires at or before the tick, because trading has
+  stopped, and that refusal is what the interval's completeness rests
+  on -- without it a lot opened at its own expiry instant escapes every
+  later interval, the window-end pass included. `src/ledger/` is
+  untouched and still accepts a fill effective at that instant. **The
+  reference window ends at the earlier of the session close and the
+  contract's expiry**, so an intraday expiry cannot settle at a print
+  from after it expired; under the 16:00 ET convention the parser
+  stamps, nothing moves. **The rule has a stated domain**: a cut that
+  cannot see the settlement session's close is `:no_session_close`, and
+  an expiry before its own session opens is `:pre_open_expiry` -- the
+  AM-settled shape, which `:session_open` would serve and which is
+  recorded as future work rather than approximated. **A policy is not
+  promised that expired legs are gone**: an unsettleable lot stays open
+  and stays in the book handed to every later decision, and
+  `lot.contract.expiry <= t` is what tells a policy it holds one,
+  inclusive because the settlement interval is.
   Next: the settlement rule and the venue into config and identity.
 
 ## Backlog
