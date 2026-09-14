@@ -136,7 +136,17 @@ agent, the window, the venue's two choices and the contract facts
 resolved for the experiment's underlying, omitting non-result-affecting
 fields (cache sizes, readers, part order). The parquet specs' root sits in a
 reserved `dataset` slot of that projection, the place a logical
-dataset id and version would go. The verbatim `config.toml` is still
+dataset id and version would go; they also project the bar-stamp
+convention as the constant `"bar_end"`, which is what moved every run id
+when bar-end visibility landed.
+
+**Runs written under bar-open visibility do not reproduce.** They keep
+their own ids -- the corrected code hashes the same config to a different
+one -- so nothing collides and no schema version separates them; the id
+break *is* the separation. Their ledgers are results of a backtest whose
+data layer served a minute before it had finished, and they cannot be
+reused as results of the corrected one. The loss of reproduction is
+accepted and recorded in [status](../status.md). The verbatim `config.toml` is still
 stored -- for reading and for rebuilding the experiment on load -- but
 it is not what identity is computed from.
 

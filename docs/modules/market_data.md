@@ -36,11 +36,17 @@ this leg" by naming the leg's contract's underlying directly
 (`at(cut, SpotPrice, contract.underlying, t)`), so `selector_type` stays
 a trait on kinds only.
 
-*Bar-time allowance.* Polygon minute bars are stamped at the bar open
-while their close, high and low are knowable only at bar end. The open
-stamp is kept as the visibility time, so a decision at `t` sees the
-`[t, t+1min)` bar. This is a stated one-minute simplification, not a
-shift; a bar-end stamp option on the parquet spec is backlog.
+*Bar-end visibility.* Polygon minute bars are stamped at the bar open
+while their close, high and low are knowable only at bar end, so a
+record read off a bar is stamped at bar end: the 19:29 row is visible at
+19:30, and a decision at 19:30 reads the completed 19:29-19:30 minute.
+The mapping is `bar_visible_at` in [`data`](data.md), applied by the
+readers where rows become records; the stored rows keep their vendor
+stamps and consumers query in visibility time. This is **the**
+convention, fixed in code -- there is no `stamp` option and no bar-open
+compatibility mode, because one of the two settings would enable
+lookahead. It is nevertheless part of what a parquet spec serves, so it
+appears as a constant in the identity projection.
 
 *The session window a settlement rule needs, and what the tree gives.*
 [`backtest`](backtest.md)'s `:session_close` rule reads "the last print
@@ -58,19 +64,28 @@ print is regular-hours-shaped.
 relax the SIP sale-condition rules so that extended-hours trades update
 them ("otherwise there would be no minute aggregates during extended
 trading hours"); daily bars are the opposite, and follow the end-of-day
-guidelines. Measured on the tree (2026-09-14): SPY on 2024-12-24, an
-early close, holds bars from 04:00 to 16:59 ET.
+guidelines. Measured on the tree: SPY on 2024-12-24, an early close,
+holds rows stamped 04:00 to 16:59 ET, so records visible 04:01 to 17:00
+ET.
 
-What holds today is a property of the data, not a guarantee: across the
-ten-year strangle all six early closes hold **zero** bars in (13:00,
-16:00] ET -- the after-hours burst begins after 16:00, outside the
-window -- so all six still settle at their 13:00 ET print. The exposure
-is real and currently unrealised: one extended-hours print inside that
-window would silently become an early close's settlement price. Making
-the rule structural is a data-kind change, not a narrower window: an
-official-close kind with its own provider spec, which the rule would read
-instead of walking the minute tree, and which is a `[data.*]` entry and
-so already inside run identity.
+What holds today is a property of the data, not a guarantee, and the
+measurement is in **visibility** time, which is what the window bounds
+compare against. Re-measured under bar-end visibility (2026-09-14):
+across the ten-year strangle each of the six early closes has exactly
+**one** record visible in (13:00, 16:00] ET -- the 13:00-13:01 vendor
+bar, visible at 13:01 -- and nothing after it until the after-hours
+burst, which stays outside the window. That one record is the same row
+that won the window under bar-open visibility, where it was stamped
+13:00 and sat on the boundary, so the six settlement prices are
+unchanged by the correction. It is also the same documented exposure
+rather than a new one: the rule's answer on an early close rests on the
+tree holding nothing else in that window, not on its bounds. One
+genuine extended-hours print there would silently become an early
+close's settlement price. Making the rule structural is a data-kind
+change, not a narrower window: an official-close kind with its own
+provider spec, which the rule would read instead of walking the minute
+tree, and which is a `[data.*]` entry and so already inside run
+identity.
 
 ## The protocol
 
@@ -358,13 +373,21 @@ synthesis is `QuotesFromBars` above the reader.
   `missing` — the tree is not open yet, and a spec is what an
   `Experiment` and the config loader hold.
 
-*Partition convention.* A partition `D` may hold any timestamp in
-`[D 00:00, D+1 02:00)` UTC: the collector writes a US session into its
-local date, so after-midnight UTC rows spill past `Date(ts)`. Every
-shape consults partitions `Date(ts) - 1` and `Date(ts)`, which is what
-makes `at == collect(between(ts, ts))` an identity rather than a
-coincidence. A ticker whose underlying is not the partition's throws:
-under `symbol=` partitioning that is a corrupt store.
+*Partition convention.* A partition `D` may hold any **row** timestamp
+in `[D 00:00, D+1 02:00)` UTC: the collector writes a US session into
+its local date, so after-midnight UTC rows spill past `Date(ts)`. Under
+bar-end visibility the records those rows produce are **visible** in
+`[D 00:01, D+1 02:01)` -- the same one-day spill, shifted one minute at
+both ends -- so a `D 23:59` row becomes visible on `D + 1` without
+moving file. Every shape consults partitions `Date(ts) - 1` and
+`Date(ts)` with `ts` in visibility time, and that bound still covers the
+shifted span: nothing in a partition later than `Date(to)` has become
+visible yet, and nothing in one earlier than `Date(from) - 1` is still
+to come. That is what makes `at == collect(between(ts, ts))` an identity
+rather than a coincidence, and what finds a `23:59` row at next-day
+`00:00` even when no next-day partition exists. A ticker whose
+underlying is not the partition's throws: under `symbol=` partitioning
+that is a corrupt store.
 
 The convention is **time-ordered**: every row in partition `D - 1`
 precedes every row in partition `D`. One contiguous session per
@@ -400,8 +423,13 @@ Bars are left alone deliberately. A chain has many rows per timestamp by
 design, so its de-duplication key is the contract, not the instant, and
 what "conflicting" means over six fields is a separate question.
 
-*Bar-time allowance.* Rows carry Polygon's bar-open stamp, kept as the
-visibility time (see Kinds).
+*Bar-end visibility.* Rows keep Polygon's bar-open stamp in storage; the
+record read off one is visible at bar end (see Kinds). The readers hold
+that mapping in one place -- every timestamp leaving DuckDB is shifted
+forward, every SQL bound is shifted back -- so records, the cached
+per-partition timestamp lists, the spot blocks and all four shapes speak
+visibility time, and no call site above the reader knows the vendor
+clock exists.
 
 ## Config and identity
 
@@ -410,7 +438,11 @@ Config builds specs, one `[data.<kind>]` table per kind plus a
 the [`experiment`](experiment.md) loader, nothing on the runtime path
 knows a name. Identity (`to_dict`) projects one entry per kind, the
 clock, and per-spec fields that determine the records served; readers,
-cache sizes and part order never enter the hash. The parquet specs'
+cache sizes and part order never enter the hash. The parquet specs also
+project the bar-stamp convention as a constant `"bar_end"`: it is not a
+field and no config key can vary it, but it determines which minute
+every decision reads, and it is what separates a run made under the
+corrected clock from one made under bar-open visibility. The parquet specs'
 root sits in a reserved `dataset` slot, the place a logical dataset id
 and version would go.
 

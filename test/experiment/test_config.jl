@@ -430,7 +430,9 @@ end
 # Minimal parquet fixture: one date, one timestamp, one option row + one
 # spot row. The runner's NoOpPolicy never trades; we only need the
 # loader to construct a working MarketData + Clock and the engine to find
-# at least one clock tick so settlement resolves.
+# at least one clock tick so settlement resolves. The rows are stamped
+# 15:29 because a minute bar is visible at its end: the single clock tick
+# they produce is at 15:30, which is the window the config below names.
 function _write_smoke_parquet_tree(root::AbstractString)
     options_root = joinpath(root, "options_1min")
     spot_root    = joinpath(root, "spots_1min")
@@ -441,7 +443,7 @@ function _write_smoke_parquet_tree(root::AbstractString)
 
     db = DuckDB.DB(":memory:")
     try
-        ts = "2024-01-15 15:30:00"
+        ts = "2024-01-15 15:29:00"          # visible at 15:30, the config's window
         opath = replace(joinpath(odir, "data.parquet"), "\\" => "/")
         DBInterface.execute(db, """
             COPY (SELECT

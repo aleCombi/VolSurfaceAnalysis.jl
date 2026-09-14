@@ -7,12 +7,19 @@
 # kind-specific directory. The selector is a query argument, so one spec
 # serves every symbol= partition under its root.
 #
-# Partition convention: partition D may hold any timestamp in
+# Partition convention: partition D may hold any ROW timestamp in
 # [D 00:00, D+1 02:00) UTC -- the collector writes a US session into the
 # partition of its local date, and after-midnight UTC rows spill past
-# Date(ts). Every shape therefore consults partitions Date(ts)-1 and
-# Date(ts) (bounded by the partition list), which is what makes
-# `at == collect(between(ts, ts))` an identity rather than a coincidence.
+# Date(ts). Under bar-end visibility those rows are VISIBLE in
+# [D 00:01, D+1 02:01), shifted one minute at both ends; the spill is still
+# one day, and a D 23:59 row is simply visible at D+1 00:00 without
+# moving file. Every shape consults partitions Date(ts)-1 and Date(ts)
+# (bounded by the partition list) with `ts` in visibility time, which
+# covers the shifted range for the same reason it covered the raw one:
+# the visible span of partition D still ends before D+2 and still starts
+# after D-1's does. That is what makes `at == collect(between(ts, ts))`
+# an identity rather than a coincidence, and what finds a 23:59 row at
+# next-day 00:00 with no next-day partition in existence.
 #
 # The convention is TIME-ORDERED: every row in partition D-1 precedes
 # every row in partition D. That is what a local-date collector produces
@@ -29,8 +36,20 @@
 # in `asof` and a lazy two-way merge in `between`; no collector writes
 # one today.
 #
-# Vendor rows carry the bar-open timestamp; it is kept as the visibility
-# time (documented one-minute allowance, see data.md / market_data.md).
+# Bar-end visibility. Vendor rows carry the bar-OPEN timestamp; a record
+# read off such a row is visible only at bar end. The translation lives
+# here, at the one boundary where rows become records, and nowhere else:
+#
+#   reading  -- `_visible(row)` on every timestamp that leaves DuckDB, so
+#               records, the cached per-partition timestamp lists and the
+#               spot blocks are all in visibility time, and every
+#               searchsorted over them already answers the right clock;
+#   querying -- `_row_ts_sql(ts)` on every SQL bound, the inverse, so the
+#               exact and range predicates address the stored clock.
+#
+# Every shape above these two therefore speaks visibility time. See
+# `bar_visible_at` / `bar_row_time` in data/polygon.jl for why bar end is
+# the convention rather than a setting.
 
 using DuckDB
 using DuckDB: DBInterface
@@ -89,26 +108,40 @@ function _list_partitions(root::AbstractString, u::Underlying)::Vector{Date}
     sort!(out)
 end
 
-# Partitions that can hold a timestamp in [from, to] under the convention.
+# Partitions that can hold a record VISIBLE in [from, to] under the
+# convention. `from` and `to` are visibility times, and the bounds are
+# unchanged by the bar-end shift: partition D's rows are visible in
+# [D 00:01, D+1 02:01), so a partition later than Date(to) cannot have
+# become visible yet and one earlier than Date(from) - 1 finished being
+# visible before `from`. The extra minute at the top is what lets a
+# D 23:59 row be found at D+1 00:00 while D+1 has no partition at all.
 function _candidate_partitions(parts::Vector{Date}, from::DateTime, to::DateTime)
     lo = searchsortedfirst(parts, Date(from) - Day(1))
     hi = searchsortedlast(parts, Date(to))
     view(parts, lo:hi)
 end
 
-# Millisecond precision, not whole seconds: `between` is public and its
-# bounds are passed through untouched (a TOML datetime with a fractional
-# second, a TimeCut cutoff), and truncating the lower bound would admit
-# the row at its floor while `at` and `timestamps` compare at full
-# precision. DuckDB parses the fractional part; `at`'s exact
+# A stored row timestamp as the visibility time of the record read off it.
+# Applied to every timestamp that leaves DuckDB, so nothing above this
+# line ever holds a bar-open stamp.
+_visible(x)::DateTime = bar_visible_at(_coerce_dt(x))
+
+# The inverse, as a SQL literal: a bound in visibility time addressing the
+# stored clock. Millisecond precision, not whole seconds: `between` is
+# public and its bounds are passed through untouched (a TOML datetime with
+# a fractional second, a TimeCut cutoff), and truncating the lower bound
+# would admit the row at its floor while `at` and `timestamps` compare at
+# full precision. The whole-minute shift preserves that precision and both
+# inclusive endpoints. DuckDB parses the fractional part; `at`'s exact
 # `timestamp = ...` predicate stays exact.
-_ts_sql(ts::DateTime) = "TIMESTAMP '" * Dates.format(ts, "yyyy-mm-dd HH:MM:SS.sss") * "'"
+_row_ts_sql(ts::DateTime) =
+    "TIMESTAMP '" * Dates.format(bar_row_time(ts), "yyyy-mm-dd HH:MM:SS.sss") * "'"
 
 function _query_distinct_timestamps(con::DuckDB.DB, path::AbstractString)::Vector{DateTime}
     sql = "SELECT DISTINCT timestamp FROM '$(_sql_path(path))' ORDER BY timestamp"
     out = DateTime[]
     for row in Tables.rows(DBInterface.execute(con, sql))
-        push!(out, _coerce_dt(row.timestamp))
+        push!(out, _visible(row.timestamp))
     end
     out
 end
@@ -267,7 +300,7 @@ function _query_bars(r::ParquetBarsReader, u::Underlying, d::Date, m::PartitionM
         low_val   = lows    === nothing ? missing : (lows[i]    === missing ? missing : Float64(lows[i]))
         vol       = volumes === nothing ? missing : (volumes[i] === missing ? missing : Float64(volumes[i]))
         out[i] = OptionBar(tk, u, meta.expiry, meta.strike, meta.option_type,
-                           open_val, high_val, low_val, close_val, vol, _coerce_dt(tstamps[i]))
+                           open_val, high_val, low_val, close_val, vol, _visible(tstamps[i]))
     end
     out
 end
@@ -281,7 +314,7 @@ function at(r::ParquetBarsReader, ::Any, ::Type{OptionBar}, u::Underlying, ts::D
         for d in _candidate_partitions(_partitions(r, u), ts, ts)
             m = _meta(r, u, d)
             insorted(ts, m.timestamps) || continue
-            append!(out, _query_bars(r, u, d, m, "timestamp = " * _ts_sql(ts)))
+            append!(out, _query_bars(r, u, d, m, "timestamp = " * _row_ts_sql(ts)))
         end
         out
     end
@@ -295,7 +328,7 @@ function _day_bars(r::ParquetBarsReader, u::Underlying, d::Date, from::DateTime,
     isempty(m.timestamps) && return OptionBar[]
     (from <= last(m.timestamps) && to >= first(m.timestamps)) || return OptionBar[]
     _query_bars(r, u, d, m,
-        "timestamp BETWEEN " * _ts_sql(from) * " AND " * _ts_sql(to) * " ORDER BY timestamp")
+        "timestamp BETWEEN " * _row_ts_sql(from) * " AND " * _row_ts_sql(to) * " ORDER BY timestamp")
 end
 
 # The lazy range iterator: walks candidate partitions in order, loading
@@ -409,7 +442,7 @@ function _load_spot_block(con::DuckDB.DB, path::AbstractString)::SpotBlock
     px_buf = Float64[]
     for row in Tables.rows(DBInterface.execute(con, sql))
         row.close === missing && continue
-        push!(ts_buf, _coerce_dt(row.timestamp))
+        push!(ts_buf, _visible(row.timestamp))
         push!(px_buf, Float64(row.close))
     end
     SpotBlock(ts_buf, px_buf)

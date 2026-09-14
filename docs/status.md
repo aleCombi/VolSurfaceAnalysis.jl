@@ -21,7 +21,12 @@ Progress toward vision:
    `SurfaceFrom`) that read through the map they are called from, so a
    `TimeCut` is a structural no-lookahead through derived data. The
    `data` module keeps the canonical records and the Polygon row
-   mapping.
+   mapping, in which a record read off a minute bar is visible at **bar
+   end** (`bar_visible_at`): the vendor row's open stamp plus the bar
+   interval, so a decision at `t` reads the completed `[t - 1min, t)`
+   minute rather than one still running. That is the convention, fixed
+   in code and not a setting; the readers apply it where rows become
+   records and every shape above them speaks visibility time.
 2. **Modelling** (vol surface) -- done. `Curve` types, `RateCurve` /
    `DivCurve` kinds, the `surfaces` module, and the `SurfaceFrom`
    provider with a bounded, cut-independent surface cache.
@@ -97,8 +102,10 @@ Progress toward vision:
    written under the positions schema and under the pre-identity one).
    Every value that changes a result is either in `core_hash` -- the data
    specs, clock, agent, window, the venue's `fill_rule` / `cost_model`,
-   and the contract facts resolved for the experiment's underlying -- or a
-   stated constant in code. Cross-run queries are DuckDB
+   the contract facts resolved for the experiment's underlying, and the
+   parquet specs' bar-stamp convention, projected as the constant
+   `"bar_end"` because it decides which minute every decision reads --
+   or a stated constant in code. Cross-run queries are DuckDB
    SQL against the parquet glob. Compute reuse (skip the backtest on a
    `core_hash` hit) and a curation gate are the next slices.
 
@@ -339,8 +346,68 @@ failed.** What the review deferred is in the backlog below.
   ten-year strangle rerun (same 4478 `Expiry` events over 1699 instants,
   same 2240 orders, same metrics, new run id) is the regression that
   closes the round.
+  **Bar-end stamps landed 2026-09-14**
+  ([docs/proposals/bar-stamp.md](proposals/bar-stamp.md)): the clock
+  correction, and a deliberate break in comparability. A vendor minute
+  bar is stamped at its open, but its close, high and low -- and the
+  bid/ask `SpreadFromOHLCV` builds from them -- are knowable only when
+  the minute ends, so a decision at `t` was reading the `[t, t+1min)`
+  bar. That is up to one minute of lookahead on every bar-based fill and
+  every settlement price, and `TimeCut` could not catch it: the machinery
+  is sound, but the record admitted through it claimed to be knowable
+  before it was, so the guarantee failed below the cut. A record read off
+  a minute bar is now visible at bar end (`bar_visible_at`, one
+  `BAR_INTERVAL` = one minute for both production trees). The shift lives
+  in one place, the parquet readers' boundary between rows and records:
+  every timestamp leaving DuckDB is moved forward, every SQL bound is
+  moved back, so records, the cached per-partition timestamp lists, the
+  spot blocks and all four shapes speak visibility time and no call site
+  above knows the vendor clock exists. Synthesis preserves the instant
+  and adds nothing. It is **the** convention, fixed in code: no `stamp`
+  option, no compatibility mode, because one of the two settings would
+  enable lookahead -- and the backlog entry that parked it as a spec
+  option is deleted as decided rather than left parked. The partition
+  convention survives: a `D 23:59` row is now visible on `D + 1` without
+  leaving partition `D`, and the existing `Date(ts) - 1` / `Date(ts)`
+  candidate pair still finds it, with no next-day partition required; the
+  one-day spill bound is restated so that raw `[D 00:00, D+1 02:00)`
+  and visible `[D 00:01, D+1 02:01)` are told apart. Settlement needed no
+  rule change, only an honest input: the vendor row stamped 16:00 ET is
+  the 16:00-16:01 minute and now becomes visible at 16:01, outside the
+  09:30-16:00 window, so the 15:59-16:00 bar -- visible at exactly 16:00
+  -- wins it. On 2024-01-16 that moves SPY's settlement print from 475.02
+  to 474.95. The six early closes do not move: their winning record is
+  the 13:00-13:01 bar, on the boundary before and one minute inside now,
+  re-measured rather than assumed. The correction also unblocks the curve
+  round's blocking case with no marking workaround: an exact quote lookup
+  at the session close now finds the last completed option bar (501 SPY
+  quotes at 21:00 UTC on 2024-01-16, where the old clock found none).
+  **The identity break is the point, not a side effect.** The parquet
+  specs project the bar-stamp convention as the constant `"bar_end"`, so
+  `core_hash` and every run id move; it is not a user option and not in
+  `OutputSpec`. The ten-year strangle's id goes from
+  `838ba0b70857c331` / `b47d70c2da9b4dd5` to `2bde5de695f9c90a` /
+  `f555f4bdbaf8d1d8`. `RUN_SCHEMA_VERSION` stays 4: the file layout does
+  not change and the id break is itself what separates the two
+  populations. **Stored runs made under bar-open visibility do not
+  reproduce under this code, and their ledgers cannot be reused as
+  results of the corrected backtest.** That cost is accepted. **Gate:
+  3549 passed, 0 failed, 0 errored, 0 broken.** The new ten-year
+  baseline, which supersedes the pre-correction numbers everywhere they
+  appear (the curve round's brief included): 13204 events (4402 fills,
+  4400 expiries, 4402 fees) over 2201 orders and 2200 round trips,
+  cash USD 29942.23, two lots still open at the window end; `total_pnl`
+  29694.53, `hit_rate` 0.7805, `sharpe` 1.2686, `sortino` 1.4208,
+  `max_drawdown` 6399.89, `volatility` 2681.17, `profit_factor` 1.3028.
+  Against the old 13438 / 2240 / USD 32008.66 (`total_pnl` 31785.96,
+  `sharpe` 1.3481, `profit_factor` 1.3288) the minute of lookahead was
+  worth about USD 2066 of cash over ten years, roughly 6.5%, and 0.06 of
+  Sharpe. Thirty-nine fewer orders is not a grid change -- the entry
+  instant has a chain on 2492 of the 3652 days either way, differing on
+  one -- but the contents of the minute the policy now reads.
   Next: PR 4, outputs -- `pnl_series`, the metrics, the equity curve and
-  the structure series.
+  the structure series, and then the marked-curve round against this
+  baseline.
 
 ## Backlog
 
@@ -414,11 +481,6 @@ intended direction, but not currently in flight.
   policy view that cannot address `OptionBar`) was declined in
   data-kinds v3 in favour of a doc rule; revisit if a policy ever
   couples to vendor bars.
-- **Bar-end timestamp convention as a spec option.** Polygon minute
-  bars keep their bar-open stamp as the visibility time, a documented
-  one-minute allowance. A `stamp = :bar_end` option on
-  `ParquetOptionBars`, in identity, would make the choice explicit per
-  experiment.
 - **Path metrics over simultaneous samples.** `pnl_series` orders
   samples at one timestamp by pnl (losses first) so `max_drawdown` is
   deterministic; aggregating simultaneous samples for path metrics is

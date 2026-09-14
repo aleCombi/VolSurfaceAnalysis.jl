@@ -245,3 +245,57 @@ end
         @test asof(d, VolatilitySurface, _MD_SPY, _SF_TS1 - Minute(1)) == VolatilitySurface[]
     end
 end
+
+# A surface built from the parquet trees rather than from already-stamped
+# in-memory records. This is the read shape a stamp defect escapes through:
+# the cut is handed to the derived provider, but what it filters is the
+# visibility time the reader put on each bar. Fixtures made of records that
+# are already canonical cannot catch that, so this one goes through DuckDB.
+mktempdir() do root
+    opts = joinpath(root, "options_1min")
+    spots = joinpath(root, "spots_1min")
+    _sf_pq_ticker(k) = "O:SPY240216" * (k >= _SF_SPOT ? "C" : "P") *
+                       lpad(round(Int, k * 1000), 8, '0')
+    # Closes are the BS prices at _SF_TS1, so the recovered IV is exact --
+    # and _SF_TS1 is the instant the bar is VISIBLE at, which is the instant
+    # the surface builder prices from. A bar-open stamp would price the same
+    # closes at a different time to expiry and miss these IVs.
+    function _sf_pq_row(k, sigma)
+        px = bs_price(_SF_SPOT, k, time_to_expiry(_SF_EXPIRY, _SF_TS1), sigma,
+                      k >= _SF_SPOT ? Call : Put; r=_SF_R, q=_SF_Q)
+        (ticker = _sf_pq_ticker(k), close = px, volume = 1.0,
+         open = px, high = px, low = px, timestamp = _md_row(_SF_TS1))
+    end
+    _md_write_options_parquet(joinpath(opts, "date=2024-01-15", "symbol=SPY", "data.parquet"),
+                              [_sf_pq_row(470.0, 0.21), _sf_pq_row(480.0, 0.20),
+                               _sf_pq_row(490.0, 0.19)])
+    _md_write_spot_parquet(joinpath(spots, "date=2024-01-15", "symbol=SPY", "data.parquet"),
+                           [_md_row(_SF_TS1)], [_SF_SPOT])
+
+    @testset "SurfaceFrom: a parquet-backed surface obeys bar-end visibility" begin
+        m = MarketData(ParquetOptionBars(opts), QuotesFromBars(SpreadFromOHLCV(0.7)),
+                       ParquetSpots(spots),
+                       Constant(RateCurve(_MD_USD, FlatCurve(_SF_R))),
+                       Constant(DivCurve(_MD_SPY, FlatCurve(_SF_Q))),
+                       SurfaceFrom(currency=_MD_USD))
+        with_data(m) do d
+            s = only_or_missing(at(d, VolatilitySurface, _MD_SPY, _SF_TS1))
+            @test s isa RawSurface
+            @test s.timestamp == _SF_TS1 && s.spot == _SF_SPOT
+            @test iv(s, _SF_EXPIRY, 480.0) ≈ 0.20 atol = 1e-4
+            # nothing at the row stamp: the minute the closes come from had
+            # not finished there
+            @test at(d, VolatilitySurface, _MD_SPY, _md_row(_SF_TS1)) == VolatilitySurface[]
+            @test timestamps(d, VolatilitySurface, _MD_SPY, _md_row(_SF_TS1), _SF_TS1) == [_SF_TS1]
+
+            # the cut reaches the derived read through its inputs
+            before = TimeCut(d, _SF_TS1 - Millisecond(1))
+            @test at(before, VolatilitySurface, _MD_SPY, _SF_TS1) == VolatilitySurface[]
+            @test asof(before, VolatilitySurface, _MD_SPY, _SF_TS1) == VolatilitySurface[]
+            @test isempty(collect(between(before, VolatilitySurface, _MD_SPY,
+                                          _md_row(_SF_TS1), _SF_TS1)))
+            at_end = TimeCut(d, _SF_TS1)
+            @test only_or_missing(at(at_end, VolatilitySurface, _MD_SPY, _SF_TS1)).timestamp == _SF_TS1
+        end
+    end
+end

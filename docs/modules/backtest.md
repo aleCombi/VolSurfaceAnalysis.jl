@@ -174,6 +174,18 @@ printless date the calendar calls open is a data gap, named and
 reported, never evidence that the exchange was closed (design rule 7). Ad-hoc closures the calendar may lag behind have
 a cited `const` seam beside it, empty today.
 
+**The window's last print is a completed minute.** The rule's bounds are
+unchanged by bar-end visibility ([`data`](data.md)); its input is what
+became honest. A vendor row stamped 16:00 ET is the 16:00-16:01 minute,
+after the close, and under a bar-open stamp it could win the window and
+settle the contract. Under bar-end visibility it becomes visible at
+16:01, outside the window, and the 15:59-16:00 bar -- visible at exactly
+16:00 -- is the last print inside it. An early close does not move at all:
+its winning record is the 13:00-13:01 bar, which was stamped 13:00 and
+sat on the window boundary before and is visible at 13:01 and one minute
+inside it now -- the same row, the same price, and the same documented
+dependence on the tree holding nothing else in that window.
+
 **The reference window never runs past the expiry instant.** It opens at
 09:30 ET and closes at the earlier of 16:00 ET and the contract's own
 expiry. For the 16:00 ET convention the parser stamps, and for every

@@ -43,6 +43,14 @@ end
 
 # ---------- parquet fixture writers ----------
 # Small Hive-layout parquet trees written through DuckDB.
+#
+# A vendor minute bar is stamped at its OPEN and is knowable only at its
+# END, so the row a fixture writes is one minute earlier than the instant
+# the record it produces is visible at. Tests name the visible instant --
+# that is what every shape is queried with -- and hand `_md_row(t)` to the
+# writers. The minute is spelled out here rather than taken from the code
+# under test, so a change to the convention shows up as a failure.
+_md_row(t::DateTime) = t - Minute(1)
 
 using DuckDB
 using DuckDB: DBInterface
@@ -89,8 +97,14 @@ function _md_write_spot_parquet(path::AbstractString, ts::Vector{DateTime}, pric
 end
 
 # Two option days (three chain timestamps) and two spot days, plus one spot
-# row at 2024-01-16T00:30 written into the date=2024-01-15 partition: the
+# row at 2024-01-16T00:29 written into the date=2024-01-15 partition: the
 # after-midnight spill the real spots tree has.
+#
+# The returned `t1a` / `t1b` / `t2a` / `spill` are VISIBILITY times -- the
+# instants the records exist at, which is what every shape is queried with.
+# The rows are written one bar earlier, at `row_*`, because a minute bar is
+# stamped at its open and is knowable only at its end. The two are returned
+# separately so a test can pin the mapping itself rather than assume it.
 function _md_build_parquet_fixture(root::AbstractString)
     opts = joinpath(root, "options_1min")
     spot = joinpath(root, "spots_1min")
@@ -100,28 +114,32 @@ function _md_build_parquet_fixture(root::AbstractString)
     t1b = DateTime(d1, Time(15, 31))
     t2a = DateTime(d2, Time(15, 30))
     spill = DateTime(d2, Time(0, 30))
+    row_t1a, row_t1b = _md_row(t1a), _md_row(t1b)
+    row_t2a, row_spill = _md_row(t2a), _md_row(spill)
 
     _md_write_options_parquet(
         joinpath(opts, "date=2024-01-15", "symbol=SPY", "data.parquet"),
         [
             (ticker="O:SPY240129C00406000", close=1.05, volume=12.0,
-             open=1.00, high=1.10, low=0.95, timestamp=t1a),
+             open=1.00, high=1.10, low=0.95, timestamp=row_t1a),
             (ticker="O:SPY240129P00400000", close=2.10, volume=5.0,
-             open=2.05, high=2.20, low=2.00, timestamp=t1a),
+             open=2.05, high=2.20, low=2.00, timestamp=row_t1a),
             (ticker="O:SPY240129C00406000", close=1.07, volume=20.0,
-             open=1.05, high=1.12, low=1.04, timestamp=t1b),
+             open=1.05, high=1.12, low=1.04, timestamp=row_t1b),
         ])
     _md_write_options_parquet(
         joinpath(opts, "date=2024-01-16", "symbol=SPY", "data.parquet"),
         [(ticker="O:SPY240129C00406000", close=1.20, volume=30.0,
-          open=1.18, high=1.25, low=1.15, timestamp=t2a)])
+          open=1.18, high=1.25, low=1.15, timestamp=row_t2a)])
 
     _md_write_spot_parquet(
         joinpath(spot, "date=2024-01-15", "symbol=SPY", "data.parquet"),
-        [t1a, t1b, spill], [480.0, 480.5, 480.7])
+        [row_t1a, row_t1b, row_spill], [480.0, 480.5, 480.7])
     _md_write_spot_parquet(
         joinpath(spot, "date=2024-01-16", "symbol=SPY", "data.parquet"),
-        [t2a], [481.0])
+        [row_t2a], [481.0])
 
-    (opts_root=opts, spot_root=spot, t1a=t1a, t1b=t1b, t2a=t2a, spill=spill, d1=d1, d2=d2)
+    (opts_root=opts, spot_root=spot, t1a=t1a, t1b=t1b, t2a=t2a, spill=spill,
+     row_t1a=row_t1a, row_t1b=row_t1b, row_t2a=row_t2a, row_spill=row_spill,
+     d1=d1, d2=d2)
 end
