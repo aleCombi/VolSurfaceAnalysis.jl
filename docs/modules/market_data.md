@@ -377,7 +377,7 @@ synthesis is `QuotesFromBars` above the reader.
 in `[D 00:00, D+1 02:00)` UTC: the collector writes a US session into
 its local date, so after-midnight UTC rows spill past `Date(ts)`. Under
 bar-end visibility the records those rows produce are **visible** in
-`(D 00:00, D+1 02:01]` -- the same one-day spill, one minute later at
+`[D 00:01, D+1 02:01)` -- the same one-day spill, shifted one minute at
 both ends -- so a `D 23:59` row becomes visible on `D + 1` without
 moving file. Every shape consults partitions `Date(ts) - 1` and
 `Date(ts)` with `ts` in visibility time, and that bound still covers the

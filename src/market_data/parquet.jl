@@ -11,7 +11,7 @@
 # [D 00:00, D+1 02:00) UTC -- the collector writes a US session into the
 # partition of its local date, and after-midnight UTC rows spill past
 # Date(ts). Under bar-end visibility those rows are VISIBLE in
-# (D 00:00, D+1 02:01], one minute later at both ends; the spill is still
+# [D 00:01, D+1 02:01), shifted one minute at both ends; the spill is still
 # one day, and a D 23:59 row is simply visible at D+1 00:00 without
 # moving file. Every shape consults partitions Date(ts)-1 and Date(ts)
 # (bounded by the partition list) with `ts` in visibility time, which
@@ -111,7 +111,7 @@ end
 # Partitions that can hold a record VISIBLE in [from, to] under the
 # convention. `from` and `to` are visibility times, and the bounds are
 # unchanged by the bar-end shift: partition D's rows are visible in
-# (D 00:00, D+1 02:01], so a partition later than Date(to) cannot have
+# [D 00:01, D+1 02:01), so a partition later than Date(to) cannot have
 # become visible yet and one earlier than Date(from) - 1 finished being
 # visible before `from`. The extra minute at the top is what lets a
 # D 23:59 row be found at D+1 00:00 while D+1 has no partition at all.

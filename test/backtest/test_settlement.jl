@@ -838,34 +838,44 @@ mktempdir() do root
     end
 end
 
-# The early close, re-measured against shifted inputs rather than assumed.
-# 2024-12-24 closes at 13:00 ET and the production tree holds no bar in
-# (13:00, 16:00] ET, so the last row is the 12:59-13:00 minute -- visible at
-# 13:00, still well inside the 09:30-16:00 window. The after-hours burst
-# begins later and stays outside it, one minute later than it did before.
+# The early close, shaped like the production tree rather than a convenient
+# one. 2024-12-24 closes at 13:00 ET. The tree holds a raw 13:00 row -- the
+# 13:00-13:01 minute -- and nothing after it until the after-hours burst, so
+# the row that wins the 09:30-16:00 window is visible at 13:01, the first
+# minute *after* the official close.
+#
+# That is the model's stated departure, unchanged by bar-end stamping and not
+# introduced by it: under bar-open the same row sat on the 13:00 boundary and
+# won there instead. It is what an official per-series close would remove
+# (see the backlog). The fixture pins the measured case, so a future change
+# that silently picks the 12:59 bar instead has to argue with a test.
 mktempdir() do root
     spots = joinpath(root, "spots_1min")
     d, prev = Date(2024, 12, 24), Date(2024, 12, 23)
     for (day, rows, prices) in (
             (prev, [_st_et(prev, 9, 29), _st_et(prev, 15, 59)], [595.0, 600.0]),
             (d, [_st_et(d, 9, 29), _st_et(d, 12, 0), _st_et(d, 12, 59),
-                 _st_et(d, 16, 30)], [604.0, 605.0, 606.0, 611.0]))
+                 _st_et(d, 13, 0), _st_et(d, 16, 30)],
+                [604.0, 605.0, 606.0, 607.0, 611.0]))
         _md_write_spot_parquet(
             joinpath(spots, "date=" * Dates.format(day, "yyyy-mm-dd"), "symbol=SPY",
                      "data.parquet"), rows, prices)
     end
 
-    @testset "settlement: an early close settles at its completed 13:00 ET bar" begin
+    @testset "settlement: an early close settles at the bar visible at 13:01 ET" begin
         with_data(MarketData(ParquetSpots(spots))) do data
             c = _st_call(d, 600.0)
             t = _st_et(d, 16, 0)
-            # the last row of the shortened session is visible at 13:00 ET
+            # The 12:59-13:00 minute is visible at 13:00 and is *not* the last.
             @test only_or_missing(at(data, SpotPrice, _ST_SPY, _st_et(d, 13, 0))).price == 606.0
-            # the after-hours print is visible at 16:31 ET, outside the window
-            @test only_or_missing(at(data, SpotPrice, _ST_SPY, _st_et(d, 16, 31))).price == 611.0
+            # The 13:00-13:01 minute is visible at 13:01, still inside the window,
+            # and is the one that settles: the minute after the official close.
+            @test only_or_missing(at(data, SpotPrice, _ST_SPY, _st_et(d, 13, 1))).price == 607.0
+            # Nothing else until the after-hours print, visible at 16:31, outside.
             @test isempty(collect(between(data, SpotPrice, _ST_SPY,
-                                          _st_et(d, 13, 0) + Millisecond(1), t)))
-            @test settlement_price(:session_close, TimeCut(data, t), c, t) == 606.0
+                                          _st_et(d, 13, 1) + Millisecond(1), t)))
+            @test only_or_missing(at(data, SpotPrice, _ST_SPY, _st_et(d, 16, 31))).price == 611.0
+            @test settlement_price(:session_close, TimeCut(data, t), c, t) == 607.0
         end
     end
 end

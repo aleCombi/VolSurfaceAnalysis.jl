@@ -371,7 +371,7 @@ failed.** What the review deferred is in the backlog below.
   leaving partition `D`, and the existing `Date(ts) - 1` / `Date(ts)`
   candidate pair still finds it, with no next-day partition required; the
   one-day spill bound is restated so that raw `[D 00:00, D+1 02:00)`
-  and visible `(D 00:00, D+1 02:01]` are told apart. Settlement needed no
+  and visible `[D 00:01, D+1 02:01)` are told apart. Settlement needed no
   rule change, only an honest input: the vendor row stamped 16:00 ET is
   the 16:00-16:01 minute and now becomes visible at 16:01, outside the
   09:30-16:00 window, so the 15:59-16:00 bar -- visible at exactly 16:00
