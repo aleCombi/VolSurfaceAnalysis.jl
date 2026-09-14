@@ -1,34 +1,62 @@
 # Always-on core metrics: cheap, unparameterized, universally
-# interesting. `compute_metrics` (added with the optional set)
-# computes these unconditionally on every call; they are not listed
-# in an experiment's output spec because they cost nothing to ask for.
+# interesting. `compute_metrics` computes these unconditionally on every
+# call; they are not listed in an experiment's output spec because they
+# cost nothing to ask for.
+#
+# Three read per-trade dollars (`trades.jl`), two read the ledger. None
+# reads the marked curve: every question here is about trades, and a
+# trade's unit is a trade.
 
 """
-    total_pnl(series::PnLSeries) -> Float64
+    total_pnl(trades::AbstractVector{<:Real}) -> Float64
 
-Sum of realized PnL across every round trip in `series`. Returns
-`0.0` on an empty series.
-"""
-total_pnl(s::PnLSeries)::Float64 = sum(s.pnl; init=0.0)
+Realised PnL across every closed trade, in USD. Returns `0.0` when
+nothing closed.
 
+Deliberately the *realised* total, the same number it has always been,
+and not the last point of the marked curve: the two differ by the
+unrealised profit of whatever is still open, and quietly widening the
+meaning of a reported figure is how a comparison between two runs stops
+being one.
 """
-    n_round_trips(series::PnLSeries) -> Int
-
-Number of round-trip PnL entries in `series` -- matched chunks plus
-still-open residuals. Equal to `length(series.pnl)`.
-"""
-n_round_trips(s::PnLSeries)::Int = length(s.pnl)
+total_pnl(trades::AbstractVector{<:Real})::Float64 = sum(trades; init=0.0)
 
 """
-    hit_rate(series::PnLSeries) -> Float64
+    n_round_trips(trades::AbstractVector{<:Real}) -> Int
 
-Fraction of round trips with strictly positive PnL. Returns `NaN` on
-an empty series -- hit rate is genuinely undefined with no trades,
-and `NaN` propagates through downstream math rather than silently
-reading as "0% wins."
+Number of closed trades, at the grouping `trades` was built with
+(structures by default, legs under `unit = :leg`).
 """
-function hit_rate(s::PnLSeries)::Float64
-    n = length(s.pnl)
+n_round_trips(trades::AbstractVector{<:Real})::Int = length(trades)
+
+"""
+    hit_rate(trades::AbstractVector{<:Real}) -> Float64
+
+Fraction of closed trades with strictly positive PnL. Returns `NaN` when
+nothing closed -- hit rate is genuinely undefined with no trades, and
+`NaN` propagates through downstream math rather than silently reading as
+"0% wins". Breakeven trades (PnL exactly zero) are not wins.
+"""
+function hit_rate(trades::AbstractVector{<:Real})::Float64
+    n = length(trades)
     n == 0 && return NaN
-    return count(>(0.0), s.pnl) / n
+    return count(>(0), trades) / n
 end
+
+"""
+    n_opens(L::Ledger) -> Int
+
+`Open` fills in the ledger. A count of the ledger's own events, so it is
+a function of the ledger and of nothing else -- which is the home it has
+now that the series wrapper that used to carry it as a field is gone.
+"""
+n_opens(L::Ledger)::Int = count(e -> e isa Fill && e.intent == Open, L.events)
+
+"""
+    n_closes(L::Ledger) -> Int
+
+`Close` fills in the ledger. The twin of [`n_opens`](@ref); note that an
+expiry is not a closing fill, so a book that expired rather than traded
+out reports opens with no closes.
+"""
+n_closes(L::Ledger)::Int = count(e -> e isa Fill && e.intent == Close, L.events)

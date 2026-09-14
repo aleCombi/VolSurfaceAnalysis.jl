@@ -61,21 +61,28 @@ end
 
 const _SMOKE_CONFIG = _smoke_config()
 
+# A hand-built marked curve standing in for the one a run would produce:
+# the smoke config's data roots do not exist, so nothing here could mark a
+# book, and the curve is an input to the writer rather than something the
+# writer derives.
+_st_curve(profit::Vector{Float64}) = MarkedCurve(
+    [DateTime(2024, 1, 16, 21, 0) + Day(i - 1) for i in 1:length(profit)],
+    profit, DateTime[], Symbol[])
+
 # Config-buildable experiment + the hand-built strangle ledger, opened and
-# closed as two orders: one structure sample of 92.40 USD at the close.
-function _build_smoke_result(config=_SMOKE_CONFIG)
+# closed as two orders: one structure trade of 92.40 USD at the close.
+function _build_smoke_result(config=_SMOKE_CONFIG; curve=_st_curve([0.0, 40.0, 92.40]))
     exp = load_experiment_str(config)
     L, _ = _lg_case_strangle_closed()
-    series = pnl_series(L)
-    ExperimentResult(exp, L, series, compute_metrics(series, exp.outputs.metrics))
+    ExperimentResult(exp, L, curve, compute_metrics(L, curve, exp.outputs.metrics))
 end
 
 # Config-buildable experiment with an empty ledger (folder / identity tests).
 function _empty_result(config)
     exp = load_experiment_str(config)
     L = Ledger()
-    series = pnl_series(L)
-    ExperimentResult(exp, L, series, compute_metrics(series, exp.outputs.metrics))
+    curve = _st_curve(Float64[])
+    ExperimentResult(exp, L, curve, compute_metrics(L, curve, exp.outputs.metrics))
 end
 
 _st_pq(path) = replace(path, "\\" => "/")
@@ -122,7 +129,7 @@ end
     end
 end
 
-@testset "save_run: writes config.toml + 6 parquet files under runs/run_id=<hash>/" begin
+@testset "save_run: writes config.toml + 5 parquet files under runs/run_id=<hash>/" begin
     mktempdir() do tmp
         res = _build_smoke_result()
         with_run_store(joinpath(tmp, "kb")) do store
@@ -132,10 +139,13 @@ end
             dir = run_dir(store, id)
             @test isdir(dir)
             @test isfile(joinpath(dir, "config.toml"))
-            for f in ("manifest", "metrics", "events", "orders", "order_legs", "pnl_series")
+            for f in ("manifest", "metrics", "events", "orders", "order_legs")
                 @test isfile(joinpath(dir, f * ".parquet"))
             end
             @test !isfile(joinpath(dir, "positions.parquet"))
+            # The derived series left with the type it exported; the tables
+            # that replace it belong to the second half of the outputs round.
+            @test !isfile(joinpath(dir, "pnl_series.parquet"))
 
             @test read(joinpath(dir, "config.toml"), String) == _SMOKE_CONFIG
         end
@@ -196,12 +206,13 @@ end
             @test r.name == "persist-smoke"
             @test r.n_events == 10
             @test r.n_orders == 2
-            @test r.n_opens == res.pnl_series.n_opens == 2
-            @test r.n_closes == res.pnl_series.n_closes == 2
-            @test isnan(r.window_end_spot)
-            @test r.n_unmarked == res.pnl_series.n_unmarked == 0
-            @test r.schema_version == 4
+            @test r.n_opens == n_opens(res.ledger) == 2
+            @test r.n_closes == n_closes(res.ledger) == 2
+            @test r.n_marked == n_marked(res.curve) == 3
+            @test r.n_unmarked == n_unmarked(res.curve) == 0
+            @test r.schema_version == 5
             @test !(:n_positions in propertynames(r))
+            @test !(:window_end_spot in propertynames(r))
         end
         GC.gc()
     end
@@ -306,16 +317,18 @@ end
     end
 end
 
-@testset "save_run: pnl_series.parquet has one row per sample" begin
+@testset "save_run: manifest carries NULL counts when the run has no curve" begin
     mktempdir() do tmp
-        res = _build_smoke_result()
+        exp = load_experiment_str(_SMOKE_CONFIG)
+        L, _ = _lg_case_strangle_closed()
+        res = ExperimentResult(exp, L, nothing, compute_metrics(L, nothing, exp.outputs.metrics))
         with_run_store(joinpath(tmp, "kb")) do store
             id = save_run(store, res, _SMOKE_CONFIG)
-            path = joinpath(run_dir(store, id), "pnl_series.parquet")
-            rows = _st_rows(store, path, "SELECT idx, timestamp, pnl FROM '$(_st_pq(path))' ORDER BY idx")
-            @test length(rows) == length(res.pnl_series.pnl) == 1
-            @test [Float64(r.pnl) for r in rows] ≈ res.pnl_series.pnl
-            @test first(rows).timestamp == _LG_T_CLOSE
+            r = first(_st_rows(store, joinpath(run_dir(store, id), "manifest.parquet")))
+            # NULL, not 0: "no curve at all" and "a curve that marked nothing"
+            # are different facts and must not read the same in SQL.
+            @test r.n_marked === missing
+            @test r.n_unmarked === missing
         end
         GC.gc()
     end
@@ -441,20 +454,15 @@ end
             @test L.book.cash == 9240
             @test check_join(L) === nothing
 
-            @test loaded.pnl_series.timestamps == res.pnl_series.timestamps
-            @test loaded.pnl_series.pnl ≈ res.pnl_series.pnl
-            @test isequal(loaded.pnl_series.window_end_spot, res.pnl_series.window_end_spot)
-            @test loaded.pnl_series.n_opens == res.pnl_series.n_opens
-            @test loaded.pnl_series.n_closes == res.pnl_series.n_closes
-            @test loaded.pnl_series.n_unmarked == res.pnl_series.n_unmarked
-
-            # Metrics: keys match, types preserved (Int stays Int), NaN preserved
-            @test keys(loaded.metrics) == keys(res.metrics)
+            # This config's roots do not exist, so the curve cannot be
+            # recomputed and degrades by the declared boundary.
+            @test loaded.curve === nothing
+            @test keys(loaded.metrics) ==
+                  (:total_pnl, :n_round_trips, :n_opens, :n_closes, :hit_rate)
             @test loaded.metrics.n_round_trips isa Int
             @test loaded.metrics.n_opens isa Int
             @test loaded.metrics.total_pnl ≈ res.metrics.total_pnl ≈ 92.40
-            @test isnan(loaded.metrics.sharpe) == isnan(res.metrics.sharpe)
-            @test loaded.metrics.max_drawdown == res.metrics.max_drawdown
+            @test loaded.metrics.n_opens == 2 && loaded.metrics.n_closes == 2
         end
         GC.gc()
     end
@@ -467,7 +475,7 @@ end
             id = save_run(store, res, _SMOKE_CONFIG)
             L = load_run(store, id).ledger
             @test [r.pnl for r in round_trips(L)] == [4370, 4870]
-            @test pnl_series(L).pnl ≈ [92.40]
+            @test trade_pnl(L) ≈ [92.40]
             @test book_effective(L, _LG_FAR) == book_effective(res.ledger, _LG_FAR)
             @test book_as_known(L, 4) == book_as_known(res.ledger, 4)
             @test book_as_known(L, 4).cash == 19370
@@ -546,14 +554,14 @@ end
     end
 end
 
-@testset "manifest schema_version: written as 4, and load_run refuses other versions" begin
+@testset "manifest schema_version: written as 5, and load_run refuses other versions" begin
     mktempdir() do tmp
         res = _build_smoke_result()
         with_run_store(joinpath(tmp, "kb")) do store
             id = save_run(store, res, _SMOKE_CONFIG)
             path = replace(joinpath(run_dir(store, id), "manifest.parquet"), "\\" => "/")
             r = first(collect(DBInterface.execute(store.con, "SELECT schema_version FROM '$path'")))
-            @test r.schema_version == VolSurfaceAnalysis.RUN_SCHEMA_VERSION == 4
+            @test r.schema_version == VolSurfaceAnalysis.RUN_SCHEMA_VERSION == 5
             @test load_run(store, id) isa ExperimentResult
 
             # a manifest written before the column existed
@@ -614,8 +622,166 @@ end
             @test isempty(loaded.ledger)
             @test isempty(loaded.ledger.orders)
             @test _st_counters(loaded.ledger) == (1, 1, 1, 1, 1, 1)
-            @test isempty(loaded.pnl_series.pnl)
+            @test isempty(trade_pnl(loaded.ledger))
             @test loaded.metrics.n_round_trips == 0
+        end
+        GC.gc()
+    end
+end
+
+# ---- load_run recomputes: nothing derived is read back ------------------
+
+# A one-session parquet tree: SPY spot prints at the open and the close of
+# Fri 2024-01-19, plus one option bar so the bar root is a real tree. The
+# strangle ledger is flat from 2024-01-18, so the book needs no mark at
+# that session's close and the curve is the realised total.
+#
+# Rows are written in VENDOR time and read back in visibility time, one
+# minute later (`bar_visible_at`). So the 14:29 row is the 09:30 ET open and
+# the 20:59 row is the 16:00 ET close: written a minute earlier than the
+# instant they stand for. Writing 21:00 here would put the close outside the
+# 09:30-16:00 window, which is the whole point of the convention.
+function _st_session_tree(root::AbstractString)
+    options_root = joinpath(root, "options_1min")
+    spot_root    = joinpath(root, "spots_1min")
+    odir = joinpath(options_root, "date=2024-01-19", "symbol=SPY")
+    sdir = joinpath(spot_root,    "date=2024-01-19", "symbol=SPY")
+    mkpath(odir); mkpath(sdir)
+    db = DuckDB.DB(":memory:")
+    try
+        opath = replace(joinpath(odir, "data.parquet"), "\\" => "/")
+        DBInterface.execute(db, """
+            COPY (SELECT
+                'O:SPY240216C00480000'          AS ticker,
+                5.05::DOUBLE                    AS close,
+                TIMESTAMP '2024-01-19 15:30:00' AS timestamp,
+                100.0::DOUBLE                   AS volume,
+                'SPY'                           AS parsed_underlying,
+                DATE '2024-02-16'               AS parsed_expiry,
+                480.0::DOUBLE                   AS parsed_strike,
+                'C'                             AS parsed_option_type
+            ) TO '$opath' (FORMAT PARQUET);
+        """)
+        spath = replace(joinpath(sdir, "data.parquet"), "\\" => "/")
+        DBInterface.execute(db, """
+            COPY (SELECT * FROM (VALUES
+                (TIMESTAMP '2024-01-19 14:29:00', 480.0::DOUBLE),
+                (TIMESTAMP '2024-01-19 20:59:00', 483.0::DOUBLE)
+            ) AS t(timestamp, close)) TO '$spath' (FORMAT PARQUET);
+        """)
+    finally
+        DBInterface.close!(db)
+    end
+    return (options_root=options_root, spot_root=spot_root)
+end
+
+_st_session_config(tree) = """
+name  = "session-smoke"
+from  = 2024-01-19T00:00:00
+to    = 2024-01-19T23:59:00
+clock = { kind = "option_quote", underlying = "SPY" }
+
+[outputs]
+metrics = ["max_drawdown", "profit_factor"]
+
+[data.option_bar]
+type = "parquet_option_bars"
+root = "$(replace(tree.options_root, "\\" => "/"))"
+
+[data.option_quote]
+type = "from_bars"
+synthesizer = { type = "ohlcv_spread", lambda = 0.7 }
+
+[data.spot_price]
+type = "parquet_spots"
+root = "$(replace(tree.spot_root, "\\" => "/"))"
+
+[data.rate_curve]
+type = "constant"
+currency = "USD"
+value = 0.04
+
+[data.div_curve]
+type = "constant"
+underlying = "SPY"
+value = 0.015
+
+[data.vol_surface]
+type = "surface_from"
+currency = "USD"
+
+[agent]
+type = "static"
+
+[agent.policy]
+type = "noop"
+"""
+
+@testset "load_run: with data present, the curve and every metric are recomputed" begin
+    mktempdir() do tmp
+        tree = _st_session_tree(tmp)
+        cfg  = _st_session_config(tree)
+        exp  = load_experiment_str(cfg)
+        L, _ = _lg_case_strangle_closed()
+        # Save a result carrying a deliberately wrong curve: if the load path
+        # read anything derived back, this is the number that would return.
+        wrong = _st_curve([-999.0, -999.0])
+        res = ExperimentResult(exp, L, wrong, compute_metrics(L, wrong, exp.outputs.metrics))
+        with_run_store(joinpath(tmp, "kb")) do store
+            id = save_run(store, res, cfg)
+            # Remove the derived export outright: the load path must not need it.
+            rm(joinpath(run_dir(store, id), "metrics.parquet"))
+            loaded = load_run(store, id)
+
+            @test loaded.curve isa MarkedCurve
+            @test loaded.curve.timestamps == [DateTime(2024, 1, 19, 21, 0)]
+            @test n_unmarked(loaded.curve) == 0
+            @test loaded.curve.profit ≈ [92.40]          # flat book: the realised total
+            @test loaded.curve != wrong
+            @test loaded.metrics.max_drawdown == 0.0     # not the saved -999 curve's
+            @test loaded.metrics.total_pnl ≈ 92.40
+            @test loaded.metrics.profit_factor ≈ profit_factor(trade_pnl(L), nothing)
+            @test haskey(loaded.metrics, :max_drawdown)  # the curve is available
+        end
+        GC.gc()
+    end
+end
+
+# The degradation boundary is one line wide: opening the data. A failure
+# *inside* the curve build is a real defect in the run or the tree, and
+# turning it into "market data unavailable" would hand back an apparently
+# valid partial result under a warning naming the wrong cause -- the exact
+# masking design rule 7 forbids, and the defect this whole round removes.
+@testset "load_run: a failure inside the curve build propagates, never degrades" begin
+    mktempdir() do tmp
+        tree = _st_session_tree(tmp)
+        cfg  = _st_session_config(tree)
+        exp  = load_experiment_str(cfg)
+        L, _ = _lg_case_strangle_closed()
+        good = _st_curve([92.40])
+        res  = ExperimentResult(exp, L, good, compute_metrics(L, good, exp.outputs.metrics))
+        with_run_store(joinpath(tmp, "kb")) do store
+            id = save_run(store, res, cfg)
+            # The tree still opens; it now disagrees with itself at one instant,
+            # the real defect found in the SPY tree while this round was built.
+            sdir = joinpath(tree.spot_root, "date=2024-01-19", "symbol=SPY")
+            db = DuckDB.DB(":memory:")
+            try
+                spath = replace(joinpath(sdir, "data.parquet"), "\\" => "/")
+                DBInterface.execute(db, """
+                    COPY (SELECT * FROM (VALUES
+                        (TIMESTAMP '2024-01-19 14:29:00', 480.0::DOUBLE),
+                        (TIMESTAMP '2024-01-19 20:59:00', 483.0::DOUBLE),
+                        (TIMESTAMP '2024-01-19 20:59:00', 483.5::DOUBLE)
+                    ) AS t(timestamp, close)) TO '$spath' (FORMAT PARQUET);
+                """)
+            finally
+                DBInterface.close!(db)
+            end
+            err = try; load_run(store, id); nothing; catch e; e; end
+            @test err isa ConflictingRecords
+            @test err !== nothing
+            println("  propagated, did not degrade: ", typeof(err))
         end
         GC.gc()
     end

@@ -1,8 +1,8 @@
 # Experiment: the one-shot orchestrator that wires
 # (Agent, MarketData, Clock, time window, requested metrics) into a
 # single rerunnable record. `run_experiment(exp)` opens the data, runs
-# the backtest to a `Ledger`, builds the canonical `PnLSeries` from the
-# ledger's round trips, and returns an `ExperimentResult` carrying the
+# the backtest to a `Ledger`, marks the open book at every session close
+# into a `MarkedCurve`, and returns an `ExperimentResult` carrying the
 # originating `Experiment` for provenance and rerun.
 #
 # Train/val/test splits, refit cadence, and learning live inside the
@@ -11,14 +11,15 @@
 # --- Output spec ---------------------------------------------------------
 
 # Default optional-metric set: every metric in the dispatch table, in
-# canonical (sorted) order. Metrics are cheap reductions over a
-# `PnLSeries`, so "all of them" is the sensible default when a config
-# does not name them -- and it keeps which-metrics out of every header.
+# canonical (sorted) order. Metrics are cheap reductions over a marked
+# curve or a trade vector, so "all of them" is the sensible default when a
+# config does not name them -- and it keeps which-metrics out of every
+# header.
 _default_metrics() = sort!(collect(keys(_METRIC_TABLE)))
 
 # Default artifacts rendered when a run is materialized. The renderer
 # registry lives in the viz layer; identity only needs the symbol here.
-_default_artifacts() = [:equity_curve]
+_default_artifacts() = [:marked_curve]
 
 """
     OutputSpec(; metrics, metric_params, artifacts)
@@ -109,20 +110,27 @@ Experiment(; name::AbstractString, agent::Agent, data::MarketData, clock::Clock,
     ExperimentResult
 
 Output of [`run_experiment`](@ref): the ledger (events and the order
-journal), the canonical PnL intermediate built from it, the computed
-metrics, and the originating `Experiment` itself so the run can be
-reproduced via `run_experiment(result.experiment)`.
+journal), the marked profit curve, the computed metrics, and the
+originating `Experiment` itself so the run can be reproduced via
+`run_experiment(result.experiment)`.
 
 # Fields
 - `experiment::Experiment`
 - `ledger::Ledger`
-- `pnl_series::PnLSeries`
+- `curve::Union{MarkedCurve,Nothing}`
 - `metrics::NamedTuple`
+
+The ledger is authoritative; everything else here is derived from it and
+is rebuilt rather than stored (see [`load_run`](@ref)). `curve` is the one
+derived result that is not a function of the ledger alone -- marking an
+open lot needs market data -- so it is `nothing` when that data was not
+available, and the path metrics are then absent from `metrics` rather than
+reported as `NaN`.
 """
 struct ExperimentResult
     experiment :: Experiment
     ledger     :: Ledger
-    pnl_series :: PnLSeries
+    curve      :: Union{MarkedCurve,Nothing}
     metrics    :: NamedTuple
 end
 
@@ -156,19 +164,19 @@ end
 
 Open `exp.data`, run the backtest on `exp.clock` through the
 experiment's own venue (`exp.fill_rule` / `exp.cost_model`, both in its
-`core_hash`), build the canonical [`PnLSeries`](@ref) from the ledger's
-round trips, compute always-on metrics plus any metrics requested by
-symbol, close the data, and return the result. There is deliberately no
-keyword here: a value that changes results is a field, so that the run id
-sees it.
+`core_hash`), build the [`MarkedCurve`](@ref) over the window's session
+closes, compute always-on metrics plus any metrics requested by symbol,
+close the data, and return the result. There is deliberately no keyword
+here: a value that changes results is a field, so that the run id sees it.
 
-Open lots at the window end stay open and contribute nothing to the
-series until the equity curve of slice 5 marks them; nothing is
-force-settled, and expiries inside the window are booked by the
-engine's lifecycle step. Errors loudly if there is no clock tick in the
-window, if the clock's selector is not an `Underlying` (an experiment
-ticks on an underlying's grid), or if any requested metric symbol is
-unknown.
+Marking runs here, while the cut is open, because it is not a pure
+function of the ledger: only the unrealised term needs market data. Open
+lots at the window end stay open -- nothing is force-settled, and expiries
+inside the window are booked by the engine's lifecycle step -- and the
+marked curve is what values them at every session close. Errors loudly if
+there is no clock tick in the window, if the clock's selector is not an
+`Underlying` (an experiment ticks on an underlying's grid), or if any
+requested metric symbol is unknown.
 """
 function run_experiment(exp::Experiment)::ExperimentResult
     u = _experiment_underlying(exp)
@@ -179,8 +187,9 @@ function run_experiment(exp::Experiment)::ExperimentResult
         (isempty(last_block) || first(last_block).timestamp < exp.from) && error(
             "run_experiment: no clock ticks in [$(exp.from), $(exp.to)] " *
             "for experiment $(exp.name)")
-        series = pnl_series(ledger)
-        metrics = compute_metrics(series, exp.outputs.metrics; kwargs=exp.outputs.metric_params)
-        ExperimentResult(exp, ledger, series, metrics)
+        curve = marked_curve(ledger, d, u, exp.from, exp.to)
+        metrics = compute_metrics(ledger, curve, exp.outputs.metrics;
+                                  kwargs=exp.outputs.metric_params)
+        ExperimentResult(exp, ledger, curve, metrics)
     end
 end

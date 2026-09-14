@@ -10,14 +10,14 @@
 using VolSurfaceAnalysis
 using Plots
 
-function _render_equity_curve(result::ExperimentResult, dir::AbstractString)
-    s = result.pnl_series
-    isempty(s.pnl) && return nothing
-    p = plot(s; title=result.experiment.name, linewidth=1.5, size=(1000, 500),
+function _render_marked_curve(result::ExperimentResult, dir::AbstractString)
+    c = result.curve
+    (c === nothing || isempty(c.profit)) && return nothing
+    p = plot(c; title=result.experiment.name, linewidth=1.5, size=(1000, 500),
              left_margin=Plots.Measures.Length(:mm, 5),
              bottom_margin=Plots.Measures.Length(:mm, 5))
     hline!(p, [0.0]; color=:gray, linestyle=:dot, linewidth=1, label=false)
-    path = joinpath(dir, "equity_curve.png")
+    path = joinpath(dir, "marked_curve.png")
     savefig(p, path)
     return path
 end
@@ -25,15 +25,16 @@ end
 # artifact id -> renderer. Mirrors the metric dispatch table; grow it as new
 # plot/export types land.
 const ARTIFACT_RENDERERS = Dict{Symbol,Function}(
-    :equity_curve => _render_equity_curve,
+    :marked_curve => _render_marked_curve,
 )
 
 """
     render_artifacts(result, dir; artifacts=result.experiment.outputs.artifacts)
 
 Render each declared artifact into `dir` (created if absent); return the
-paths written. Renderers that produce nothing (e.g. an equity curve for an
-empty series) are skipped; unknown artifact ids error.
+paths written. Renderers that produce nothing (a marked curve with no
+marked session, or a run loaded without its market data) are skipped;
+unknown artifact ids error.
 """
 function render_artifacts(result::ExperimentResult, dir::AbstractString;
                           artifacts=result.experiment.outputs.artifacts)

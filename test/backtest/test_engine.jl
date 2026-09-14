@@ -149,10 +149,8 @@ end
     @test length(trips) == 1
     @test trips[1].pnl == -1200                          # (50000 - 51000) - 100 - 100
     @test trips[1].pnl == book.cash
-    s = pnl_series(L)
-    @test s.pnl ≈ [-12.00]
-    @test s.timestamps == [f.ts3]
-    @test s.n_opens == 1 && s.n_closes == 1
+    @test trade_pnl(L) ≈ [-12.00]
+    @test n_opens(L) == 1 && n_closes(L) == 1
     @test check_join(L) === nothing
     @test book == book_effective(L, DateTime(2030, 1, 1))
 end

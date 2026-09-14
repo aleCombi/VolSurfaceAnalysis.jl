@@ -1,46 +1,45 @@
-# Tests for the always-on core metrics: total_pnl, n_round_trips, hit_rate.
-# The series is built directly: the metrics are pure functions over it.
+# The always-on core metrics. Three are pure functions over per-trade
+# dollars, two are counts over the ledger's own events.
 
-_cr_series(ts::Vector{DateTime}, pnl::Vector{Float64}; n_opens=length(pnl), n_closes=length(pnl)) =
-    PnLSeries(ts, pnl, NaN, n_opens, n_closes, 0)
-
-@testset "core metrics: empty series" begin
-    s = _cr_series(DateTime[], Float64[])
-    @test total_pnl(s) == 0.0
-    @test n_round_trips(s) == 0
-    @test isnan(hit_rate(s))
+@testset "core metrics: nothing closed" begin
+    t = Float64[]
+    @test total_pnl(t) == 0.0
+    @test n_round_trips(t) == 0
+    @test isnan(hit_rate(t))
 end
 
-@testset "core metrics: all winners" begin
-    ts2 = DateTime(2024, 1, 15, 16, 30)
-    s = _cr_series([ts2], [1.0])                 # bought at 5.0, sold at 6.0
-    @test total_pnl(s) ≈ 1.0
-    @test n_round_trips(s) == 1
-    @test hit_rate(s) == 1.0
+@testset "core metrics: all winners, all losers, mixed" begin
+    @test total_pnl([1.0]) ≈ 1.0 && hit_rate([1.0]) == 1.0
+    @test total_pnl([-1.0]) ≈ -1.0 && hit_rate([-1.0]) == 0.0
+    t = [1.0, -0.5]
+    @test total_pnl(t) ≈ 0.5
+    @test n_round_trips(t) == 2
+    @test hit_rate(t) == 0.5
 end
 
-@testset "core metrics: all losers" begin
-    ts2 = DateTime(2024, 1, 15, 16, 30)
-    s = _cr_series([ts2], [-1.0])                # bought at 6.0, sold at 5.0
-    @test total_pnl(s) ≈ -1.0
-    @test n_round_trips(s) == 1
-    @test hit_rate(s) == 0.0
+@testset "core metrics: a breakeven trade is not a win" begin
+    @test total_pnl([0.0]) == 0.0
+    @test n_round_trips([0.0]) == 1
+    @test hit_rate([0.0]) == 0.0
 end
 
-@testset "core metrics: mixed -- hit rate counts strictly positive" begin
-    ts3 = DateTime(2024, 1, 15, 16, 30)
-    ts4 = DateTime(2024, 1, 15, 16, 35)
-    # Round trip 1: +1.0 (winner). Round trip 2: -0.5 (loser).
-    s = _cr_series([ts3, ts4], [1.0, -0.5])
-    @test total_pnl(s) ≈ 0.5
-    @test n_round_trips(s) == 2
-    @test hit_rate(s) == 0.5
+@testset "total_pnl stays the realised total, not the curve's last level" begin
+    L, _ = _lg_case_open_at_end()
+    trades = trade_pnl(L)
+    @test total_pnl(trades) ≈ 50.0            # the one closed structure, and only it
+    c = marked_curve(L, _mk_data(), _MK_UND, _MK_FROM, _MK_TO)
+    # The open put is worth something at every session close, so the curve's
+    # last level is a different number by construction. Widening total_pnl to
+    # mean that is exactly what decision 8 forbids.
+    @test !(c.profit[end] ≈ total_pnl(trades))
 end
 
-@testset "core metrics: zero-PnL trade does not count as a win" begin
-    ts2 = DateTime(2024, 1, 15, 16, 30)
-    s = _cr_series([ts2], [0.0])                 # exact breakeven
-    @test total_pnl(s) == 0.0
-    @test n_round_trips(s) == 1
-    @test hit_rate(s) == 0.0
+@testset "n_opens / n_closes: counts of the ledger's own fills" begin
+    L, _ = _lg_case_strangle_closed()
+    @test n_opens(L) == 2
+    @test n_closes(L) == 2
+    @test n_opens(Ledger()) == 0 && n_closes(Ledger()) == 0
+    # They are functions of the ledger, so they survive the wrapper that used
+    # to carry them as fields.
+    @test applicable(n_opens, L) && applicable(n_closes, L)
 end

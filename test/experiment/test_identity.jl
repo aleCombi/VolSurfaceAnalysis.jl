@@ -90,7 +90,7 @@ end
 
     [outputs]
     metrics = ["max_drawdown", "profit_factor", "sharpe", "sortino", "volatility"]
-    artifacts = ["equity_curve"]
+    artifacts = ["marked_curve"]
 
     [agent]
     type = "static"
@@ -432,4 +432,27 @@ end
     # and there is no builder that would accept one either
     @test VolSurfaceAnalysis.to_dict(ParquetOptionBars("/x"))["stamp"] == "bar_end"
     @test VolSurfaceAnalysis.to_dict(ParquetSpots("/x"))["stamp"] == "bar_end"
+end
+
+@testset "identity: the marked curve moves full_hash and leaves core_hash alone" begin
+    # Marks are output-side. A mark cannot alter an event, so an existing
+    # ledger stays reusable and `core_hash` must not move; what did move is
+    # the default artifact, the realised equity curve having become the
+    # marked curve, and that lives in `OutputSpec`.
+    base = load_experiment_str(_id_toml())
+    old = Experiment(name="x", agent=base.agent, data=base.data, clock=base.clock,
+                     from=base.from, to=base.to,
+                     outputs=OutputSpec(artifacts=[:equity_curve]))
+    @test base.outputs.artifacts == [:marked_curve]
+    @test core_hash(base) == core_hash(old)
+    @test full_hash(base) != full_hash(old)
+    @test VolSurfaceAnalysis.to_dict(base.outputs)["artifacts"] == ["marked_curve"]
+
+    # The core projection is exactly the pre-round set of keys: nothing the
+    # outputs own has leaked into it, which is what keeps a stored ledger
+    # addressable by the same core identity.
+    d = VolSurfaceAnalysis._core_dict(base)
+    @test Set(keys(d)) == Set(["from", "to", "data", "clock", "agent", "venue", "contract"])
+    @test !haskey(d, "outputs")
+    @test haskey(VolSurfaceAnalysis._full_dict(base), "outputs")
 end

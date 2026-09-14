@@ -6,7 +6,7 @@
 # not change identity. Two hashes are produced:
 #
 #   core_hash -- everything that determines the backtest result
-#                (positions / pnl_series): data, clock, agent, window,
+#                (the ledger): data, clock, agent, window,
 #                the venue's two choices, and the contract facts resolved
 #                for the experiment's underlying.
 #   full_hash -- core plus outputs (metrics + params, artifacts).

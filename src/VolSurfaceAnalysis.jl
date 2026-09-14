@@ -33,8 +33,9 @@ include("agents/agent.jl")
 include("backtest/execution.jl")
 include("backtest/settlement.jl")
 include("backtest/engine.jl")
-include("metrics/pnl_series.jl")
-include("metrics/ledger_series.jl")
+include("metrics/curve.jl")
+include("metrics/marks.jl")
+include("metrics/trades.jl")
 include("metrics/core.jl")
 include("metrics/optional.jl")
 include("metrics/dispatch.jl")
@@ -90,11 +91,12 @@ export OptionType, Call, Put,
        declared_underlyings,
        Agent, StaticAgent, current_policy,
        fill_price, commission, TICK_CENTS,
-       resolve_quote, fill_legs, settlement_price, settlements,
+       resolve_quote, fill_legs, settlement_price, settlements, session_closes,
        check_join, run_backtest,
        UnpriceableLeg, JoinViolation, UnsupportedSettlement,
-       PnLSeries, pnl_series, equity_curve,
-       total_pnl, n_round_trips, hit_rate,
+       MarkedCurve, marked_curve, mark_price, session_changes,
+       n_marked, n_unmarked, cents_to_usd, trade_pnl,
+       total_pnl, n_round_trips, hit_rate, n_opens, n_closes,
        sharpe, sortino, max_drawdown, volatility, profit_factor,
        compute_metrics,
        Experiment, ExperimentResult, OutputSpec, run_experiment,

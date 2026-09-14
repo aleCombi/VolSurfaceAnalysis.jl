@@ -70,7 +70,7 @@ end
                      data=f.data, clock=_EX_CLOCK, from=f.ts1, to=f.ts3)
     @test Set(exp.outputs.metrics) ==
           Set([:sharpe, :sortino, :max_drawdown, :volatility, :profit_factor])
-    @test exp.outputs.artifacts == [:equity_curve]
+    @test exp.outputs.artifacts == [:marked_curve]
 end
 
 @testset "run_experiment: NoOpPolicy -> empty result, provenance carried" begin
@@ -82,7 +82,8 @@ end
     @test res.ledger isa Ledger
     @test isempty(res.ledger)
     @test isempty(res.ledger.orders)
-    @test isempty(res.pnl_series.pnl)
+    @test isempty(trade_pnl(res.ledger))
+    @test res.curve isa MarkedCurve
     @test res.metrics.total_pnl == 0.0
     @test res.metrics.n_round_trips == 0
     @test res.metrics.n_opens == 0 && res.metrics.n_closes == 0
@@ -104,11 +105,12 @@ end
     @test length(open_lots(book)) == 1
     @test only(open_lots(book)).contract == f.call
     @test book.cash == -51000 - 100                     # 5.10 paid, 65 cents raised to USD 1.00
-    @test isempty(res.pnl_series.pnl)
+    @test isempty(trade_pnl(res.ledger))
     @test res.metrics.total_pnl == 0.0
     @test res.metrics.n_opens == 1 && res.metrics.n_closes == 0
-    @test res.pnl_series.n_unmarked == 0
-    @test isnan(res.pnl_series.window_end_spot)          # a placeholder until slice 5
+    # The window is two minutes inside one session, so no whole session lies
+    # in it: the grid is empty, and that is temporal absence, not a failure.
+    @test n_marked(res.curve) == 0 && n_unmarked(res.curve) == 0
 end
 
 @testset "run_experiment: an expiry inside the window is booked" begin
@@ -158,7 +160,7 @@ end
     @test obs.spot == 400.0 && obs.spot_at == ts1        # QQQ's spot at the tick
     @test obs.bid == 1.00 && obs.ask == 1.10
     @test length(open_lots(book_effective(res.ledger, exp.to))) == 1
-    @test isempty(res.pnl_series.pnl)
+    @test isempty(trade_pnl(res.ledger))
 end
 
 @testset "run_experiment: requested optional metric appears in result" begin
@@ -288,8 +290,8 @@ end
     @test [x.amount for x in fees] == [-65, -65]
     @test [x.source_id for x in fees] == [event_id(x) for x in fills]
 
-    # nothing closes in this slice: an empty series, two opens, one open group
-    @test isempty(res.pnl_series.pnl)
+    # nothing closes in this slice: no trades, two opens, one open group
+    @test isempty(trade_pnl(res.ledger))
     @test res.metrics.n_opens == 2
     @test res.metrics.n_closes == 0
     @test open_groups(book_effective(L, exp.to)) == [1]

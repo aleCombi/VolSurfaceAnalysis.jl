@@ -76,9 +76,9 @@ consume a fill are walked in sequence order and each takes the rounded
 cumulative share minus what the trips before it took, so the shares
 over a fully consumed fill sum to the fee exactly (a fill left partly
 open leaves the remainder unallocated). Once nothing is left open, the
-round trips sum to the book's cash exactly, not to a tolerance. The
-`pnl_series(ledger)` adapter converts to USD at its boundary; nothing
-inside the ledger is a floating-point amount of money.
+round trips sum to the book's cash exactly, not to a tolerance. The `metrics` module converts
+to USD at its own named boundary (`cents_to_usd`); nothing inside the
+ledger is a floating-point amount of money.
 
 ## Book and the two replays
 
@@ -236,11 +236,10 @@ its opening fill with its realised cash.
 **Owns:** the order and event vocabulary, the contract table, the cash
 rules, the validated write path including the structure-level
 `record_order!`, the order journal's records and the ids that join a
-fill to its leg, the book and its replays, round trips, and the
-`pnl_series(ledger)` adapter in `metrics` that lets today's metrics
-read a ledger unchanged (`unit = :structure` samples per group and
-closing instant, `unit = :leg` per round trip). Metrics depend on the
-ledger, never the reverse.
+fill to its leg, the book and its replays, and round trips. Grouping
+those trips into per-trade dollars is `trade_pnl` in
+[`metrics`](metrics.md), which reads the pairing the ledger recorded and
+infers nothing. Metrics depend on the ledger, never the reverse.
 
 **Does not own:** deciding what to trade (policies); resolving the
 quote and the spot a leg is priced against and turning them into a
@@ -265,7 +264,6 @@ valuation failures (outside the journal); persistence.
 | **Integer quantities, per-share prices, cash in whole cents** | Removes the FIFO float residue and the per-share-labelled-USD units of the fill-vector ledger. One rounding point at the contract, then integer arithmetic: the book, both replays and the round trips agree exactly, and book equality is exact rather than a tolerance. |
 | **Validation of the whole batch at the write, FIFO included** | A structure is either booked whole or not at all; a leg that fails validation is an error before anything is written; a hand-built or loaded batch cannot encode a different lot-matching rule than the one stated here. |
 | **`ContractKey` hashes by content** | The book keys lots on `(group, contract)`; the default `objectid` hash is build-dependent, as `Underlying` documents. |
-| **The adapter keeps `PnLSeries` unchanged** | Metrics stay green while the engine switches; `window_end_spot` and `n_unmarked` are placeholders that leave with the slice-5 metrics. |
 | **The order journal lives inside the `Ledger` container, as plain values** | One object carries a run's facts and what each decision saw, so nothing is kept in sync between two containers; the records hold numbers and timestamps, never the data module's types. Replays fold `events` only. This slice uses placeholder observations with optional quote sides for broker executions; observation-less live records are deferred. |
 | **A structure is one transaction; the group is minted inside it** | Every leg is planned and validated and the record is constructed before one `commit!`; afterward only one vector grows and counters advance. A validation failure leaves the ledger, its counters, its orders and the book exactly as they were. |
 

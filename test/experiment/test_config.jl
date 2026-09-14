@@ -541,7 +541,7 @@ end
         @test isempty(res.ledger.orders)
         @test res.metrics.total_pnl == 0.0
         @test res.experiment === exp
-        @test isnan(res.pnl_series.window_end_spot)   # a placeholder until slice 5
+        @test res.curve isa MarkedCurve               # built from the run's own data
         exp = nothing
         res = nothing
         GC.gc()

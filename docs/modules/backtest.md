@@ -186,6 +186,24 @@ sat on the window boundary before and is visible at 13:01 and one minute
 inside it now -- the same row, the same price, and the same documented
 dependence on the tree holding nothing else in that window.
 
+**The session grid is that same rule, enumerated.** `session_closes`
+answers "when did each session in this window close", one instant per
+session, and it is what the [`metrics`](metrics.md) module samples its
+marked curve on -- one rule, so the grid a ratio is annualised over and
+the price a contract settles at cannot drift apart. It returns the
+printless open dates separately as `gaps` rather than skipping them, the
+`:unexpected_gap` case in grid form, and it counts a session only when
+its *whole* reference window lies inside the requested bounds: a window
+the bounds clip is a session the caller did not see end to end, which is
+temporal absence, not a failure.
+
+It reads **one session window at a time**, exactly the windows
+`:session_close` reads, and never the gaps between them. That is not an
+implementation detail: the regular-session `SpotPrice` contract is claimed
+inside those windows and nowhere else, and the production tree does hold a
+disagreeing pair at an overnight instant, so a single range read across ten
+years would abort on data the rule is not entitled to and does not need.
+
 **The reference window never runs past the expiry instant.** It opens at
 09:30 ET and closes at the earlier of 16:00 ET and the contract's own
 expiry. For the 16:00 ET convention the parser stamps, and for every
@@ -296,6 +314,8 @@ fill_legs(cut, order::Order, t; fill_rule, cost_model, tick_cents = TICK_CENTS)
 settlement_price(rule::Symbol, cut::TimeCut, contract::ContractKey, t) -> Float64
 settlements(cut, book::Book, prev, t)
     -> (settled::Vector{Tuple{Lot,Float64}}, unsettled::Vector{UnpriceableLeg})
+session_closes(m, u::Underlying, from, to)
+    -> (closes::Vector{DateTime}, gaps::Vector{DateTime})
 check_join(L::Ledger; tick_cents = TICK_CENTS) -> Nothing
 check_join(L::Ledger, rec::OrderRecord; tick_cents = TICK_CENTS) -> Nothing
 

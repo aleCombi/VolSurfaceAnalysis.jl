@@ -32,6 +32,12 @@
 # the tree: a printless weekday it calls open is a named valuation failure
 # (design rule 7), never evidence that the exchange was closed.
 #
+# `session_closes` is that same rule enumerated rather than applied to one
+# contract: the instants of every session in a window, which is the grid
+# the metrics module samples its marked curve on. One rule, so the grid a
+# ratio is annualised over and the price a contract settles at cannot
+# drift apart.
+#
 # Two bounds keep the answer honest rather than merely permitted by the
 # cut. The reference window ends at the earlier of 16:00 ET and the
 # contract's own expiry, so an intraday expiry never settles at a print
@@ -129,6 +135,68 @@ function _session_close(cut::TimeCut, contract::ContractKey, t::DateTime)::Float
         _closed_on(d) || throw(UnpriceableLeg(contract, t, :unexpected_gap))
     end
     throw(UnpriceableLeg(contract, t, :no_session))
+end
+
+"""
+    session_closes(m, u::Underlying, from::DateTime, to::DateTime) -> (closes, gaps)
+
+The session grid of `u` inside `[from, to]`, by the same rule
+[`settlement_price`](@ref) settles against: a calendar-open ET date is a
+session when `u` printed in the reference window (09:30-16:00 ET), and
+its close is the last of those prints. `closes` holds one instant per
+session, ascending; `gaps` holds the nominal 16:00 ET instant of each
+calendar-open date that printed nothing, the [`UnpriceableLeg`](@ref)
+`:unexpected_gap` case in grid form -- a date the exchange says was open
+and the tree cannot place a close for. Mutates nothing.
+
+A session counts only when its **whole** reference window lies inside
+`[from, to]`. A window the evaluation bounds clip is not a short session
+but a session this run did not see end to end, and a consumer that
+annualises by sessions needs every observation to span one whole one.
+That absence is temporal (design rule 7): the session is outside the
+window, not unanswerable inside it.
+
+Early closes and unscheduled closures need no table here for the same
+reason they need none in `:session_close`, and carry the same
+requirement of the input: the window's last print is the session's only
+where the tree holds regular-session prints alone (`market_data.md`).
+
+**One read per session window, never one range read across the whole
+period.** The reference window is the only place that input contract is
+claimed to hold; a range read spanning the gaps between sessions also
+reads the extended-hours prints the contract says nothing about, and on
+the production SPY tree those include an instant carrying two
+disagreeing rows -- a `ConflictingRecords` that aborts a read no session
+needed. Reading exactly the windows `:session_close` reads gives this
+function exactly that rule's exposure to the data, and nothing more. The
+per-day block cache means the cost is still one partition read per date.
+"""
+function session_closes(m, u::Underlying, from::DateTime, to::DateTime)
+    closes, gaps = DateTime[], DateTime[]
+    # Walk the dates, not the prints: deriving the grid from whatever
+    # printed would make a printless open date silently absent instead of a
+    # named gap, and would read instants no session covers.
+    d, last_d = _et_date(from), _et_date(to)
+    while d <= last_d
+        if !_closed_on(d)
+            window_start = et_to_utc(d, _SESSION_OPEN)
+            window_end   = et_to_utc(d, _SESSION_CLOSE)
+            # The whole window, or nothing: a clipped one is a session this
+            # caller did not see end to end.
+            if from <= window_start && window_end <= to
+                # `between` promises an iterable, not a container: consume it
+                # once and keep the last, which is the latest because the
+                # protocol promises sorted order.
+                last_ts = nothing
+                for p in between(m, SpotPrice, u, window_start, window_end)
+                    last_ts = p.timestamp
+                end
+                last_ts === nothing ? push!(gaps, window_end) : push!(closes, last_ts)
+            end
+        end
+        d += Day(1)
+    end
+    return (closes = closes, gaps = gaps)
 end
 
 # The settlement rules by name, the `_FILL_RULES` shape. One entry, and it

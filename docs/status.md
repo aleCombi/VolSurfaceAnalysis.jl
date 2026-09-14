@@ -59,24 +59,30 @@ Progress toward vision:
    calendar only to contradict it; which rule a lot gets is the contract
    fact `contract_spec(u).settlement`, and `:session_close` (PM) is the
    one style served.
-5. **Metric computation** -- on the ledger. `PnLSeries` is built by
-   `pnl_series(::Ledger)` from the ledger's round trips, one sample per
-   structure closed at one instant, in USD. Always-on core metrics
-   (`total_pnl`, `n_round_trips`, `n_opens`, `n_closes`, `hit_rate`)
-   are computed for every result. Optional metrics (`sharpe`, `sortino`,
-   `max_drawdown`, `volatility`, `profit_factor`) are selected by
-   symbol through `compute_metrics`; the `_METRIC_TABLE` in
-   `src/metrics/dispatch.jl` maps each symbol to its function and
-   default kwargs. Per-experiment overrides flow through
-   `OutputSpec.metric_params`. `window_end_spot` and `n_unmarked` are
-   placeholders until slice 5 brings the structure series and the
-   equity curve.
+5. **Metric computation** -- two honest inputs, because there are two
+   questions (`docs/modules/metrics.md`). Trade questions read
+   `trade_pnl(::Ledger)`, a plain vector of per-trade dollars, one entry
+   per structure closed at one instant. Path questions read a
+   `MarkedCurve`: marked portfolio profit at the close of every trading
+   session in the window, built by `marked_curve` from the ledger's cash
+   plus the open book marked at its own quote mid (surface price as
+   fallback). Always-on core metrics (`total_pnl`, `n_round_trips`,
+   `n_opens`, `n_closes`, `hit_rate`) are computed for every result;
+   optional metrics (`sharpe`, `sortino`, `max_drawdown`, `volatility`,
+   `profit_factor`) are selected by symbol through `compute_metrics`, and
+   the `_METRIC_TABLE` in `src/metrics/dispatch.jl` maps each symbol to
+   its function, **which of the two inputs it consumes**, and its default
+   kwargs. Per-experiment overrides flow through
+   `OutputSpec.metric_params`. Capital is fixed at 1 and is not an
+   argument: at a zero risk-free rate it cancels from every ratio.
 6. **Experiment orchestration** -- end-to-end runnable.
    `Experiment` wires `(Agent, MarketData specs, Clock, [from, to],
    OutputSpec)` into a single rerunnable record; `run_experiment(exp)`
    opens the data for the run and returns an `ExperimentResult` with
-   the ledger, the `PnLSeries` and the computed metrics; open lots at
-   the window end stay open, nothing is force-settled. Outputs are
+   the ledger, the marked curve and the computed metrics; marking runs
+   there because it is not a pure function of the ledger. Open lots at
+   the window end stay open, nothing is force-settled, and the curve is
+   what values them at each session close. Outputs are
    declared in config: an `[outputs]` table (`metrics`, per-metric
    params, `artifacts`) resolves to an `OutputSpec`, defaulting to all
    registered metrics and the default artifact set when omitted. TOML
@@ -88,18 +94,23 @@ Progress toward vision:
 7. **Persistence + identity** -- `RunStore` writes runs to a
    Hive-partitioned parquet tree at `<root>/runs/run_id=<full_hash>/`
    (config.toml verbatim, manifest / metrics / events / orders /
-   order_legs / pnl_series parquet, and an `artifacts/` subdir).
+   order_legs parquet, and an `artifacts/` subdir).
    Identity is canonical and layered: `full_hash(experiment)` is the
    run id; `core_hash` (data + clock + agent + window) is shared by
    output variations of one backtest. Both come from a `to_dict`
    projection (`experiment/identity.jl`) over the *resolved* experiment,
    so whitespace / key order / `name` / cache knobs don't fork ids.
    Every run records code provenance (`commit_sha` / `dirty` from
-   `code_provenance`). `save_run` writes, `load_run` rebuilds the ledger
-   through `commit!` and `check_join` and reads back into an
-   `ExperimentResult` (specs are pure values, so loading works
-   off-machine; the manifest `schema_version`, now 4, refuses runs
-   written under the positions schema and under the pre-identity one).
+   `code_provenance`). `save_run` writes; `load_run` rebuilds the ledger
+   through `commit!` and `check_join` and then **recomputes** everything
+   derived from it -- no derived parquet table is read into a result, so
+   a loaded run cannot report a number its own inputs no longer produce.
+   The marked curve needs the run's market data, so `load_run` reopens it
+   and degrades by piece where it is absent: ledger and trade metrics
+   load, the curve is `nothing` and its path metrics are absent from the
+   result rather than `NaN`. The manifest `schema_version`, now 5,
+   refuses runs written under the positions schema, the pre-identity one
+   and the `pnl_series` one.
    Every value that changes a result is either in `core_hash` -- the data
    specs, clock, agent, window, the venue's `fill_rule` / `cost_model`,
    the contract facts resolved for the experiment's underlying, and the
@@ -123,13 +134,13 @@ Step 5 / 6 had gained per-leg expiry settlement through a caller-supplied
 `settle(trade)` closure in `pnl_series`, marking each residual lot at its
 own underlying's spot at `min(expiry, window_end)`. The ledger rebuild
 superseded it: settlement is a lifecycle event booked in the tick loop,
-open lots at the window end stay open until the equity curve marks them
-(slice 5), and the closure, the window-end spot lookup and the
+open lots at the window end stay open and the marked curve values them at
+every session close, and the closure, the window-end spot lookup and the
 fill-vector builder are gone with slice 2. What survives: the clock
 selector says *when* to step, not whose price, and `load_experiment`
 asserts a declared policy underlying matches it -- one experiment, one
 underlying. `scripts/run_experiment.jl --out-dir <dir>` renders the
-equity-curve artifact from any config (via `scripts/lib/artifacts.jl` +
+marked-curve artifact from any config (via `scripts/lib/artifacts.jl` +
 `viz/pnl.jl`).
 
 The review of the data-kinds branch (PR #9) found six correctness
@@ -265,7 +276,8 @@ failed.** What the review deferred is in the backlog below.
   the identity work of the next slice. What the deleted backlog entry
   parked and this round deliberately does not land: the mark for a leg
   still open past the window end (the contract's own quote mark there,
-  surface price as fallback) belongs to the equity curve, slice 5.
+  surface price as fallback) belongs to the marked curve, which is PR 4
+  below.
   **Gate after slice 3 and the review-fix rounds: 3364 passed, 0
   failed, 0 broken.** The ten-year strangle
   (`configs/strangle_spy_16d_1dte.local.toml`, 2016-03-28 to 2026-03-27,
@@ -405,9 +417,73 @@ failed.** What the review deferred is in the backlog below.
   Sharpe. Thirty-nine fewer orders is not a grid change -- the entry
   instant has a chain on 2492 of the 3652 days either way, differing on
   one -- but the contents of the minute the policy now reads.
-  Next: PR 4, outputs -- `pnl_series`, the metrics, the equity curve and
-  the structure series, and then the marked-curve round against this
-  baseline.
+  **PR 4 (first half) landed 2026-09-14**
+  ([docs/proposals/ledger-outputs-curve.md](proposals/ledger-outputs-curve.md)):
+  the marked curve and the metrics that read it. Every metric read a
+  series of closed trades, so Sharpe, Sortino and volatility annualised
+  by the square root of 252 while their observations were *trades*: a
+  strategy closing about 252 structures a year looked plausible by
+  accident and a weekly one was overstated by roughly a factor of two,
+  and holding the same trades overnight or for a month gave the same
+  ratio. `max_drawdown` had the same defect in another form -- a curve of
+  closed trades is flat while a position is open, so a book could move
+  deeply against itself and recover with no drawdown at all. The four
+  path metrics now read a `MarkedCurve` sampled at session closes and the
+  trade metrics keep per-trade dollars. Every metric takes both inputs and
+  reads whichever is its sample unit, so `_METRIC_TABLE` stays `(fn,
+  defaults)` and adding a metric is one row and one function; the price is
+  that with no curve the whole optional set is omitted rather than part of
+  it. The curve is the ledger's cash at
+  the instant plus the open book marked to market, which is the
+  `realised + unallocated fees + unrealised` identity with the cost basis
+  cancelled; cash alone would book a short strangle's opening premium as
+  profit. The grid is `session_closes` in `backtest/settlement.jl`, the
+  `:session_close` rule enumerated rather than applied to one contract,
+  so the grid a ratio is annualised over and the price a contract settles
+  at cannot drift apart; a session counts only when its whole reference
+  window is inside the evaluation bounds. **The three decisions the brief
+  left open**, taken here: an unmarkable session leaves the curve, is
+  named and counted in `unmarked_at` / `unmarked_reason`, and
+  `session_changes` refuses to span it (so a break costs two observations
+  and never invents a carried-forward value or a `NaN`);
+  `compute_metrics(ledger, curve, requested)` takes the ledger as the
+  authority for the trade side and derives `trade_pnl` once inside, with
+  `n_opens(L)` / `n_closes(L)` as plain ledger functions; and the curve is
+  `MarkedCurve`, two pairs of parallel vectors, with `cents_to_usd` as the
+  named counterpart of `contract_cents` on the way out of whole cents.
+  `PnLSeries`, `pnl_series`, `equity_curve` and `window_end_spot` are
+  gone; the default artifact `:equity_curve` became `:marked_curve`, which
+  is what moves `full_hash` while `core_hash` -- a projection marks cannot
+  reach -- stays put, so an existing ledger remains reusable.
+  `RUN_SCHEMA_VERSION` is 5 and `pnl_series.parquet` is no longer written.
+  **Gate: 3719 passed, 0 failed, 0 errored, 0 broken.** Measured against
+  the bar-end baseline, not the pre-correction one: the ten-year strangle
+  rerun is unchanged where it must be -- 13,204 events, 2,201 orders,
+  USD 29,942.23 cash, 2,200 trades, `total_pnl` 29,694.53, `hit_rate`
+  0.7805, `profit_factor` 1.3028 -- and its `core_hash` is the same
+  `2bde5de695f9c90a` it was before the round while `full_hash` moved from
+  `f555f4bdbaf8d1d8` to `6990a511c201c1aa`. Its curve marks **2,515 of
+  2,516 sessions**. The one it cannot mark is 2018-10-25T20:00:00,
+  `:no_mark`: no two-sided quote for an open lot at that close and no
+  surface stamped there either, on the single day whose entry-instant
+  chain visibility the bar-end correction also moved. So the named-failure
+  path does fire on real data, once in ten years, and the break costs the
+  two observations either side of it -- 2,513 session changes from 2,515
+  marked points. The ratios moved as expected, trade-sampled to
+  session-sampled: sharpe 1.2686 to 1.0389, sortino 1.4208 to 1.1898,
+  volatility 2681.17 to 2852.16, max_drawdown 6399.89 to 6431.04. The
+  last is the telling one -- the old figure was the deepest trough of
+  *closed* trades, and the new one sees the book while it is open.
+  One thing the round found in the data: the SPY spot tree holds two
+  disagreeing rows at 2026-02-07T00:12:00 (690.21 vs 690.22), an
+  extended-hours instant. `session_closes` reads one session window at a
+  time, exactly the windows `:session_close` reads, so it never sees it --
+  a range read across the gaps between sessions does, and aborts with
+  `ConflictingRecords`. The regular-session input contract is claimed
+  inside those windows and nowhere else, and the grid now keeps to them.
+  Next: PR 4's second half -- the derived persistence exports, the
+  `failures` table, the manifest completeness flag, and retaining
+  `settlements(...).unsettled` from the engine.
 
 ## Backlog
 
@@ -466,7 +542,7 @@ intended direction, but not currently in flight.
   landed with slice 3 of the ledger rebuild.
 - **Reproducibility harness for stored runs.** Opt-in, data-gated tests
   that rerun each saved run (`load_run` -> `run_experiment`) and assert its
-  `metrics` / `pnl_series` still match, auto-skipping where the source data
+  `metrics` and marked curve still match, auto-skipping where the source data
   is absent (so CI / data-less machines skip cleanly); plus a
   `scripts/revalidate_runs.jl` utility that refreshes a run's `commit_sha` /
   `dirty` when a rerun reproduces it, and *flags* divergences rather than
@@ -476,15 +552,28 @@ intended direction, but not currently in flight.
   root in a reserved `dataset` slot of the identity projection; a real
   logical dataset id and version (so the same tree at two paths, or a
   re-collected tree at one path, hash right) is its own design note.
-  Declined in data-kinds v3.
+  Declined in data-kinds v3. **Load-bearing since PR 4's first half**:
+  `load_run` recomputes the marked curve from the market data on the
+  machine, so stale or re-collected data can now make a plain *load*
+  differ while appearing to read recorded history -- previously only a
+  rerun could. That round names the risk and does not solve it.
+- **Conflicting extended-hours spot rows.** The SPY tree holds two
+  disagreeing rows at 2026-02-07T00:12:00 (690.21 vs 690.22). Nothing in
+  the codebase reads outside the regular-session window, so nothing sees
+  it today; whether it is one bad delivery or a class of them, and whether
+  the collection step should reject it at write time, is uninvestigated.
+  Found 2026-09-14 while building the session grid.
 - **Capability-restricted views.** A structural raw/model boundary (a
   policy view that cannot address `OptionBar`) was declined in
   data-kinds v3 in favour of a doc rule; revisit if a policy ever
   couples to vendor bars.
-- **Path metrics over simultaneous samples.** `pnl_series` orders
-  samples at one timestamp by pnl (losses first) so `max_drawdown` is
-  deterministic; aggregating simultaneous samples for path metrics is
-  the fuller answer.
+
+- **Path metrics on a finer grid than one session.** The marked curve
+  samples session closes, which is what annualising by sessions means;
+  an intraday grid would see moves that open and close inside a session,
+  and would need its own annualisation constant and its own answer to
+  what an unmarkable point costs. Closed for the trade-ordering half:
+  path metrics no longer read simultaneous trade samples at all.
 - **Quote synthesis cost (PR #9 finding B). Closed 2026-09-08, measured,
   not worth a cache.** `at(::QuotesFromBars, ...)` re-synthesizes the
   chain on every call and one firing tick performs `n + 2` passes. On the
