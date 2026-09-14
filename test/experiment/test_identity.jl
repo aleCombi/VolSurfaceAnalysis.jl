@@ -285,3 +285,76 @@ end
     @test core_hash(a) == core_hash(b) == core_hash(c)
     @test full_hash(a) != full_hash(load_experiment_str(strangle("quantity = 2")))
 end
+
+@testset "identity: the venue's two choices are in core_hash" begin
+    base = load_experiment_str(_id_toml())
+    @test VolSurfaceAnalysis._core_dict(base)["venue"] ==
+          Dict("fill_rule" => "cross_spread", "cost_model" => "ibkr_pro_us_options")
+    # A different cost model is a different backtest: the fees are ledger
+    # events, so every round trip's cash moves with it.
+    free = load_experiment_str(_id_toml() * "\n[venue]\ncost_model = \"none\"\n")
+    @test free.cost_model === :none
+    @test core_hash(free) != core_hash(base)
+    @test full_hash(free) != full_hash(base)
+    # Direct construction for the fill rule, because the loader only accepts
+    # rules the venue has: identity is computed on an `Experiment`, not on
+    # TOML, and it must fork on any value the field can hold.
+    other = Experiment(name="x", agent=base.agent, data=base.data, clock=base.clock,
+                       from=base.from, to=base.to, fill_rule=:mid)
+    @test core_hash(other) != core_hash(base)
+    @test full_hash(other) != full_hash(base)
+end
+
+@testset "identity: an omitted [venue] and an explicit default are one run id" begin
+    # The standing omitted-vs-explicit invariant: identity is projected from
+    # the resolved experiment, so how a config spells a default cannot move
+    # the id. Both spellings must also survive a `name` change.
+    base = load_experiment_str(_id_toml(name="a"))
+    explicit = load_experiment_str(_id_toml(name="b") *
+        "\n[venue]\nfill_rule = \"cross_spread\"\ncost_model = \"ibkr_pro_us_options\"\n")
+    @test core_hash(explicit) == core_hash(base)
+    @test full_hash(explicit) == full_hash(base)
+end
+
+@testset "identity: the resolved contract facts are in core_hash" begin
+    base = load_experiment_str(_id_toml())
+    d = VolSurfaceAnalysis._core_dict(base)
+    # The resolved spec for the experiment's one underlying, not the table:
+    # projecting the table would fork every run id on an entry the run never
+    # touches.
+    @test d["contract"] == Dict{String,Any}("multiplier" => 100, "exercise" => "American",
+                                            "settlement" => "PMSettled", "delivery" => "Physical")
+    @test !haskey(d["contract"], "SPY") && !haskey(d["contract"], "QQQ")
+    # A spec differing in any one field is a different id. Projected
+    # directly rather than by mutating `_CONTRACT_TABLE`, which every other
+    # testset in the run shares.
+    spec = contract_spec(Underlying("SPY"))
+    variants = [ContractSpec(10, spec.exercise, spec.settlement, spec.delivery),
+                ContractSpec(spec.multiplier, European, spec.settlement, spec.delivery),
+                ContractSpec(spec.multiplier, spec.exercise, AMSettled, spec.delivery),
+                ContractSpec(spec.multiplier, spec.exercise, spec.settlement, Cash)]
+    hashes = Set{String}()
+    for v in variants
+        forked = copy(d)
+        forked["contract"] = VolSurfaceAnalysis.to_dict(v)
+        push!(hashes, VolSurfaceAnalysis._hash16(VolSurfaceAnalysis._canonical(forked)))
+    end
+    @test length(hashes) == length(variants)
+    @test !(core_hash(base) in hashes)
+    @test VolSurfaceAnalysis._hash16(VolSurfaceAnalysis._canonical(d)) == core_hash(base)
+end
+
+@testset "identity: a clock that names no underlying is the runner's error" begin
+    # There are no contract facts to resolve for a currency, and the failure
+    # a reader should see is the one `run_experiment` gives for the same
+    # experiment, not a `MethodError` out of `contract_spec`.
+    base = load_experiment_str(_id_toml())
+    on_rates = Experiment(name="rates", agent=base.agent, data=base.data,
+                          clock=Clock{RateCurve}(Currency("USD")),
+                          from=base.from, to=base.to)
+    for f in (core_hash, full_hash)
+        err = try f(on_rates); nothing catch e; e end
+        @test err isa ErrorException
+        @test occursin("must be an Underlying", err.msg) && occursin("rates", err.msg)
+    end
+end

@@ -3,9 +3,11 @@
 # These are facts, not choices. The multiplier changes cash, and a wrong
 # entry is wrong rather than a variant of the experiment. Nothing observes
 # them and they have no visibility time, so they are neither config nor a
-# market-data kind: they live in code the way exchange calendars do. The
-# engine projects the *resolved* values into run identity (slice 4), so a
-# correction here is a new run id, never a silent change to old results.
+# market-data kind: they live in code the way exchange calendars do. Run
+# identity projects the *resolved* spec for the experiment's underlying
+# (`experiment/identity.jl`), so a correction here is a new run id, never a
+# silent change to old results; the whole table is not projected, or every
+# id would fork on an entry the run never touches.
 # An underlying missing from the table is a loud error; there is no
 # default contract.
 #
@@ -27,7 +29,8 @@ Facts about one underlying's listed option contracts.
 - `multiplier::Int` -- shares per contract; cash per contract is the
   price per share times this (in whole cents through `contract_cents`).
 - `exercise::ExerciseStyle` -- `American` or `European`.
-- `settlement::SettlementStyle` -- `AMSettled` or `PMSettled`.
+- `settlement::SettlementStyle` -- `AMSettled` or `PMSettled`. Read per
+  lot by the engine's lifecycle step, which serves `PMSettled` only.
 - `delivery::Delivery` -- `Physical` or `Cash`.
 """
 struct ContractSpec

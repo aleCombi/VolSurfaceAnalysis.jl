@@ -6,7 +6,9 @@
 # not change identity. Two hashes are produced:
 #
 #   core_hash -- everything that determines the backtest result
-#                (positions / pnl_series): data, clock, agent, window.
+#                (positions / pnl_series): data, clock, agent, window,
+#                the venue's two choices, and the contract facts resolved
+#                for the experiment's underlying.
 #   full_hash -- core plus outputs (metrics + params, artifacts).
 #
 # Same core_hash, different full_hash => an output/artifact variation of a
@@ -132,6 +134,24 @@ to_dict(p::DailyShortStrangle) = Dict{String,Any}(
 
 to_dict(a::StaticAgent) = Dict{String,Any}("type" => "static", "policy" => to_dict(a.policy))
 
+# --- contract facts -----------------------------------------------------
+# `_CONTRACT_TABLE`'s entries reach cash through `contract_spec`, so a
+# correction there must be a new run id rather than a silent change to old
+# results. The enums project as their own names: the projection is read by
+# people comparing two manifests, and `Int` codes would renumber whenever
+# a variant is inserted.
+
+to_dict(e::ExerciseStyle)   = string(e)
+to_dict(e::SettlementStyle) = string(e)
+to_dict(e::Delivery)        = string(e)
+
+to_dict(c::ContractSpec) = Dict{String,Any}(
+    "multiplier" => c.multiplier,
+    "exercise"   => to_dict(c.exercise),
+    "settlement" => to_dict(c.settlement),
+    "delivery"   => to_dict(c.delivery),
+)
+
 function to_dict(o::OutputSpec)
     mp = Dict{String,Any}()
     for (k, v) in o.metric_params
@@ -147,13 +167,25 @@ end
 # --- experiment-level identity ------------------------------------------
 
 # Core identity: everything that determines the backtest result.
-_core_dict(exp::Experiment) = Dict{String,Any}(
-    "from"  => string(exp.from),
-    "to"    => string(exp.to),
-    "data"  => to_dict(exp.data),
-    "clock" => to_dict(exp.clock),
-    "agent" => to_dict(exp.agent),
-)
+#
+# `contract` is the resolved spec for the experiment's one underlying, not
+# the whole table: projecting the table would fork every id on an entry the
+# run never touches. One experiment is one underlying, which is what
+# `_experiment_underlying` stands on -- and it is what reports a clock that
+# names something else, in the runner's words, rather than letting
+# `contract_spec` fail on the selector type.
+function _core_dict(exp::Experiment)
+    return Dict{String,Any}(
+        "from"     => string(exp.from),
+        "to"       => string(exp.to),
+        "data"     => to_dict(exp.data),
+        "clock"    => to_dict(exp.clock),
+        "agent"    => to_dict(exp.agent),
+        "venue"    => Dict{String,Any}("fill_rule"  => String(exp.fill_rule),
+                                       "cost_model" => String(exp.cost_model)),
+        "contract" => to_dict(contract_spec(_experiment_underlying(exp))),
+    )
+end
 
 # Full identity: core plus outputs. `name` is excluded from both -- it is
 # a human label, not part of what the experiment is.
@@ -169,7 +201,8 @@ _hash16(s::AbstractString) = bytes2hex(sha2_256(codeunits(s)))[1:_IDENTITY_HEX_L
     core_hash(exp::Experiment) -> String
 
 16-hex content hash of the backtest-determining inputs (data, clock,
-agent, window). Identical across experiments that differ only in outputs
+agent, window, the venue's fill rule and cost model, and the contract
+facts of the experiment's underlying). Identical across experiments that differ only in outputs
 (metrics / artifacts) or in the human `name`. This is the key for
 recognising that two experiments share a backtest.
 """

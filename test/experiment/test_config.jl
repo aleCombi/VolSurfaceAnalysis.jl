@@ -282,6 +282,78 @@ type = "static"
 type = "noop"
 """
 
+@testset "build_venue: both keys optional, and only the venue's own values" begin
+    # Omitted is the same resolved venue as spelled out, which is what keeps
+    # an omitted `[venue]` and an explicit default on one run id.
+    @test build_venue(Dict{String,Any}()) ==
+          (fill_rule = :cross_spread, cost_model = :ibkr_pro_us_options)
+    @test build_venue(Dict{String,Any}("cost_model" => "none")) ==
+          (fill_rule = :cross_spread, cost_model = :none)
+    @test build_venue(Dict{String,Any}("fill_rule" => "cross_spread",
+                                       "cost_model" => "ibkr_pro_us_options")) ==
+          build_venue(Dict{String,Any}())
+    # An unknown rule or model names the known ones, the `fill_price` /
+    # `commission` message shape.
+    err = try build_venue(Dict{String,Any}("fill_rule" => "mid")); nothing catch e; e end
+    @test err isa ErrorException
+    @test occursin("mid", err.msg) && occursin("cross_spread", err.msg)
+    err = try build_venue(Dict{String,Any}("cost_model" => "free")); nothing catch e; e end
+    @test err isa ErrorException
+    @test occursin("free", err.msg) && occursin("ibkr_pro_us_options", err.msg)
+    # `:broker_execution` names a price a broker reported, not a rule of ours
+    @test_throws ErrorException build_venue(Dict{String,Any}("fill_rule" => "broker_execution"))
+    # A typo would otherwise take the default silently and fork the run id
+    # from the intent, so an unknown key is refused with the known ones.
+    err = try build_venue(Dict{String,Any}("tick_cents" => 5)); nothing catch e; e end
+    @test err isa ErrorException
+    @test occursin("tick_cents", err.msg) && occursin("fill_rule", err.msg)
+    @test_throws ErrorException build_venue(Dict{String,Any}("fill_rule" => 1))
+end
+
+@testset "load_experiment: [venue] round-trips both keys and defaults when absent" begin
+    base = load_experiment_str(_CFG_HEAD)
+    @test base.fill_rule === :cross_spread && base.cost_model === :ibkr_pro_us_options
+    e = load_experiment_str(_CFG_HEAD *
+        "\n[venue]\nfill_rule = \"cross_spread\"\ncost_model = \"none\"\n")
+    @test e.fill_rule === :cross_spread && e.cost_model === :none
+    err = try load_experiment_str(_CFG_HEAD * "\n[venue]\ncost_model = \"free\"\n"); nothing catch x; x end
+    @test err isa ErrorException && occursin("free", err.msg)
+    # a `venue` that is not a table: a top-level key, so it goes in the header
+    @test_throws ErrorException load_experiment_str(
+        replace(_CFG_HEAD, "name  = \"x\"\n" => "name  = \"x\"\nvenue = 1\n"))
+end
+
+# An AM-settled underlying, which `_CONTRACT_TABLE` does not list: the
+# table holds facts about underlyings this project trades, so the branch is
+# reachable only by adding one for the duration of a test. The `finally`
+# takes it out again -- the table is module state every later testset sees.
+const _CFG_AM = Underlying("AMY")
+
+function _cfg_with_am_entry(f)
+    VolSurfaceAnalysis._CONTRACT_TABLE[ticker(_CFG_AM)] =
+        ContractSpec(100, European, AMSettled, Cash)
+    try
+        f()
+    finally
+        delete!(VolSurfaceAnalysis._CONTRACT_TABLE, ticker(_CFG_AM))
+    end
+end
+
+@testset "load_experiment: an AM-settled underlying is refused when the config is read" begin
+    _cfg_with_am_entry() do
+        # No settlement rule serves AM settlement, so the run could only end
+        # at the first expiry -- hours in, on a ten-year config. The style is
+        # a contract fact, so the loader can see it from the clock alone.
+        cfg = replace(_CFG_HEAD, "SPY" => ticker(_CFG_AM))
+        err = try load_experiment_str(cfg); nothing catch e; e end
+        @test err isa ErrorException
+        @test occursin(ticker(_CFG_AM), err.msg) && occursin("AMSettled", err.msg)
+        # The PM-settled spelling of the same config loads.
+        @test load_experiment_str(_CFG_HEAD) isa Experiment
+    end
+    @test_throws UnknownContract contract_spec(_CFG_AM)
+end
+
 @testset "load_experiment: the clock and the policy must name one underlying" begin
     strangle(u) = """
         [agent.policy]
