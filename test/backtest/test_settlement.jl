@@ -800,3 +800,72 @@ _st_lazy_data(rows; once::Bool = false) =
         @test e.contract == gap && e.t == t && e.reason == :unexpected_gap
     end
 end
+
+# ---------- the reference window against a real parquet spot tree ----------
+# The rule's text does not change under bar-end visibility; its input does.
+# A vendor row stamped 16:00 ET is the 16:00-16:01 minute, after the close,
+# and is visible at 16:01 -- outside the 09:30-16:00 window. The row stamped
+# 15:59 is the last completed regular-session minute and is visible at
+# exactly 16:00, inside it. The distinct closes below are what tells the two
+# apart, and the fixture goes through the parquet reader because an
+# in-memory fixture is already stamped and could not catch the mapping.
+
+mktempdir() do root
+    spots = joinpath(root, "spots_1min")
+    d = _ST_D19                                   # Fri 2024-01-19, an ordinary session
+    _md_write_spot_parquet(
+        joinpath(spots, "date=2024-01-19", "symbol=SPY", "data.parquet"),
+        [_st_et(d, 9, 29), _st_et(d, 12, 0), _st_et(d, 15, 58), _st_et(d, 15, 59),
+         _st_et(d, 16, 0)],
+        [470.0, 475.0, 479.0, 480.0, 499.9])
+
+    @testset "settlement: the window closes on the completed 15:59-16:00 bar" begin
+        with_data(MarketData(ParquetSpots(spots))) do data
+            close_utc = _st_et(d, 16, 0)
+            # what the reader serves: the 15:59 row at the close, the 16:00
+            # row a minute later
+            @test only_or_missing(at(data, SpotPrice, _ST_SPY, close_utc)).price == 480.0
+            @test only_or_missing(at(data, SpotPrice, _ST_SPY, close_utc + Minute(1))).price == 499.9
+            @test only_or_missing(at(data, SpotPrice, _ST_SPY, _st_et(d, 15, 59))).price == 479.0
+
+            c = _st_call(d, 470.0)                # expires 16:00 ET on d
+            @test c.expiry == close_utc
+            cut = TimeCut(data, close_utc + Hour(2))
+            @test settlement_price(:session_close, cut, c, close_utc) == 480.0
+            # the 16:00 row is not merely outranked, it is outside the window
+            @test settlement_price(:session_close, TimeCut(data, close_utc), c, close_utc) == 480.0
+        end
+    end
+end
+
+# The early close, re-measured against shifted inputs rather than assumed.
+# 2024-12-24 closes at 13:00 ET and the production tree holds no bar in
+# (13:00, 16:00] ET, so the last row is the 12:59-13:00 minute -- visible at
+# 13:00, still well inside the 09:30-16:00 window. The after-hours burst
+# begins later and stays outside it, one minute later than it did before.
+mktempdir() do root
+    spots = joinpath(root, "spots_1min")
+    d, prev = Date(2024, 12, 24), Date(2024, 12, 23)
+    for (day, rows, prices) in (
+            (prev, [_st_et(prev, 9, 29), _st_et(prev, 15, 59)], [595.0, 600.0]),
+            (d, [_st_et(d, 9, 29), _st_et(d, 12, 0), _st_et(d, 12, 59),
+                 _st_et(d, 16, 30)], [604.0, 605.0, 606.0, 611.0]))
+        _md_write_spot_parquet(
+            joinpath(spots, "date=" * Dates.format(day, "yyyy-mm-dd"), "symbol=SPY",
+                     "data.parquet"), rows, prices)
+    end
+
+    @testset "settlement: an early close settles at its completed 13:00 ET bar" begin
+        with_data(MarketData(ParquetSpots(spots))) do data
+            c = _st_call(d, 600.0)
+            t = _st_et(d, 16, 0)
+            # the last row of the shortened session is visible at 13:00 ET
+            @test only_or_missing(at(data, SpotPrice, _ST_SPY, _st_et(d, 13, 0))).price == 606.0
+            # the after-hours print is visible at 16:31 ET, outside the window
+            @test only_or_missing(at(data, SpotPrice, _ST_SPY, _st_et(d, 16, 31))).price == 611.0
+            @test isempty(collect(between(data, SpotPrice, _ST_SPY,
+                                          _st_et(d, 13, 0) + Millisecond(1), t)))
+            @test settlement_price(:session_close, TimeCut(data, t), c, t) == 606.0
+        end
+    end
+end

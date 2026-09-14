@@ -384,3 +384,52 @@ end
         @test occursin("must be an Underlying", err.msg) && occursin("rates", err.msg)
     end
 end
+
+@testset "identity: the bar-end convention is in the core projection" begin
+    # Both parquet readers map a vendor minute bar to a record visible at
+    # bar END. That determines which minute every decision reads, so it is
+    # part of what the spec serves and must be in the hash -- and it forks
+    # every id away from the runs made under bar-open visibility, which the
+    # corrected code cannot reproduce.
+    e = load_experiment_str(_id_toml())
+    d = VolSurfaceAnalysis.to_dict(e.data)
+    @test d["entries"]["option_bar"]["stamp"] == "bar_end"
+    @test d["entries"]["spot_price"]["stamp"] == "bar_end"
+
+    # Pinned against the prior core projection: the same resolved experiment
+    # hashed without the stamp is what the pre-correction code produced, and
+    # both hashes move.
+    core = VolSurfaceAnalysis._core_dict(e)
+    full = copy(core); full["outputs"] = VolSurfaceAnalysis.to_dict(e.outputs)
+    prior = deepcopy(core)
+    for k in ("option_bar", "spot_price")
+        delete!(prior["data"]["entries"][k], "stamp")
+    end
+    prior_full = deepcopy(prior); prior_full["outputs"] = VolSurfaceAnalysis.to_dict(e.outputs)
+    h(x) = VolSurfaceAnalysis._hash16(VolSurfaceAnalysis._canonical(x))
+    @test h(core) == core_hash(e) && h(full) == full_hash(e)
+    @test core_hash(e) != h(prior)
+    @test full_hash(e) != h(prior_full)
+
+    # Output variations still share the one corrected core.
+    e2 = Experiment(name="x", agent=e.agent, data=e.data, clock=e.clock,
+                    from=e.from, to=e.to, outputs=OutputSpec(metrics=[:sharpe]))
+    @test core_hash(e2) == core_hash(e)
+    @test full_hash(e2) != full_hash(e)
+end
+
+@testset "identity: no config key can restore bar-open visibility" begin
+    # The convention is a constant in code, not a setting. A `stamp` key in
+    # a parquet data table is an unknown key like any other -- ignored, not
+    # honoured -- so the hash does not move and no experiment can select the
+    # clock that leaks the future.
+    base = load_experiment_str(_id_toml())
+    with_key = load_experiment_str(replace(_id_toml(),
+        "type = \"parquet_option_bars\"\nroot = \"/nonexistent/opts\"" =>
+        "type = \"parquet_option_bars\"\nroot = \"/nonexistent/opts\"\nstamp = \"bar_open\""))
+    @test core_hash(with_key) == core_hash(base)
+    @test entry(with_key.data, OptionBar) == entry(base.data, OptionBar)
+    # and there is no builder that would accept one either
+    @test VolSurfaceAnalysis.to_dict(ParquetOptionBars("/x"))["stamp"] == "bar_end"
+    @test VolSurfaceAnalysis.to_dict(ParquetSpots("/x"))["stamp"] == "bar_end"
+end

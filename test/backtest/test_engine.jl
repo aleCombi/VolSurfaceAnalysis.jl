@@ -524,3 +524,50 @@ end
         @test err isa Exception
     end
 end
+
+# ---------- a scheduled decision fills off the minute that just ended ----------
+# Adjacent minutes with different prices, served through the real parquet
+# readers so the stamps come from the row mapping rather than from the
+# fixture. At a decision at 15:31 the fill must use the 15:30-15:31 bar --
+# the one that has finished -- and not the 15:31-15:32 bar, which is the
+# minute of up-to-one-minute lookahead the bar-open stamp handed out.
+
+mktempdir() do root
+    opts = joinpath(root, "options_1min")
+    spots = joinpath(root, "spots_1min")
+    tick = DateTime(2024, 1, 15, 15, 31)                # the decision instant
+    just_ended = _md_row(tick)                           # 15:30, the completed minute
+    not_yet = tick                                      # 15:31, still running
+    tkr = "O:SPY240216C00480000"
+    _md_write_options_parquet(
+        joinpath(opts, "date=2024-01-15", "symbol=SPY", "data.parquet"),
+        [(ticker=tkr, close=5.00, volume=1.0, open=5.00, high=5.00, low=5.00,
+          timestamp=_md_row(just_ended)),                # visible 15:30
+         (ticker=tkr, close=5.00, volume=1.0, open=5.00, high=5.00, low=5.00,
+          timestamp=just_ended),                         # visible 15:31 -- the fill
+         (ticker=tkr, close=9.00, volume=1.0, open=9.00, high=9.00, low=9.00,
+          timestamp=not_yet)])                           # visible 15:32 -- lookahead
+    _md_write_spot_parquet(joinpath(spots, "date=2024-01-15", "symbol=SPY", "data.parquet"),
+                           _md_row.([DateTime(2024, 1, 15, 15, 30), tick,
+                                     DateTime(2024, 1, 15, 15, 32)]),
+                           [480.0, 480.0, 495.0])
+
+    @testset "run_backtest: a fill reads the minute that has ended, not the one running" begin
+        data = MarketData(ParquetOptionBars(opts), QuotesFromBars(SpreadFromOHLCV(1.0)),
+                          ParquetSpots(spots))
+        contract = ContractKey(_EN_UND, 480.0, DateTime(2024, 2, 16, 21, 0), Call)
+        policy = _OpenOnceAt(tick, Order(:buy, [Leg(contract, Long, 1, Open)]))
+        L = with_data(data) do d
+            run_backtest(policy, d, tick, tick, _EN_CLOCK)
+        end
+        f = only(e for e in L.events if e isa Fill)
+        @test f.price == 5.00                  # the 15:30-15:31 close, λ = 1 so bid = ask
+        @test effective_at(f) == tick
+        # what the decision saw, recorded in the order journal
+        o = only(L.orders)
+        @test o.decided_at == tick
+        obs = only(o.observations)
+        @test obs.quote_at == tick && obs.spot_at == tick
+        @test obs.bid == 5.00 && obs.ask == 5.00 && obs.spot == 480.0
+    end
+end

@@ -202,10 +202,10 @@ end
 # so the duplicated vendor row survives at(...) and its length is two today.
 @testset "spot reads de-duplicate timestamps" begin
     mktempdir() do root
-        ts = DateTime(2024, 1, 15, 15, 30)
+        ts = DateTime(2024, 1, 15, 15, 30)        # visible instant; the row is a bar earlier
         spots_root = joinpath(root, "spots_1min")
         path = joinpath(spots_root, "date=2024-01-15", "symbol=SPY", "data.parquet")
-        _md_write_spot_parquet(path, [ts, ts], [480.0, 480.0])
+        _md_write_spot_parquet(path, _md_row.([ts, ts]), [480.0, 480.0])
 
         with_data(MarketData(ParquetSpots(spots_root))) do data
             @test length(at(data, SpotPrice, _RF_SPY, ts)) == 1

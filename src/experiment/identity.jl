@@ -63,10 +63,23 @@ to_dict(s::SpreadFromOHLCV) =
 # The `dataset` slot on the parquet specs is reserved for a logical
 # dataset id / version; today it carries the root path.
 
+# Both parquet readers map a vendor minute bar to a record visible at bar
+# END (`bar_visible_at`, data/polygon.jl). That convention determines every
+# record they serve -- which minute a decision reads, and therefore every
+# fill and every settlement price -- so it belongs in the projection. It is
+# a fixed constant, not a field: there is no setting to vary and none may
+# be added, and it is not an output, so it goes here rather than in
+# `OutputSpec`. Its job in the hash is to fork every id away from the runs
+# made under bar-open visibility, which the corrected code cannot
+# reproduce.
+const _BAR_STAMP = "bar_end"
+
 to_dict(s::ParquetOptionBars) = Dict{String,Any}(
-    "type" => "parquet_option_bars", "dataset" => Dict{String,Any}("root" => s.root))
+    "type" => "parquet_option_bars", "stamp" => _BAR_STAMP,
+    "dataset" => Dict{String,Any}("root" => s.root))
 to_dict(s::ParquetSpots) = Dict{String,Any}(
-    "type" => "parquet_spots", "dataset" => Dict{String,Any}("root" => s.root))
+    "type" => "parquet_spots", "stamp" => _BAR_STAMP,
+    "dataset" => Dict{String,Any}("root" => s.root))
 to_dict(s::QuotesFromBars) = Dict{String,Any}(
     "type" => "from_bars", "synthesizer" => to_dict(s.synthesizer))
 

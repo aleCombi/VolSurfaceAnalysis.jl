@@ -29,3 +29,26 @@ end
     @test et_to_utc(Date(2024, 12, 15), Time(10, 0)) == DateTime(2024, 12, 15, 15, 0)
     @test et_to_utc(Date(2024, 7, 15), Time(10, 0)) == DateTime(2024, 7, 15, 14, 0)
 end
+
+@testset "bar stamps: a minute bar is visible at its end, not its open" begin
+    # The convention, spelled out here rather than derived from the code:
+    # a row stamped at 19:29 is the 19:29-19:30 minute, and its close, high
+    # and low are knowable at 19:30. A decision at 19:30 therefore reads it,
+    # and a decision at 19:29 does not.
+    @test VolSurfaceAnalysis.BAR_INTERVAL == Minute(1)
+    @test VolSurfaceAnalysis.bar_visible_at(DateTime(2024, 1, 15, 19, 29)) ==
+          DateTime(2024, 1, 15, 19, 30)
+    @test VolSurfaceAnalysis.bar_row_time(DateTime(2024, 1, 15, 19, 30)) ==
+          DateTime(2024, 1, 15, 19, 29)
+    # Inverses, and a whole-minute shift carries sub-second bounds through
+    # untouched -- which is what lets a range predicate be translated into
+    # the stored clock without widening or narrowing it.
+    for t in (DateTime(2024, 1, 15, 23, 59), DateTime(2024, 1, 15, 19, 29, 30),
+              DateTime(2024, 1, 15, 19, 29) + Millisecond(1))
+        @test VolSurfaceAnalysis.bar_row_time(VolSurfaceAnalysis.bar_visible_at(t)) == t
+        @test VolSurfaceAnalysis.bar_visible_at(VolSurfaceAnalysis.bar_row_time(t)) == t
+    end
+    # A 23:59 row crosses midnight into the next calendar date.
+    @test VolSurfaceAnalysis.bar_visible_at(DateTime(2024, 1, 15, 23, 59)) ==
+          DateTime(2024, 1, 16, 0, 0)
+end
