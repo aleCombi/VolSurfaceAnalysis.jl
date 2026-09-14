@@ -479,6 +479,14 @@ end
     L = _en_with_record(_en_hand_ledger(), :observations,
                         [LegObservation(_LG_T_OPEN, 0.857, 0.857, 480.0, _LG_T_OPEN), _lg_seen(1.10)])
     @test check_join(L) === nothing
+    # the default is TICK_CENTS, not a repeated literal: a Long leg filled
+    # at 0.86 against an ask of 0.857 is ceil(85.7) on the penny tick
+    long = Ledger()
+    record_order!(long, Order(:buy, [Leg(_LG_PUT470, Long, 1, Open)]); prices=[0.86],
+                  observations=[LegObservation(_LG_T_OPEN, 0.837, 0.857, 480.0, _LG_T_OPEN)],
+                  effective_at=_LG_T_OPEN, recorded_at=_LG_T_OPEN, fill_rule=:cross_spread)
+    @test check_join(long) === nothing
+    @test check_join(long; tick_cents=TICK_CENTS) === nothing
     # an unknown fill rule is a violation on :fill_rule
     L = _en_with_fill(_en_hand_ledger(), 1, :fill_rule, :mid)
     err = _en_join_error(L)

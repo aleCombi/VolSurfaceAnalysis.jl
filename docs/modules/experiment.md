@@ -22,7 +22,7 @@ flowchart LR
 ```
 
 Per call to `run_experiment`: open the data (`with_data`), tick the
-engine on the clock with the venue's defaults, check that the window
+engine on the clock through the experiment's own venue, check that the window
 holds a clock tick, build the `PnLSeries` from the ledger's round trips,
 compute always-on plus requested optional metrics, close the data, and
 pack everything (including the originating `Experiment`) into one
@@ -43,16 +43,20 @@ end
 OutputSpec(; metrics=<all registered>, metric_params=Dict(), artifacts=[:equity_curve])
 
 struct Experiment
-    name    :: String
-    agent   :: Agent
-    data    :: MarketData      # provider specs, one per kind; opened per run
-    clock   :: Clock           # tick grid: kind + selector; core identity
-    from    :: DateTime
-    to      :: DateTime
-    outputs :: OutputSpec
+    name       :: String
+    agent      :: Agent
+    data       :: MarketData   # provider specs, one per kind; opened per run
+    clock      :: Clock        # tick grid: kind + selector; core identity
+    from       :: DateTime
+    to         :: DateTime
+    fill_rule  :: Symbol       # venue choice: how a quote becomes a leg price
+    cost_model :: Symbol       # venue choice: what an order costs
+    outputs    :: OutputSpec
 end
 
-Experiment(; name, agent, data, clock, from, to, outputs=OutputSpec())
+Experiment(; name, agent, data, clock, from, to,
+             fill_rule=:cross_spread, cost_model=:ibkr_pro_us_options,
+             outputs=OutputSpec())
 
 struct ExperimentResult
     experiment :: Experiment
@@ -62,7 +66,8 @@ struct ExperimentResult
 end
 
 run_experiment(exp::Experiment) -> ExperimentResult
-core_hash(exp) :: String   # backtest identity (data, clock, agent, window)
+core_hash(exp) :: String   # backtest identity (data, clock, agent, window,
+                           #                    venue, resolved contract facts)
 full_hash(exp) :: String   # core + outputs; the run's id in the KB
 ```
 
@@ -105,8 +110,9 @@ the current tick is blocked.
 | **Result carries the full `Experiment`, not just `name`** | Rerun is the primary use case for provenance. `run_experiment(result.experiment)` is the obvious primitive; a bare `name` would force a sidecar registry to look up the rest. The cost is one cheap struct reference. |
 | **The result carries the ledger, not a fill vector** | The ledger is the run: events with declared intent and recorded lineage, plus what every decision saw. The series and the metrics are derived from it and can be recomputed; nothing in the result is a second copy that could disagree with it. |
 | **Open lots at the window end stay open** | Proposal decision 8: nothing is force-settled at `exp.to`. A lot still open contributes nothing to the realized series until the equity curve marks it at the evaluation endpoint (slice 5); expiries inside the window are lifecycle events, booked in the tick loop. The window-end spot lookup and its error are gone with the settle closure. |
-| **The venue's values are the engine's defaults, not keywords here** | `fill_rule`, `cost_model` and `tick_cents` change results, so they must be in the run id before they are configurable; `run_experiment` takes none until slice 4 makes them `Experiment` fields. |
-| **The clock underlying and a declared policy underlying must agree** | One experiment, one underlying is the real invariant here, and `load_experiment` asserts it rather than assuming it: it errors when `declared_underlyings(agent)` is non-empty and does not contain the clock selector. A clock is a tick grid; its selector answers *when* to step, not *whose price*: fills resolve per leg against the leg's own underlying. A policy that chooses its underlying per tick declares nothing and is not checked at load. |
+| **The venue's two choices are fields, not keywords** | `fill_rule` and `cost_model` change results, so they must be visible to the run id; they are `Experiment` fields, in `core_hash`, and `run_experiment` still takes no keyword. The other two values that used to ride as engine keywords are not choices: the tick is the constant `TICK_CENTS`, and settlement style is a contract fact routed per lot off `contract_spec`. Two symbols, not a `VenueSpec` -- a struct would name the same two things twice. |
+| **The resolved contract spec is in `core_hash`, the table is not** | `_CONTRACT_TABLE`'s facts reach cash through `contract_spec`, so a correction there must be a new run id. Only the spec for the experiment's one underlying is projected: projecting the table would fork every id on an unrelated entry. |
+| **The clock underlying and a declared policy underlying must agree** | One experiment, one underlying is the real invariant here, and it is asserted rather than assumed: `_experiment_underlying` errors when `declared_underlyings(agent)` is non-empty and does not contain the clock selector. The loader, identity and the runner all come through it, because `Experiment` is a public constructor and a config is not the only way to build one -- identity projects the clock underlying's contract facts, so a directly-built experiment whose policy traded another would be hashed against the wrong multiplier. The id must not exist rather than be wrong. A clock is a tick grid; its selector answers *when* to step, not *whose price*: fills resolve per leg against the leg's own underlying. A policy that chooses its underlying per tick declares nothing and is not checked. |
 | **Specs in, readers scoped to the run** | `Experiment.data` holds pure spec values (hashable, persistable); `run_experiment` opens them with `with_data` and closes them on every exit path. Rehydrating a saved run needs no data on disk until it is actually run. |
 | **Always-on metrics not in the output spec** | They are computed unconditionally and cost nothing extra. Listing them in `outputs.metrics` would force every experiment to repeat a boilerplate list and would imply they were opt-in, which they are not. |
 | **`metrics::Vector{Symbol}`, not `Vector{Function}`** | Symbols survive serialization to disk (now exercised by the TOML config loader), read cleanly in config dumps, and let `compute_metrics` carry the per-symbol default kwargs in one place ([`compute_metrics`](metrics.md)). Function references would skip the table at the cost of looking less like a config artifact. |
@@ -142,6 +148,8 @@ identity (`core_hash` / `full_hash` via `identity.jl`).
 | The clock's selector is not an `Underlying` | `run_experiment` errors: an experiment ticks on an underlying's grid. |
 | A leg the venue cannot honestly price (no quote, no executable side, no spot at the tick) | `UnpriceableLeg` from the engine before anything is written; nothing serving an underlying is `UnservedSelector`. |
 | A declared policy underlying differs from the clock selector | `load_experiment` errors naming both. |
+| The clock's underlying settles in a style no rule serves | `load_experiment` errors naming the underlying and its style; a config that cannot be run fails when it is read, not hours into a backtest. |
+| `[venue]` names an unknown fill rule or cost model, or an unknown key | `load_experiment` errors naming the known ones. A typo would otherwise take the default silently and fork the run id from the intent. |
 | Data root missing on this machine | `open_data` throws `ArgumentError` at the start of the run; loading the config succeeds. |
 | `exp.outputs.metrics` contains an unknown symbol | `compute_metrics` errors with the offending symbol and the known list. |
 | Agent / Policy never trades | `result.ledger` is empty with no orders and `result.pnl_series.pnl` is empty; always-on metrics are `0.0` / `0` / `NaN` per their empty-series conventions. |
@@ -151,8 +159,8 @@ identity (`core_hash` / `full_hash` via `identity.jl`).
 
 A TOML file resolves to an `Experiment` via `load_experiment(path)`.
 Schema: a flat header (`name`, `from`, `to`, `clock`) plus nested
-tables: one `[data.<kind>]` table per kind, `[agent]`, and an optional
-`[outputs]`. Every sum-type (data provider, `Curve`, `QuoteSynthesizer`,
+tables: one `[data.<kind>]` table per kind, `[agent]`, and optional
+`[outputs]` and `[venue]` tables. Every sum-type (data provider, `Curve`, `QuoteSynthesizer`,
 `Policy`, `Agent`) is keyed by a string `type` discriminator; the rest
 of that table is forwarded to the matching builder. `[outputs]` lists
 `metrics` / `artifacts` plus per-metric `[outputs.metric_params.<m>]`;
@@ -168,6 +176,10 @@ clock = { kind = "option_quote", underlying = "SPY" }
 
 [outputs]                      # optional; omit for all-metrics defaults
 metrics = ["sharpe", "max_drawdown"]
+
+[venue]                        # optional; both keys optional
+fill_rule  = "cross_spread"
+cost_model = "ibkr_pro_us_options"
 
 [data.option_bar]
 type = "parquet_option_bars"
@@ -214,6 +226,13 @@ The loader owns the only string-to-kind table:
 | `div_curve` | `DivCurve` | `constant` (`underlying`) |
 | `vol_surface` | `VolatilitySurface` | `surface_from` (`currency`, optional `spot_for`, optional `lookback_ticks`) |
 
+`[venue]` holds the two execution values that are choices rather than
+facts; both default to the engine's own, so an omitted table and one that
+spells the defaults out are the same experiment and the same run id. It
+rejects unknown keys for the reason `surface_from` does. The class's tick
+and the settlement rule are deliberately not there: the tick is the
+constant `TICK_CENTS`, and settlement style comes from `contract_spec`.
+
 `by_selector` composes any kind: every key other than `type` is a
 selector naming a sub-table (`SPY = { type = "parquet_spots", root =
 ... }`). The clock's selector key follows its kind (`underlying` or
@@ -246,8 +265,9 @@ from the resolved experiment, and the omit-when-default trick on
 style. Consequence: rerunning an existing config that has a
 `[data.vol_surface]` table produces a new `run_id`, so it lands beside
 the old run rather than replacing it. `[data.vol_surface]` is also the
-one table that rejects unknown keys, because a typo there would take the
-default silently and fork identity from intent.
+one `[data.*]` table that rejects unknown keys (`[venue]` does too),
+because a typo there would take the default silently and fork identity
+from intent.
 
 New concrete types register themselves by adding one entry to the
 relevant builder table (`_PROVIDER_BUILDERS`, `_CURVE_BUILDERS`,

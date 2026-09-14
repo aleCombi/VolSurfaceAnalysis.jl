@@ -91,7 +91,7 @@ _st_one_lot_book(contract::ContractKey, at::DateTime) =
 # booked, and the booked `Expiry` comes back. Used where the point is the
 # bitemporal stamping (D1) rather than the whole engine.
 function _st_book_due(L::Ledger, data, prev::DateTime, t::DateTime)
-    due = settlements(TimeCut(data, t), L.book, prev, t; settlement_rule = :session_close)
+    due = settlements(TimeCut(data, t), L.book, prev, t)
     (lot, price) = only(due.settled)
     return record_expiry!(L, lot; settlement_price = price,
                           effective_at = lot.contract.expiry, recorded_at = t)
@@ -267,7 +267,7 @@ end
     t = _st_et(_ST_D19, 10, 0)
     book = _st_one_lot_book(f.a, _st_et(_ST_D16, 10, 0))
     out = @test_logs (:warn, "lot left open: no honest settlement price") settlements(
-        TimeCut(f.data, t), book, _st_et(_ST_D18, 10, 0), t; settlement_rule = :session_close)
+        TimeCut(f.data, t), book, _st_et(_ST_D18, 10, 0), t)
     @test isempty(out.settled)
     @test length(out.unsettled) == 1
     @test only(out.unsettled).reason == :unexpected_gap
@@ -455,8 +455,8 @@ end
     before = deepcopy(book)
     cut = TimeCut(f.data, to)
     # B expires after the window: nothing is due, and nothing changes.
-    one = settlements(cut, book, f.ticks[1], to; settlement_rule = :session_close)
-    two = settlements(cut, book, f.ticks[1], to; settlement_rule = :session_close)
+    one = settlements(cut, book, f.ticks[1], to)
+    two = settlements(cut, book, f.ticks[1], to)
     @test isempty(one.settled) && isempty(one.unsettled)
     @test one == two
     @test book == before
@@ -465,15 +465,13 @@ end
     g = _st_fixture()
     held = _st_one_lot_book(g.a, _st_et(_ST_D16, 10, 0))
     held_before = deepcopy(held)
-    due = settlements(TimeCut(g.data, to), held, _st_et(_ST_D18, 10, 0), to;
-                      settlement_rule = :session_close)
+    due = settlements(TimeCut(g.data, to), held, _st_et(_ST_D18, 10, 0), to)
     @test [lot.contract for (lot, _) in due.settled] == [g.a]
     @test only(due.settled)[2] == 480.0
     # Repeated on a book that *does* have a lot falling due: the answer is
     # the same one and the book is untouched, which is what "computes, never
     # records" means on the path that actually returns something.
-    again = settlements(TimeCut(g.data, to), held, _st_et(_ST_D18, 10, 0), to;
-                        settlement_rule = :session_close)
+    again = settlements(TimeCut(g.data, to), held, _st_et(_ST_D18, 10, 0), to)
     @test again == due
     @test held == held_before
     @test isempty(due.unsettled) && isempty(again.unsettled)
@@ -485,15 +483,14 @@ end
     gap_before = deepcopy(gap_book)
     gap_args = (TimeCut(h.data, to), gap_book, _st_et(_ST_D17, 10, 0), to)
     first_gap = @test_logs (:warn, "lot left open: no honest settlement price") settlements(
-        gap_args...; settlement_rule = :session_close)
+        gap_args...)
     second_gap = @test_logs (:warn, "lot left open: no honest settlement price") settlements(
-        gap_args...; settlement_rule = :session_close)
+        gap_args...)
     @test [e.reason for e in first_gap.unsettled] == [:unexpected_gap]
     @test [e.reason for e in second_gap.unsettled] == [e.reason for e in first_gap.unsettled]
     @test isempty(first_gap.settled) && isempty(second_gap.settled)
     @test gap_book == gap_before
-    @test isempty(settlements(TimeCut(g.data, to), held, g.a.expiry, to;
-                              settlement_rule = :session_close).settled)
+    @test isempty(settlements(TimeCut(g.data, to), held, g.a.expiry, to).settled)
     @test held == _st_one_lot_book(g.a, _st_et(_ST_D16, 10, 0))
 end
 
@@ -602,9 +599,11 @@ end
 @testset "settlement_price: an expiry before the session opens is :pre_open_expiry" begin
     # The expiry bound runs the window backwards here: 09:30 ET is after a
     # 09:00 ET expiry, so `[09:30, 09:00]` is empty however complete the data
-    # is. That contract settles against the session's *opening* print -- the
-    # AM-settled case no rule here serves -- so the failure names the
-    # contract instead of blaming observations that could not exist.
+    # is, and the failure names the contract instead of blaming observations
+    # that could not exist. The contract is SPY, a PM-settled one: this is
+    # `:session_close`'s own domain edge and not a stand-in for AM
+    # settlement, which is now its own named failure below.
+    @test contract_spec(_ST_SPY).settlement === PMSettled
     spots = vcat(_st_session(_ST_D18, 473.0), _st_session(_ST_D19, 480.0),
                  _st_session(_ST_D22, 485.0))
     data = MarketData(InMemory(spots))
@@ -628,7 +627,7 @@ end
     # warning, and the lot stays open rather than settling at a guess.
     book = _st_one_lot_book(c, _st_et(_ST_D18, 10, 0))
     out = @test_logs (:warn, "lot left open: no honest settlement price") settlements(
-        cut, book, _st_et(_ST_D18, 10, 0), monday; settlement_rule = :session_close)
+        cut, book, _st_et(_ST_D18, 10, 0), monday)
     @test isempty(out.settled)
     @test only(out.unsettled).reason == :pre_open_expiry
 end
@@ -659,6 +658,53 @@ end
     # DST crossing and not an accident of the fixture.
     @test et_to_utc(sunday, Time(9, 0)) - DateTime(sunday) == Hour(13)
     @test et_to_utc(friday, Time(9, 0)) - DateTime(friday) == Hour(14)
+end
+
+# ---- a settlement style no rule serves --------------------------------
+
+# An AM-settled underlying, which `_CONTRACT_TABLE` does not list: the
+# table holds facts about underlyings this project trades, so the only way
+# to reach the AM branch is to add one for the duration of a test and take
+# it out again. Restoring it is the `finally`'s job -- the table is module
+# state shared with every later testset.
+const _ST_AM = Underlying("AMX")
+
+function _st_with_am_entry(f)
+    VolSurfaceAnalysis._CONTRACT_TABLE[ticker(_ST_AM)] =
+        ContractSpec(100, European, AMSettled, Cash)
+    try
+        f()
+    finally
+        delete!(VolSurfaceAnalysis._CONTRACT_TABLE, ticker(_ST_AM))
+    end
+end
+
+@testset "settlements: an AM-settled lot throws UnsupportedSettlement" begin
+    _st_with_am_entry() do
+        # Not caught and warned like an unpriceable lot: that names a lot
+        # whose price is unavailable at this instant, and design rule 7
+        # leaves it open and says so; this names a contract class no rule
+        # settles, so every later tick would answer the same and finishing
+        # the run would report a never-valued position as merely still open.
+        c = ContractKey(_ST_AM, 470.0, _st_et(_ST_D19, 16, 0), Call)
+        L = _st_one_lot_ledger(c, _st_et(_ST_D16, 10, 0))
+        snap, before = _lg_snapshot(L), deepcopy(L.book)
+        data = MarketData(InMemory(vcat(_st_session(_ST_D18, 473.0),
+                                        _st_session(_ST_D19, 480.0),
+                                        _st_session(_ST_D22, 485.0))))
+        monday = _st_et(_ST_D22, 10, 0)
+        e = try settlements(TimeCut(data, monday), L.book,
+                            _st_et(_ST_D18, 10, 0), monday); nothing catch err; err end
+        @test e isa UnsupportedSettlement
+        @test e.underlying == _ST_AM && e.style == AMSettled
+        @test occursin("UnsupportedSettlement", sprint(showerror, e))
+        @test occursin("AMX", sprint(showerror, e)) && occursin("AMSettled", sprint(showerror, e))
+        # Nothing was settled, nothing was written, and the lot is still open.
+        @test _lg_snapshot(L) == snap && L.book == before
+        @test [l.contract for l in open_lots(L.book)] == [c]
+    end
+    # The fixture entry is gone again, so no later testset sees it.
+    @test_throws UnknownContract contract_spec(_ST_AM)
 end
 
 # ---- `between` yields an iterable, not a container ---------------------

@@ -143,10 +143,11 @@ function _build_constant(d::AbstractDict, ::Type{R}) where {R}
     return Constant(_constant_record(R, sel, _curve_from(d, "data(constant)")))
 end
 
-# The only builder that rejects unknown keys. `[data.<kind>]` tables
-# otherwise drop them silently (a recorded cleanup item), which is
-# tolerable until a key changes identity: a typo'd `lookback_ticks` would
-# take the default and silently change identity-vs-intent.
+# The only `[data.*]` builder that rejects unknown keys (`[venue]` does
+# too). The other tables drop them silently (a recorded cleanup item),
+# which is tolerable until a key changes identity: a typo'd
+# `lookback_ticks` would take the default and silently change
+# identity-vs-intent.
 const _SURFACE_FROM_KEYS = Set(["type", "currency", "spot_for", "lookback_ticks"])
 
 function _build_surface_from(d::AbstractDict, ::Type)
@@ -328,6 +329,54 @@ function build_agent(d::AbstractDict)::Agent
     return _dispatch(_AGENT_BUILDERS, t, "agent")(d)
 end
 
+# ---- Venue builder (the `[venue]` table) --------------------------------
+# The two choices the venue leaves open. Everything else about execution is
+# either a fact (`contract_spec`) or a constant (`TICK_CENTS`), so this
+# table is two optional keys and no `type` discriminator: there is one
+# venue, described by the rule and the model it applies.
+
+const _VENUE_KEYS = Set(["fill_rule", "cost_model"])
+
+# Unknown keys are rejected here for `surface_from`'s reason: both keys
+# change results, so a typo would take the default silently and fork the
+# run id from the intent.
+function _venue_choice(d::AbstractDict, key::AbstractString, default::Symbol,
+                       known::AbstractDict{Symbol})::Symbol
+    haskey(d, key) || return default
+    raw = d[key]
+    raw isa AbstractString || error(
+        "load_experiment: [venue] $key must be a string, got $(typeof(raw))")
+    s = Symbol(String(raw))
+    haskey(known, s) || error(
+        "load_experiment: unknown venue $key :$s. " *
+        "Known: $(sort(collect(keys(known))))")
+    return s
+end
+
+"""
+    build_venue(d::AbstractDict) -> (fill_rule::Symbol, cost_model::Symbol)
+
+Build the venue choices from a `[venue]` config table. Both keys are
+optional and default to what the engine has always run
+(`:cross_spread` / `:ibkr_pro_us_options`), so an omitted table and one
+that spells the defaults out are the same experiment and the same run id.
+Errors, naming the known ones, for a rule or model no table holds, and
+for any key that is neither.
+
+The class's tick and the settlement rule are deliberately absent: the
+tick is the constant `TICK_CENTS`, and settlement style is a contract
+fact routed per lot. A value that changes results is either config or a
+constant in code, never a defaulted keyword nothing records.
+"""
+function build_venue(d::AbstractDict)
+    unknown = sort!(collect(setdiff(keys(d), _VENUE_KEYS)))
+    isempty(unknown) || error(
+        "load_experiment: [venue] has unknown key(s) $(unknown). " *
+        "Known: $(sort(collect(_VENUE_KEYS)))")
+    return (fill_rule  = _venue_choice(d, "fill_rule",  _DEFAULT_FILL_RULE,  _FILL_RULES),
+            cost_model = _venue_choice(d, "cost_model", _DEFAULT_COST_MODEL, _COST_MODELS))
+end
+
 # ---- OutputSpec builder -------------------------------------------------
 
 # A flat TOML table -> NamedTuple (keys -> symbols). Values pass through as
@@ -368,11 +417,12 @@ end
 Parse a TOML file and construct the [`Experiment`](@ref) it describes.
 
 The schema is a flat header (`name`, `from`, `to`, `clock`) plus nested
-tables (`[outputs]`, `[data.<kind>]`, `[agent]`). Every dispatched
-sum-type (data provider, synthesizer, curve, policy, agent) is keyed by
-a `type` discriminator; the rest of that table is forwarded to the
-matching builder. Optional metrics live under `[outputs]`; top-level
-`metrics` and the old `[source]` table are rejected with a pointer.
+tables (`[outputs]`, `[data.<kind>]`, `[agent]`, `[venue]`). Every
+dispatched sum-type (data provider, synthesizer, curve, policy, agent) is
+keyed by a `type` discriminator; the rest of that table is forwarded to
+the matching builder. Optional metrics live under `[outputs]` and the
+venue's two choices under `[venue]`; top-level `metrics` and the old
+`[source]` table are rejected with a pointer.
 
 # Example
 
@@ -384,6 +434,10 @@ clock = { kind = "option_quote", underlying = "SPY" }
 
 [outputs]
 metrics = ["sharpe", "max_drawdown"]
+
+[venue]                                  # optional; both keys optional
+fill_rule  = "cross_spread"
+cost_model = "ibkr_pro_us_options"
 
 [data.option_bar]
 type = "parquet_option_bars"
@@ -466,17 +520,28 @@ function _experiment_from_cfg(cfg::AbstractDict)::Experiment
     any(kind(s) === kind(clock) for s in data.entries) || error(
         "load_experiment: clock kind \"$(kind_name(kind(clock)))\" has no [data.*] table")
     agent = build_agent(Dict{String,Any}(agent_tbl))
-    # One experiment, one underlying. The clock selector says *when* to
-    # step; fills resolve prices per leg. Asserting the two agree is what
-    # makes that safe by construction -- a policy that declares nothing
-    # statically cannot be checked here, and is not.
-    declared = declared_underlyings(agent)
-    isempty(declared) || clock.sel in declared || error(
-        "load_experiment: the agent declares $(join(string.(declared), ", ")) " *
-        "but the clock steps on $(clock.sel); an experiment ticks and trades " *
-        "on one underlying")
+    # Settlement style is a contract fact, and only `PMSettled` has a rule
+    # (`settlements`). A config whose underlying settles otherwise cannot be
+    # run at all, so it fails when it is read rather than hours into a
+    # backtest at the first expiry -- the same named failure the lifecycle
+    # step would raise there. A clock that names something other than an
+    # underlying has no contract facts to check and is
+    # `_experiment_underlying`'s error, raised below.
+    if clock.sel isa Underlying
+        style = contract_spec(clock.sel).settlement
+        style === PMSettled || throw(UnsupportedSettlement(clock.sel, style))
+    end
+    venue_tbl = get(cfg, "venue", Dict{String,Any}())
+    venue_tbl isa AbstractDict || error("load_experiment: [venue] must be a table")
+    venue = build_venue(Dict{String,Any}(venue_tbl))
     outputs = haskey(cfg, "outputs") ?
         build_output_spec(Dict{String,Any}(cfg["outputs"])) : OutputSpec()
-    return Experiment(; name=name, agent=agent, data=data, clock=clock,
-                       from=from, to=to, outputs=outputs)
+    exp = Experiment(; name=name, agent=agent, data=data, clock=clock,
+                      from=from, to=to, fill_rule=venue.fill_rule,
+                      cost_model=venue.cost_model, outputs=outputs)
+    # One experiment, one underlying -- asserted here so a config fails when
+    # it is read, and asserted again wherever the answer is used, because
+    # `Experiment` is public and a config is not the only way to build one.
+    _experiment_underlying(exp)
+    return exp
 end

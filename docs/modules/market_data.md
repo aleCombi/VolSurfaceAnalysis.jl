@@ -42,21 +42,35 @@ stamp is kept as the visibility time, so a decision at `t` sees the
 `[t, t+1min)` bar. This is a stated one-minute simplification, not a
 shift; a bar-end stamp option on the parquet spec is backlog.
 
-*Regular-session contract (`SpotPrice`).* A provider serving
-`SpotPrice` for an underlying serves that underlying's **regular-session
-prints only** -- no pre-market, no post-close, no extended-hours
-session. Nothing in the protocol enforces it and nothing in a
-`SpotPrice` records which session a print came from: the parquet spot
-reader selects every row its partitions hold and `InMemory` serves
-whatever vector it was handed, so this is a contract on the tree and on
-whoever builds that vector, not a property a consumer can check. It is
-what makes "the last print in a window" mean "that session's closing
-print". [`backtest`](backtest.md)'s `:session_close` settlement rule
-reads exactly that, over a window ending at 16:00 ET; on an early-close
-day (13:00 ET) a single extended-hours print between 13:00 and 16:00 is
-inside the window and silently becomes the settlement price. Narrowing
-the window cannot rescue it -- a 15:59 print is regular-hours-shaped --
-so the requirement is on the data.
+*The session window a settlement rule needs, and what the tree gives.*
+[`backtest`](backtest.md)'s `:session_close` rule reads "the last print
+in a window ending at 16:00 ET" as "that session's closing print". That
+reading needs the provider to serve **regular-session prints only** -- no
+pre-market, no post-close, no extended-hours session. Nothing in the
+protocol enforces it and nothing in a `SpotPrice` records which session a
+print came from: the parquet spot reader selects every row its partitions
+hold and `InMemory` serves whatever vector it was handed, so no consumer
+can check it. Narrowing the window cannot rescue it either -- a 15:59
+print is regular-hours-shaped.
+
+**The production tree does not meet it.** `spots_1min` is Polygon's
+`us_stocks_sip/minute_aggs_v1`, whose minute aggregates deliberately
+relax the SIP sale-condition rules so that extended-hours trades update
+them ("otherwise there would be no minute aggregates during extended
+trading hours"); daily bars are the opposite, and follow the end-of-day
+guidelines. Measured on the tree (2026-09-14): SPY on 2024-12-24, an
+early close, holds bars from 04:00 to 16:59 ET.
+
+What holds today is a property of the data, not a guarantee: across the
+ten-year strangle all six early closes hold **zero** bars in (13:00,
+16:00] ET -- the after-hours burst begins after 16:00, outside the
+window -- so all six still settle at their 13:00 ET print. The exposure
+is real and currently unrealised: one extended-hours print inside that
+window would silently become an early close's settlement price. Making
+the rule structural is a data-kind change, not a narrower window: an
+official-close kind with its own provider spec, which the rule would read
+instead of walking the minute tree, and which is a `[data.*]` entry and
+so already inside run identity.
 
 ## The protocol
 

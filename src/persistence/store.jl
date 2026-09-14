@@ -28,11 +28,15 @@ using DuckDB
 using DuckDB: DBInterface
 
 # Manifest schema version, outside the run hash. Bumped by the data-kinds
-# migration (every run id changed with the identity projection) and again
-# when the ledger replaced `positions.parquet` (slice 2 of the ledger
-# rebuild); `load_run` refuses a run written under another version rather
-# than rebuilding a result its files cannot describe.
-const RUN_SCHEMA_VERSION = 3
+# migration (every run id changed with the identity projection), again when
+# the ledger replaced `positions.parquet` (slice 2 of the ledger rebuild),
+# and again when the venue and the contract facts entered identity: the
+# schema-3 tree holds runs made before lifecycle booked expiries, and their
+# ids do not distinguish them from runs of the same config made after, so
+# the version is what separates the two. `load_run` refuses a run written
+# under another version rather than rebuilding a result its files cannot
+# describe.
+const RUN_SCHEMA_VERSION = 4
 
 """
     RunStore

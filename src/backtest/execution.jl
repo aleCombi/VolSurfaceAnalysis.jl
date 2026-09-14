@@ -2,7 +2,12 @@
 # quote becomes a leg price (the fill rule) and what an order costs (the
 # cost model). Two symbol-to-function tables in the `_METRIC_TABLE` style
 # plus the tick, an integer number of cents. `Fill.fill_rule` is literally
-# the table key; slice 4 puts the three values into config and identity.
+# the table key.
+#
+# The rule and the model are choices -- nothing about SPY says whether you
+# cross the spread or whose commissions you pay -- so they are the
+# experiment's (`Experiment.fill_rule` / `cost_model`) and enter
+# `core_hash`. The tick is not a choice: `TICK_CENTS` below.
 #
 # The structure rule, that a combo order fills in whole units or not at
 # all, is not a value here: it is `record_order!` plus the engine pricing
@@ -22,6 +27,16 @@
 # the tick is unchanged; it is the tolerance `contract_cents` uses.
 const _TICK_NOISE = 1e-6
 
+# The tick every underlying the contract table lists trades on: one cent
+# at every premium, under the industry-wide penny interval program
+# (`backtest.md` cites it). Fixed at the experiment boundary and in no
+# config, because a value that cannot vary is not a choice to record --
+# `commit_sha` covers the code version. It stays a parameter below, and on
+# `fill_legs` and `check_join`, because the join check recomputes a fill
+# from an observation and must be able to state the tick it is checking
+# against; a price-dependent tick per class is the model this skips.
+const TICK_CENTS = 1
+
 function _cross_spread(bid, ask, side::Side, tick_cents::Int)
     raw = side == Long ? ask : bid              # a buy crosses to the ask, a sale to the bid
     ismissing(raw) && return missing
@@ -34,20 +49,21 @@ end
 const _FILL_RULES = Dict{Symbol,Function}(:cross_spread => _cross_spread)
 
 """
-    fill_price(rule::Symbol, bid, ask, side::Side, tick_cents::Int) -> Union{Float64,Missing}
+    fill_price(rule::Symbol, bid, ask, side::Side, tick_cents::Int = TICK_CENTS) -> Union{Float64,Missing}
 
 The per-share price a leg of `side` fills at under `rule`, from the raw
-`bid` and `ask` (either may be `missing`) and the class's tick in cents.
-Takes raw values so `check_join` can recompute it from an observation.
-`missing` when the side the rule needs is missing. Errors, naming the
-known rules, for an unknown `rule`; `tick_cents` must be positive.
+`bid` and `ask` (either may be `missing`) and the class's tick in cents,
+which defaults to [`TICK_CENTS`](@ref). Takes raw values so `check_join`
+can recompute it from an observation. `missing` when the side the rule
+needs is missing. Errors, naming the known rules, for an unknown `rule`;
+`tick_cents` must be positive.
 
 `:cross_spread`: `Long` takes the ask, `Short` the bid, rounded onto the
 tick away from the trader (a buy up, a sale down); a price already on
 the tick is unchanged, and every result passes `contract_cents` for a
 listed underlying.
 """
-function fill_price(rule::Symbol, bid, ask, side::Side, tick_cents::Int)
+function fill_price(rule::Symbol, bid, ask, side::Side, tick_cents::Int = TICK_CENTS)
     tick_cents >= 1 || throw(ArgumentError("fill_price: tick_cents must be positive, got $tick_cents"))
     f = get(_FILL_RULES, rule) do
         error("fill_price: unknown fill rule :$rule. Known: $(sort(collect(keys(_FILL_RULES))))")

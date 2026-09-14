@@ -95,7 +95,7 @@ end
 
 """
     fill_legs(cut::TimeCut, order::Order, t::DateTime;
-              fill_rule::Symbol, cost_model::Symbol, tick_cents::Int)
+              fill_rule::Symbol, cost_model::Symbol, tick_cents::Int = TICK_CENTS)
         -> (prices, fees, observations, fill_rule)
 
 The venue as a pure function: for every leg of `order`, before anything
@@ -121,7 +121,7 @@ fall outside `(prev, t]` for every later interval and never be examined
 again.
 """
 function fill_legs(cut::TimeCut, order::Order, t::DateTime;
-                   fill_rule::Symbol, cost_model::Symbol, tick_cents::Int)
+                   fill_rule::Symbol, cost_model::Symbol, tick_cents::Int = TICK_CENTS)
     n = length(order.legs)
     prices       = Vector{Float64}(undef, n)
     observations = Vector{LegObservation}(undef, n)
@@ -146,7 +146,7 @@ end
 # ---- the cross-record contract ---------------------------------------
 
 """
-    check_join(L::Ledger; tick_cents::Int = 1) -> Nothing
+    check_join(L::Ledger; tick_cents::Int = TICK_CENTS) -> Nothing
 
 The fill review's cross-record contract between the events and the
 order journal, used for persistence write and load. Order
@@ -197,7 +197,7 @@ function _check_fill_join(e::Fill, r::OrderRecord, k::Int, tick_cents::Int;
     return nothing
 end
 
-function check_join(L::Ledger; tick_cents::Int = 1)::Nothing
+function check_join(L::Ledger; tick_cents::Int = TICK_CENTS)::Nothing
     expect_id, expect_leg = 1, 1
     for r in L.orders
         r.order_id == expect_id || throw(JoinViolation(:order_id, r.order_id,
@@ -221,7 +221,7 @@ function check_join(L::Ledger; tick_cents::Int = 1)::Nothing
 end
 
 """
-    check_join(L::Ledger, rec::OrderRecord; tick_cents::Int = 1) -> Nothing
+    check_join(L::Ledger, rec::OrderRecord; tick_cents::Int = TICK_CENTS) -> Nothing
 
 Check one newly appended order record and the fills it produced. The scan
 is bounded by `rec.known_to` and filters the record's contiguous leg-id
@@ -230,7 +230,7 @@ The per-fill contract is identical to the whole-ledger form, except quantity
 is checked per fill; cumulative partial-fill quantity remains a whole-ledger
 check.
 """
-function check_join(L::Ledger, rec::OrderRecord; tick_cents::Int = 1)::Nothing
+function check_join(L::Ledger, rec::OrderRecord; tick_cents::Int = TICK_CENTS)::Nothing
     n = length(rec.order.legs)
     length(rec.observations) == n || throw(JoinViolation(:observations, rec.order_id,
         "$(length(rec.observations)) observations for $n legs"))
@@ -249,8 +249,7 @@ end
 """
     run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTime,
                  clock::Clock; fill_rule = :cross_spread,
-                 cost_model = :ibkr_pro_us_options,
-                 settlement_rule = :session_close, tick_cents = 1) -> Ledger
+                 cost_model = :ibkr_pro_us_options) -> Ledger
 
 Walk the ticks of `clock` in `[from, to]` (or the agent's `tick_times`
 override when it returns one). Per tick, in order: settle the lots that
@@ -281,14 +280,16 @@ no honest settlement price stays open too and `settlements` warns.
 Returns the ledger after every append has passed the per-record join
 check.
 
-The venue's values and the settlement rule are keywords here and
-defaults in `run_experiment` until slice 4 puts them in config and
-identity; this round changes results under unchanged run ids.
+The two venue choices are keywords here, with the same defaults
+`Experiment` takes, so a direct caller can drive the loop without
+building one; `run_experiment` passes the experiment's, which are in its
+`core_hash`. The tick is [`TICK_CENTS`](@ref) and the settlement rule is
+a contract fact per lot ([`settlements`](@ref)), so neither is a keyword:
+a value that changes results is either in the run id or a constant.
 """
 function run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTime,
                       clock::Clock; fill_rule::Symbol = :cross_spread,
-                      cost_model::Symbol = :ibkr_pro_us_options,
-                      settlement_rule::Symbol = :session_close, tick_cents::Int = 1)::Ledger
+                      cost_model::Symbol = :ibkr_pro_us_options)::Ledger
     L = Ledger()
     # Sparse policies (once a day on minute data) override `tick_times` so
     # the engine never enumerates the clock's grid; keep the `if`.
@@ -303,7 +304,7 @@ function run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTi
         #    the book the policy is handed, and one that could not be priced
         #    stays open and visible. `settlements` warns about those; a lot
         #    falling due in (prev, t] is examined exactly once, ever.
-        foreach(settlements(cut, L.book, prev, t; settlement_rule).settled) do (lot, p)
+        foreach(settlements(cut, L.book, prev, t).settled) do (lot, p)
             record_expiry!(L, lot; settlement_price = p,
                            effective_at = lot.contract.expiry, recorded_at = t)
         end
@@ -314,14 +315,14 @@ function run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTi
         known_to = last_sequence(L)                # what every order of this tick saw
         # 3. Fill: every leg priced before anything is written.
         for order in orders
-            rec = record_order!(L, order; fill_legs(cut, order, t; fill_rule, cost_model, tick_cents)...,
+            rec = record_order!(L, order; fill_legs(cut, order, t; fill_rule, cost_model)...,
                                 effective_at = t, recorded_at = t, known_to)
-            check_join(L, rec; tick_cents)
+            check_join(L, rec)
         end
     end
     # 4. Window end: lifecycle once more at the evaluation endpoint, which
     #    may be later than the last policy tick. Lots still open stay open.
-    foreach(settlements(TimeCut(data, to), L.book, prev, to; settlement_rule).settled) do (lot, p)
+    foreach(settlements(TimeCut(data, to), L.book, prev, to).settled) do (lot, p)
         record_expiry!(L, lot; settlement_price = p,
                        effective_at = lot.contract.expiry, recorded_at = to)
     end

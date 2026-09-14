@@ -117,7 +117,8 @@ omitted-vs-explicit defaults, and machine cache knobs therefore do
 same folder in place.
 
 The manifest also records `core_hash` -- the hash of the
-backtest-determining inputs only (data, clock, agent, window). Two runs that
+backtest-determining inputs only (data, clock, agent, window, the venue's
+two choices and the resolved contract facts). Two runs that
 differ only in outputs (metrics / artifacts) share a `core_hash` but get
 distinct `run_id`s, so output variations of one backtest are detectable
 in a cross-run query:
@@ -131,8 +132,9 @@ DBInterface.execute(store.con, """
 
 Both hashes come from `to_dict`, an identity projection (in the
 experiment module) that emits one entry per data kind, the clock, the
-agent and the window, omitting non-result-affecting fields (cache
-sizes, readers, part order). The parquet specs' root sits in a
+agent, the window, the venue's two choices and the contract facts
+resolved for the experiment's underlying, omitting non-result-affecting
+fields (cache sizes, readers, part order). The parquet specs' root sits in a
 reserved `dataset` slot of that projection, the place a logical
 dataset id and version would go. The verbatim `config.toml` is still
 stored -- for reading and for rebuilding the experiment on load -- but
@@ -142,13 +144,16 @@ it is not what identity is computed from.
 the hash; `load_run` refuses a run whose version is absent or differs,
 with a message that says to rerun its config. Version 2 was the
 data-kinds migration (every run id changed with the identity
-projection). Version 3 is the ledger: `positions.parquet` gave way to
-`events`, `orders` and `order_legs`, so a run written under version 2
-(the ten-year strangle run `5700d3f242f8132e` among them) is unreadable
-here and is regenerated from its config; `scripts/compare_runs.jl`
-compares runs written under version 3 only. No migration script: the
-store held one run each time. The identity break itself comes with the
-venue values in slice 4.
+projection). Version 3 was the ledger: `positions.parquet` gave way to
+`events`, `orders` and `order_legs`. Version 4 is the identity break --
+the venue's two choices and the resolved contract facts joined
+`core_hash`, so every stored run id moved. It is also what separates the
+schema-3 tree from today's code: those runs were written before the
+engine booked expiries, and their ids do not say so, since a run id
+records the experiment and `commit_sha` records the code. The version is
+the only thing on disk that refuses them. `scripts/compare_runs.jl`
+compares runs written under the current version only. No migration
+script: the store held one run each time.
 
 ## Responsibility boundaries
 
@@ -197,7 +202,7 @@ equals the saved one exactly. `group` is a SQL keyword: the column is
 | `commit_sha` | VARCHAR | git commit of the code that produced the run |
 | `dirty` | BOOLEAN | working tree had uncommitted changes |
 | `written_at` | TIMESTAMP | UTC time of the save |
-| `schema_version` | INTEGER | manifest schema version (`RUN_SCHEMA_VERSION`, currently 3); outside the hash |
+| `schema_version` | INTEGER | manifest schema version (`RUN_SCHEMA_VERSION`, currently 4); outside the hash |
 
 ### `metrics.parquet`
 

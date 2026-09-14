@@ -186,7 +186,10 @@ constructed.
 **Contracts.** `ContractKey`, the identity of an option; `ContractSpec`,
 the facts the cash rules need; `contract_spec(key)`, which resolves them
 from the table in code on every write and throws `UnknownContract` for
-an underlying it does not list.
+an underlying it does not list. `multiplier` is the cash rules'; the
+[`backtest`](backtest.md) lifecycle reads `settlement` per lot and the
+[`experiment`](experiment.md) projects the whole resolved spec into run
+identity. `exercise` and `delivery` are declared and not yet read.
 
 **Orders.** `Leg` (contract, side, quantity, intent) and `Order` (a
 name and its legs), both immutable, both what a policy emits.
@@ -258,7 +261,7 @@ valuation failures (outside the journal); persistence.
 | **Bitemporal header, decision view cut by sequence** | Effective and recorded time separate what was true from what was known; sequence, not recorded time, bounds what a decision could see. |
 | **Every reference points backward in effective time; equal instants fold in sequence order** | The effective replay is a plain sort with no tie-break rule, and a fill at its contract's expiry instant followed by that lot's expiry stays valid. |
 | **Closed union container** | Serialisation can be exhaustive; at thousands of events performance is a wash either way. |
-| **Contract facts are a table in code, resolved on every write** | They are facts with no visibility time and no observer; wrong is wrong, not a variant. The write path resolves them too, never a caller-supplied spec, so the incremental book and the replays fold the same numbers. Resolved values project into identity later, so a correction is a new run id. |
+| **Contract facts are a table in code, resolved on every write** | They are facts with no visibility time and no observer; wrong is wrong, not a variant. The write path resolves them too, never a caller-supplied spec, so the incremental book and the replays fold the same numbers. The resolved spec for the experiment's underlying is part of `core_hash`, so a correction is a new run id. |
 | **Integer quantities, per-share prices, cash in whole cents** | Removes the FIFO float residue and the per-share-labelled-USD units of the fill-vector ledger. One rounding point at the contract, then integer arithmetic: the book, both replays and the round trips agree exactly, and book equality is exact rather than a tolerance. |
 | **Validation of the whole batch at the write, FIFO included** | A structure is either booked whole or not at all; a leg that fails validation is an error before anything is written; a hand-built or loaded batch cannot encode a different lot-matching rule than the one stated here. |
 | **`ContractKey` hashes by content** | The book keys lots on `(group, contract)`; the default `objectid` hash is build-dependent, as `Underlying` documents. |

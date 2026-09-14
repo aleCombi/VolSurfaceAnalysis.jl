@@ -86,3 +86,20 @@ end
     @test Set(keys(VolSurfaceAnalysis._COST_MODELS)) == Set([:none, :ibkr_pro_us_options])
     @test !haskey(VolSurfaceAnalysis._FILL_RULES, :broker_execution)
 end
+
+@testset "TICK_CENTS: the penny tick, defaulted rather than passed" begin
+    # The tick is a constant because every underlying the contract table
+    # lists trades in penny increments at every premium, so nothing about
+    # an experiment can vary it; it stays an argument only so the join
+    # check can state the tick it recomputes a fill against.
+    @test TICK_CENTS == 1
+    for u in ("SPY", "QQQ", "IWM")
+        @test contract_spec(Underlying(u)) isa ContractSpec
+    end
+    # Defaulting it is the same rule applied: a buy at an ask of 0.857
+    # rounds up to 0.86, a sale at a bid of 0.857 down to 0.85.
+    @test fill_price(:cross_spread, 0.857, 0.857, Long)  ==
+          fill_price(:cross_spread, 0.857, 0.857, Long,  TICK_CENTS) == 0.86
+    @test fill_price(:cross_spread, 0.857, 0.857, Short) ==
+          fill_price(:cross_spread, 0.857, 0.857, Short, TICK_CENTS) == 0.85
+end
