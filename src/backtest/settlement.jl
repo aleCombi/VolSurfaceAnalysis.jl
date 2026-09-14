@@ -7,6 +7,12 @@
 # anything. `settlements` is not side-effect-free, though: it is the one
 # boundary that catches an unpriceable lot, and it warns (see below).
 #
+# Which rule a lot gets is not the caller's choice: settlement style is a
+# contract fact, `contract_spec(u).settlement`, so `settlements` routes per
+# lot off the table. A run-level symbol could not be right for a book
+# holding both an AM- and a PM-settled contract, and it agreed with the
+# table today only because every underlying the table lists is PM-settled.
+#
 # `UnpriceableLeg` is `engine.jl`'s, beside the other named failures:
 # settling is pricing a leg at intrinsic against a reference print, so
 # the failure has the same name and the same three fields.
@@ -15,15 +21,16 @@
 # session when the underlying printed in the reference window, and its
 # close is the last of those prints. That reads an early close (official
 # close 13:00 ET) with no early-close table, and it does so on the
-# strength of an input contract rather than of the bounds: `SpotPrice`
-# providers serve regular-session prints only (`market_data.md`), so the
-# window's last print is the session's. A provider that also serves
-# extended-hours prints breaks it -- a 15:59 print on a 13:00 ET close
-# sits inside the window and settles the contract -- and this rule cannot
-# detect that, because nothing in a `SpotPrice` says which session it came
-# from. The calendar only contradicts the tree: a printless weekday it
-# calls open is a named valuation failure (design rule 7), never evidence
-# that the exchange was closed.
+# strength of its input rather than of the bounds: the window's last print
+# is the session's only where the tree holds regular-session prints alone
+# (`market_data.md`). A provider that also serves extended-hours prints
+# breaks it -- a 15:59 print on a 13:00 ET close sits inside the window and
+# settles the contract -- and this rule cannot detect that, because nothing
+# in a `SpotPrice` says which session it came from. The production tree
+# does not guarantee it either; what holds there is measured, not
+# promised, and `market_data.md` says so. The calendar only contradicts
+# the tree: a printless weekday it calls open is a named valuation failure
+# (design rule 7), never evidence that the exchange was closed.
 #
 # Two bounds keep the answer honest rather than merely permitted by the
 # cut. The reference window ends at the earlier of 16:00 ET and the
@@ -130,16 +137,52 @@ end
 # `PMSettled` for every underlying `_CONTRACT_TABLE` lists.
 #
 # AM settlement is the gap, and it is future work rather than an oversight.
-# `SettlementStyle` already has `AMSettled` and nothing selects it; the rule
-# it needs is a second entry here, `:session_open`, reading the *first*
-# print of the listed session rather than the last -- a different window,
-# not a different bound on this one. An expiry before 09:30 ET is precisely
-# the contract that would ask for it, which is why `:session_close` names
-# that case (`:pre_open_expiry`) instead of guessing at a price. The day
-# that rule exists, which of the two applies is a contract fact
-# (`contract_spec(u).settlement`) rather than the caller's symbol, and
-# routing it is its own decision to take then.
+# The rule it needs is a second entry here, `:session_open`, reading the
+# *first* print of the listed session rather than the last -- a different
+# window, not a different bound on this one. An expiry before 09:30 ET is
+# precisely the contract that would ask for it, which is why
+# `:session_close` names that case (`:pre_open_expiry`) instead of guessing
+# at a price. It is unwritten on purpose: no AM-settled underlying exists
+# in the contract table to test it against, and a settlement rule nothing
+# exercises is worse than an absent one. Until one does, an AM-settled
+# contract is `UnsupportedSettlement` at both ends -- at load and here.
 const _SETTLEMENT_RULES = Dict{Symbol,Function}(:session_close => _session_close)
+
+"""
+    UnsupportedSettlement
+
+Thrown by [`settlements`](@ref) for a lot whose underlying settles in a
+style no rule in `_SETTLEMENT_RULES` serves. Carries the `underlying` and
+its `style`.
+
+This is a configuration error, not a valuation one, which is why it stops
+the run instead of joining the `unsettled` list: [`UnpriceableLeg`](@ref)
+names one lot whose price is unavailable at this instant and design rule 7
+says leave that lot open and say so, while this names a contract class the
+codebase cannot settle at all -- every later tick would give the same
+answer, and finishing the run would report a position that was never
+valued as though it were merely still open. `load_experiment` refuses such
+a config up front; reaching here means the book holds a lot the loader
+never saw.
+"""
+struct UnsupportedSettlement <: Exception
+    underlying::Underlying
+    style::SettlementStyle
+end
+
+Base.showerror(io::IO, e::UnsupportedSettlement) = print(io,
+    "UnsupportedSettlement: ", e.underlying, " options are ", e.style,
+    " and no settlement rule serves that style (known styles: PMSettled)")
+
+# Settlement style is a contract fact, so the rule is looked up per lot
+# rather than passed in. An underlying the contract table does not list is
+# `UnknownContract` from `contract_spec`, the same failure `record_expiry!`
+# would raise on the lot a moment later.
+function _rule_for(u::Underlying)::Symbol
+    style = contract_spec(u).settlement
+    style === PMSettled || throw(UnsupportedSettlement(u, style))
+    return :session_close
+end
 
 """
     settlement_price(rule::Symbol, cut::TimeCut, contract::ContractKey, t::DateTime) -> Float64
@@ -161,14 +204,17 @@ a print from after it expired. A printless date the exchange calendar
 calls open is `:unexpected_gap`, a data gap and not a closure;
 exhausting the walk is `:no_session`.
 
-**Input contract.** Early closes need no table, but only because the
-data is required to be regular-session prints alone (the `SpotPrice`
-contract, stated in `market_data`): under it the last print in the
-window of a 13:00 ET close is the 13:00 one. A provider that also
-serves extended-hours prints breaks this rule silently -- a 15:59 print
-on an early-close day is inside the 09:30-16:00 window and becomes the
-settlement price -- and no bound here can catch it, since nothing in a
-`SpotPrice` records which session it came from.
+**What this rule needs of its input.** Early closes need no table, but
+only where the data is regular-session prints alone: under that the last
+print in the window of a 13:00 ET close is the 13:00 one. A provider
+that also serves extended-hours prints breaks this rule silently -- a
+15:59 print on an early-close day is inside the 09:30-16:00 window and
+becomes the settlement price -- and no bound here can catch it, since
+nothing in a `SpotPrice` records which session it came from. The
+production spot tree does serve extended hours and is measured not to
+print inside the exposed window; `market_data` states the requirement,
+what the tree actually provides, and which data kind would make the rule
+structural instead.
 
 **Domain.** `cut` must reach the contract's expiry; a cut before it is
 `:no_session_close`. The question this answers is what the contract
@@ -204,8 +250,7 @@ function settlement_price(rule::Symbol, cut::TimeCut, contract::ContractKey, t::
 end
 
 """
-    settlements(cut::TimeCut, book::Book, prev::DateTime, t::DateTime;
-                settlement_rule::Symbol) -> (settled, unsettled)
+    settlements(cut::TimeCut, book::Book, prev::DateTime, t::DateTime) -> (settled, unsettled)
 
 The lifecycle step as a function of the cut and the book, the twin of
 [`fill_legs`](@ref): the lots of `book` falling due in `(prev, t]`, each
@@ -214,6 +259,12 @@ a `Vector{Tuple{Lot,Float64}}`, ready for `record_expiry!`; `unsettled`
 holds one [`UnpriceableLeg`](@ref) per lot that could not be priced.
 Mutates nothing, and walks `open_lots` in opening-fill order so a replay
 reproduces.
+
+The rule is per lot, not per run: `contract_spec(underlying).settlement`
+picks it, so a book holding two styles settles each one correctly. A lot
+whose style no rule serves throws [`UnsupportedSettlement`](@ref) and the
+run stops -- see that type for why it is not caught and warned like an
+unpriceable lot.
 
 A lot is examined exactly once, ever: the interval, not an
 `expiry <= t` threshold. An unsettleable lot stays open by design and
@@ -238,14 +289,16 @@ expiry and the reason. Reporting here rather than at the call site is
 design rule 7's own reason -- a caller could forget, and a silent gap is
 exactly what the rule exists to prevent.
 """
-function settlements(cut::TimeCut, book::Book, prev::DateTime, t::DateTime;
-                     settlement_rule::Symbol)
+function settlements(cut::TimeCut, book::Book, prev::DateTime, t::DateTime)
     settled   = Tuple{Lot,Float64}[]
     unsettled = UnpriceableLeg[]
     for lot in open_lots(book)
         prev < lot.contract.expiry <= t || continue
+        # Outside the `try`: an unsupported style is not a valuation
+        # failure and must not be swallowed by the catch below.
+        rule = _rule_for(lot.contract.underlying)
         try
-            push!(settled, (lot, settlement_price(settlement_rule, cut, lot.contract, t)))
+            push!(settled, (lot, settlement_price(rule, cut, lot.contract, t)))
         catch e
             e isa UnpriceableLeg || rethrow()
             @warn("lot left open: no honest settlement price",
