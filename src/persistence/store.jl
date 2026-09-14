@@ -5,8 +5,8 @@
 # comparable rather than evaporating into ad-hoc notebooks (see vision.md).
 #
 # Storage shape: Hive-partitioned parquet under `<root>/runs/run_id=<hash>/`.
-# Each run folder holds the verbatim input TOML plus six parquet files
-# (manifest, metrics, events, orders, order_legs, pnl_series). Cross-run
+# Each run folder holds the verbatim input TOML plus five parquet files
+# (manifest, metrics, events, orders, order_legs). Cross-run
 # queries are just DuckDB SQL against the partitioned trees -- this module
 # does not invent a query API. Same DuckDB-as-engine / parquet-as-storage
 # pattern the `data` module uses for input data.
@@ -16,6 +16,14 @@
 # with its observation. `load_run` rebuilds it through the ledger's own
 # validated write path and the fill-to-order join, so a stored run that
 # breaks an invariant fails to load by name rather than loading wrong.
+#
+# Authoritative inputs versus exports. The ledger and the config are the
+# run's inputs and are read back as written; everything derived from them
+# -- the marked curve, the trade vector, every metric -- is RECOMPUTED on
+# load, never hydrated from a file. `metrics.parquet` is therefore an
+# export for cross-run SQL, not an input to an `ExperimentResult`: a
+# loaded result is truthful to the ledger and the market data it just
+# read, and cannot report a number its own inputs no longer produce.
 #
 # Run identity is `full_hash(result.experiment)` -- the canonical hash of
 # the resolved experiment (see experiment/identity.jl), not the raw TOML
@@ -33,10 +41,13 @@ using DuckDB: DBInterface
 # and again when the venue and the contract facts entered identity: the
 # schema-3 tree holds runs made before lifecycle booked expiries, and their
 # ids do not distinguish them from runs of the same config made after, so
-# the version is what separates the two. `load_run` refuses a run written
+# the version is what separates the two. Version 5 is the marked curve:
+# `pnl_series.parquet` and the manifest's `window_end_spot` are gone with
+# the type they exported, and the derived tables that replace them belong
+# to the second half of the outputs round. `load_run` refuses a run written
 # under another version rather than rebuilding a result its files cannot
 # describe.
-const RUN_SCHEMA_VERSION = 4
+const RUN_SCHEMA_VERSION = 5
 
 """
     RunStore
@@ -194,7 +205,9 @@ Writes:
 - `events.parquet` -- one row per ledger event in sequence order.
 - `orders.parquet` -- one row per order record.
 - `order_legs.parquet` -- one row per order leg with its observation.
-- `pnl_series.parquet` -- one row per sample in `result.pnl_series`.
+
+`metrics.parquet` is an export for cross-run SQL: `load_run` recomputes
+every metric from the ledger and the market data instead of reading it.
 
 If a folder for this id already exists, its contents are overwritten:
 same resolved experiment means same id, so re-saving is idempotent in
@@ -233,7 +246,6 @@ function save_run(store::RunStore, result::ExperimentResult,
     _write_events(store, dir, id, result.ledger)
     _write_orders(store, dir, id, result.ledger)
     _write_order_legs(store, dir, id, result.ledger)
-    _write_pnl_series(store, dir, id, result)
 
     return id
 end
@@ -242,7 +254,7 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
                          result::ExperimentResult;
                          commit_sha::AbstractString, dirty::Bool)
     exp = result.experiment
-    s   = result.pnl_series
+    c   = result.curve
     schema = """(
         run_id VARCHAR,
         core_hash VARCHAR,
@@ -253,13 +265,15 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         n_orders BIGINT,
         n_opens BIGINT,
         n_closes BIGINT,
+        n_marked BIGINT,
         n_unmarked BIGINT,
-        window_end_spot DOUBLE,
         commit_sha VARCHAR,
         dirty BOOLEAN,
         written_at TIMESTAMP,
         schema_version INTEGER
     )"""
+    # `n_marked` / `n_unmarked` are NULL when the run carries no curve at
+    # all, which is a different fact from a curve that marked nothing.
     insert = "INSERT INTO _writebuf VALUES (" * join([
         _str_sql(id),
         _str_sql(core_hash(exp)),
@@ -268,10 +282,10 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         _dt_sql(exp.to),
         string(length(result.ledger)),
         string(length(result.ledger.orders)),
-        string(s.n_opens),
-        string(s.n_closes),
-        string(s.n_unmarked),
-        _f_sql(s.window_end_spot),
+        string(n_opens(result.ledger)),
+        string(n_closes(result.ledger)),
+        c === nothing ? "NULL" : string(n_marked(c)),
+        c === nothing ? "NULL" : string(n_unmarked(c)),
         _str_sql(commit_sha),
         dirty ? "TRUE" : "FALSE",
         _dt_sql(Dates.now(UTC)),
@@ -445,42 +459,18 @@ function _write_order_legs(store::RunStore, dir::AbstractString, id::AbstractStr
     _write_parquet(store, joinpath(dir, "order_legs.parquet"), schema, inserts)
 end
 
-function _write_pnl_series(store::RunStore, dir::AbstractString, id::AbstractString,
-                           result::ExperimentResult)
-    schema = "(run_id VARCHAR, idx BIGINT, timestamp TIMESTAMP, pnl DOUBLE)"
-    s = result.pnl_series
-    inserts = String[]
-    for i in eachindex(s.timestamps)
-        push!(inserts,
-              "INSERT INTO _writebuf VALUES (" *
-              join([
-                  _str_sql(id),
-                  string(i),
-                  _dt_sql(s.timestamps[i]),
-                  _f_sql(s.pnl[i]),
-              ], ", ") * ")")
-    end
-    _write_parquet(store, joinpath(dir, "pnl_series.parquet"), schema, inserts)
-end
-
 # --- load_run ------------------------------------------------------------
-
-# Always-on metrics in `compute_metrics` are emitted in this fixed order;
-# `n_round_trips`, `n_opens`, and `n_closes` are integers, everything
-# else is Float64. The load path uses this to round-trip the NamedTuple
-# faithfully (integers stay integers, key order matches `compute_metrics`).
-const _ALWAYS_ON_METRIC_KEYS = (:total_pnl, :n_round_trips, :n_opens, :n_closes, :hit_rate)
-const _INT_METRIC_KEYS = (:n_round_trips, :n_opens, :n_closes)
 
 """
     load_run(store::RunStore, run_id::AbstractString) -> ExperimentResult
 
 Rehydrate a previously [`save_run`](@ref)-saved run back into an
-`ExperimentResult`. Reads the six parquet artifacts plus the saved
-`config.toml`, rebuilds the live `Experiment` via
-[`load_experiment_str`](@ref), rebuilds the ledger, and reconstructs
-`pnl_series` and the `metrics` NamedTuple (preserving the integer types
-of `n_round_trips`, `n_opens`, `n_closes`).
+`ExperimentResult`. Reads the ledger tables plus the saved `config.toml`,
+rebuilds the live `Experiment` via [`load_experiment_str`](@ref), rebuilds
+the ledger -- and then **recomputes** everything derived from it: the
+marked curve and every metric. No derived parquet table is read back into
+the result, so a loaded run is always truthful to its authoritative
+inputs and can never report a number they no longer produce.
 
 The ledger is rebuilt through its own write path: every event is built
 through its constructor in sequence order and committed to a fresh
@@ -491,16 +481,21 @@ two order tables, every counter is set one past the largest id seen
 (groups included), and `check_join` runs last. A load that fails a
 check throws that check's named failure; it never drops the join.
 
-The data declared by the saved config does not need to be present on
-disk: `Experiment.data` holds provider specs, which are pure values, so
-the rebuilt experiment only fails at `open_data` (i.e. at
-`run_experiment`) if the data has moved. Inspecting the persisted
-fields (`ledger`, `pnl_series`, `metrics`) needs no data at all.
+**Loading degrades by piece.** The ledger and the always-on core metrics
+are functions of the ledger, so they always come back. The marked curve is
+not: marking an open lot needs the run's market data, which is why
+`load_run` reopens `exp.data`. On a machine where that data is absent the
+curve is `nothing` and every optional metric is absent from `metrics` --
+`:profit_factor` too, though it needs no curve -- because each metric takes
+both inputs and the table does not record which one it reads. The ledger
+and the core metrics load normally, with a warning naming the cause. This makes the
+backlog item *Dataset fingerprint in identity* load-bearing: a re-collected
+or stale tree can now make a plain load differ while appearing to read
+recorded history. This round names that risk and does not solve it.
 
 Throws `ArgumentError` if the run folder or any of the expected files
 is missing, or if the manifest's `schema_version` is absent or differs
-from `RUN_SCHEMA_VERSION` (a run written before the ledger replaced
-`positions.parquet`): rerun its config to regenerate it.
+from `RUN_SCHEMA_VERSION`: rerun its config to regenerate it.
 """
 function load_run(store::RunStore, run_id::AbstractString)::ExperimentResult
     _assert_open(store)
@@ -519,10 +514,42 @@ function load_run(store::RunStore, run_id::AbstractString)::ExperimentResult
     exp = load_experiment_str(config_toml)
 
     ledger = _load_ledger(store, dir)
-    series = _load_pnl_series(store, dir, manifest)
-    metrics = _load_metrics(store, dir, exp.outputs.metrics)
+    curve = _recompute_curve(exp, ledger)
+    metrics = compute_metrics(ledger, curve, exp.outputs.metrics;
+                              kwargs=exp.outputs.metric_params)
 
-    return ExperimentResult(exp, ledger, series, metrics)
+    return ExperimentResult(exp, ledger, curve, metrics)
+end
+
+# The declared degradation boundary, and it is exactly one line wide:
+# *opening* the run's data. A root that moved, a tree that was never copied
+# to this machine -- the answer to "what was this book worth at each session
+# close" is then genuinely unavailable, not zero and not empty, and it is
+# reported rather than raised because the rest of the run is still honest
+# and still worth having.
+#
+# Nothing else is caught. Once the data is open, every failure inside
+# `marked_curve` -- conflicting spot rows, a lot that cannot be priced, a
+# broken invariant -- is a real defect in the run or the tree, and swallowing
+# it would hand back an apparently valid partial result under a warning that
+# names the wrong cause. That is the masking design rule 7 forbids, and it is
+# what this round exists to remove, so it may not be reintroduced here.
+function _recompute_curve(exp::Experiment, L::Ledger)::Union{MarkedCurve,Nothing}
+    u = _experiment_underlying(exp)
+    d = try
+        open_data(exp.data)
+    catch e
+        @warn("load_run: the marked curve was not recomputed; its market data " *
+              "could not be opened. The ledger and the core metrics are unaffected; " *
+              "every optional metric is omitted.",
+              name = exp.name, exception = e)
+        return nothing
+    end
+    return try
+        marked_curve(L, d, u, exp.from, exp.to)
+    finally
+        _close_quietly(d)
+    end
 end
 
 function _select_rows(store::RunStore, path::AbstractString, sql::AbstractString)
@@ -540,11 +567,7 @@ function _load_manifest(store::RunStore, dir::AbstractString)
     r = first(rows)
     version = :schema_version in propertynames(r) && r.schema_version !== missing ?
         Int(r.schema_version) : 0
-    return (window_end_spot=Float64(r.window_end_spot),
-            n_opens=Int(r.n_opens),
-            n_closes=Int(r.n_closes),
-            n_unmarked=Int(r.n_unmarked),
-            schema_version=version)
+    return (schema_version=version,)
 end
 
 # One event from its row, through the kind's constructor so every
@@ -617,43 +640,4 @@ function _load_ledger(store::RunStore, dir::AbstractString)::Ledger
                       maximum(r.first_leg_id + length(r.order.legs) - 1 for r in L.orders) + 1
     check_join(L)
     return L
-end
-
-function _load_pnl_series(store::RunStore, dir::AbstractString,
-                          manifest::NamedTuple)::PnLSeries
-    path = joinpath(dir, "pnl_series.parquet")
-    rows = _select_rows(store, path,
-        "SELECT timestamp, pnl FROM '$(_sql_pq_path(path))' ORDER BY idx")
-    timestamps = DateTime[DateTime(r.timestamp) for r in rows]
-    pnl        = Float64[Float64(r.pnl)         for r in rows]
-    return PnLSeries(timestamps, pnl,
-                     manifest.window_end_spot,
-                     manifest.n_opens, manifest.n_closes, manifest.n_unmarked)
-end
-
-function _load_metrics(store::RunStore, dir::AbstractString,
-                       requested::Vector{Symbol})::NamedTuple
-    path = joinpath(dir, "metrics.parquet")
-    rows = _select_rows(store, path,
-        "SELECT metric_name, value FROM '$(_sql_pq_path(path))'")
-    raw = Dict{Symbol,Float64}()
-    for r in rows
-        raw[Symbol(r.metric_name)] = Float64(r.value)
-    end
-    # Build the NamedTuple in canonical order: always-on first, then
-    # optional in the requested order (matches `compute_metrics`).
-    keys = Symbol[]
-    vals = Any[]
-    for k in _ALWAYS_ON_METRIC_KEYS
-        haskey(raw, k) || continue
-        push!(keys, k)
-        push!(vals, k in _INT_METRIC_KEYS ? Int(raw[k]) : raw[k])
-    end
-    for k in requested
-        haskey(raw, k) || continue   # caller-requested metric absent (skip rather than error)
-        k in _ALWAYS_ON_METRIC_KEYS && continue   # don't double-add
-        push!(keys, k)
-        push!(vals, raw[k])
-    end
-    return NamedTuple{Tuple(keys)}(Tuple(vals))
 end

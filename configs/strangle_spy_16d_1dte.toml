@@ -5,9 +5,9 @@
 #
 # Show the result:
 #   julia --project=. scripts/run_experiment.jl configs/strangle_spy_16d_1dte.toml
-# Save it to the KB (also writes the equity-curve artifact):
+# Save it to the KB (also writes the marked-curve artifact):
 #   julia --project=. scripts/run_experiment.jl configs/strangle_spy_16d_1dte.toml --save
-# Render the equity curve to a scratch dir without saving:
+# Render the marked curve to a scratch dir without saving:
 #   julia --project=. scripts/run_experiment.jl configs/strangle_spy_16d_1dte.toml --out-dir C:/tmp
 #
 # The [data.*] roots point at the local Polygon trees; edit them to your

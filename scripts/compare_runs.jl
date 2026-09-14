@@ -8,7 +8,7 @@ using DuckDB: DBInterface
 #
 #   julia --project=. scripts/compare_runs.jl <store_root> <run_id_a> <run_id_b>
 #
-# Reads `<store_root>/runs/run_id=<id>/{manifest,metrics,events,orders,order_legs,pnl_series}.parquet`
+# Reads `<store_root>/runs/run_id=<id>/{manifest,metrics,events,orders,order_legs}.parquet`
 # straight through DuckDB, deliberately *without* `load_run`, so two runs are
 # compared as written (the reproduction gate between a baseline and every
 # later run). Nothing from VolSurfaceAnalysis is loaded. Runs written under
@@ -22,18 +22,13 @@ using DuckDB: DBInterface
 # - orders.parquet      joined on `order_id`; every column exactly.
 # - order_legs.parquet  joined on `order_leg_id`; doubles within TOL, the
 #                       rest exactly (NULL == NULL).
-# - pnl_series.parquet  in canonical order (rank over `timestamp, pnl`), not
-#                       on the stored `idx`: runs written before the
-#                       canonical order landed (metrics.md) ordered samples
-#                       at one timestamp by Dict iteration, which depended
-#                       on the package build. `timestamp` exactly, `pnl`
-#                       within TOL.
-# - metrics.parquet     joined on `metric_name`; `value` within TOL, NaN == NaN,
-#                       except `max_drawdown`, which is path-dependent: it is
-#                       recomputed from each run's canonical series and those
-#                       are compared (stored values are printed).
+# - metrics.parquet     joined on `metric_name`; `value` within TOL, NaN == NaN.
+#                       Every metric is now a deterministic function of the
+#                       ledger and the marked curve, so `max_drawdown` needs
+#                       no special case; the curve itself is not exported
+#                       under schema 5 and so is not compared here.
 # - manifest.parquet    `n_events`, `n_orders`, `n_opens`, `n_closes`,
-#                       `n_unmarked` exactly, `window_end_spot` within TOL.
+#                       `n_marked`, `n_unmarked` exactly (NULL == NULL).
 # A row present on one side only is a difference.
 
 const TOL = 1e-9
@@ -54,7 +49,7 @@ _pq(path) = "read_parquet('" * replace(path, "\\" => "/", "'" => "''") * "')"
 const dir_a = _run_dir(store_root, id_a)
 const dir_b = _run_dir(store_root, id_b)
 
-for d in (dir_a, dir_b), f in ("manifest", "metrics", "events", "orders", "order_legs", "pnl_series")
+for d in (dir_a, dir_b), f in ("manifest", "metrics", "events", "orders", "order_legs")
     p = joinpath(d, f * ".parquet")
     if !isfile(p)
         println(stderr, "compare_runs: missing $p")
@@ -105,42 +100,8 @@ function compare_table(name, key, exact, approx; source = _select_all)
     return length(diffs)
 end
 
-# The series in canonical order: rank over (timestamp, pnl).
-_canonical_series(path) =
-    "SELECT row_number() OVER (ORDER BY timestamp, pnl) AS rk, timestamp, pnl FROM " * _pq(path)
-
-# metrics.parquet without the path-dependent metric.
-_metrics_no_dd(path) = "SELECT * FROM " * _pq(path) * " WHERE metric_name <> 'max_drawdown'"
-
-# max_drawdown as metrics/optional.jl defines it, over the canonical series.
-function _drawdown(dir)
-    rows = _rows("SELECT pnl FROM (" * _canonical_series(joinpath(dir, "pnl_series.parquet")) * ") ORDER BY rk")
-    isempty(rows) && return 0.0
-    eq = cumsum(Float64[r.pnl for r in rows])
-    peak, max_dd = eq[1], 0.0
-    for v in eq
-        peak = max(peak, v)
-        max_dd = max(max_dd, peak - v)
-    end
-    max_dd
-end
-
-function _stored_drawdown(dir)
-    rows = _rows("SELECT value FROM " * _pq(joinpath(dir, "metrics.parquet")) * " WHERE metric_name = 'max_drawdown'")
-    isempty(rows) ? missing : Float64(first(rows).value)
-end
-
-function compare_drawdown()
-    da, db = _drawdown(dir_a), _drawdown(dir_b)
-    sa, sb = _stored_drawdown(dir_a), _stored_drawdown(dir_b)
-    ok = abs(da - db) <= TOL
-    println("max_drawdown (recomputed on the canonical series): ", ok ? "OK" : "DIFFERS",
-            " (a = $da, b = $db; stored a = $sa, b = $sb)")
-    ok ? 0 : 1
-end
-
 function compare_manifest()
-    fields = ["n_events", "n_orders", "n_opens", "n_closes", "n_unmarked", "window_end_spot"]
+    fields = ["n_events", "n_orders", "n_opens", "n_closes", "n_marked", "n_unmarked"]
     ra = _rows("SELECT $(join(fields, ", ")) FROM $(_pq(joinpath(dir_a, "manifest.parquet")))")
     rb = _rows("SELECT $(join(fields, ", ")) FROM $(_pq(joinpath(dir_b, "manifest.parquet")))")
     if length(ra) != 1 || length(rb) != 1
@@ -149,13 +110,10 @@ function compare_manifest()
     end
     a, b = first(ra), first(rb)
     bad = String[]
-    for f in ("n_events", "n_orders", "n_opens", "n_closes", "n_unmarked")
-        getproperty(a, Symbol(f)) == getproperty(b, Symbol(f)) ||
+    for f in fields
+        getproperty(a, Symbol(f)) === getproperty(b, Symbol(f)) ||
             push!(bad, "$f: $(getproperty(a, Symbol(f))) vs $(getproperty(b, Symbol(f)))")
     end
-    wa, wb = Float64(a.window_end_spot), Float64(b.window_end_spot)
-    ((isnan(wa) && isnan(wb)) || abs(wa - wb) <= TOL) ||
-        push!(bad, "window_end_spot: $wa vs $wb")
     if isempty(bad)
         println("manifest: OK")
     else
@@ -178,9 +136,7 @@ n_bad += compare_table("order_legs", "order_leg_id",
     ["order_id", "leg_idx", "underlying", "expiry", "option_type", "side", "intent", "quantity",
      "quote_at", "spot_at"],
     ["strike", "bid", "ask", "spot"])
-n_bad += compare_table("pnl_series", "rk", ["timestamp"], ["pnl"]; source = _canonical_series)
-n_bad += compare_table("metrics", "metric_name", String[], ["value"]; source = _metrics_no_dd)
-n_bad += compare_drawdown()
+n_bad += compare_table("metrics", "metric_name", String[], ["value"])
 n_bad += compare_manifest()
 
 DBInterface.close!(con)

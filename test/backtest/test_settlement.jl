@@ -879,3 +879,88 @@ mktempdir() do root
         end
     end
 end
+
+# ---- the session grid --------------------------------------------------
+
+@testset "session_closes: one instant per session, the last print in the window" begin
+    # Mon 2024-01-15 is a holiday; Tue-Fri are ordinary sessions.
+    days = [Date(2024, 1, d) for d in 15:19]
+    spots = vcat((_st_session(d, 480.0 + i) for (i, d) in enumerate(days))...)
+    data = MarketData(InMemory(spots))
+    g = session_closes(data, _ST_SPY, DateTime(2024, 1, 15), DateTime(2024, 1, 19, 23, 59))
+    @test isempty(g.gaps)
+    @test g.closes == [_st_et(Date(2024, 1, d), 16, 0) for d in 16:19]
+    @test issorted(g.closes)
+end
+
+@testset "session_closes: an early close is the 13:00 ET print, no table needed" begin
+    # 2024-12-24 closed at 13:00 ET; the last print in the window is that one.
+    d = Date(2024, 12, 24)
+    spots = [_st_spot(d, 9, 30, 600.0), _st_spot(d, 13, 0, 604.0)]
+    data = MarketData(InMemory(spots))
+    g = session_closes(data, _ST_SPY, DateTime(2024, 12, 24), DateTime(2024, 12, 24, 23, 59))
+    @test g.closes == [_st_et(d, 13, 0)]
+    @test isempty(g.gaps)
+end
+
+@testset "session_closes: a date the calendar calls closed is not a session" begin
+    # 2025-01-09, the Jimmy Carter national day of mourning: `USNYSE` carries
+    # it, so it contributes nothing even though the spot tree prints.
+    d = Date(2025, 1, 9)
+    data = MarketData(InMemory(_st_session(d, 590.0)))
+    g = session_closes(data, _ST_SPY, DateTime(2025, 1, 9), DateTime(2025, 1, 9, 23, 59))
+    @test isempty(g.closes) && isempty(g.gaps)
+end
+
+@testset "session_closes: a printless open date is a named gap, never silence" begin
+    d = Date(2024, 1, 17)                                # ordinary open Wednesday
+    data = MarketData(InMemory(vcat(_st_session(Date(2024, 1, 16), 480.0),
+                                    _st_session(Date(2024, 1, 18), 482.0))))
+    g = session_closes(data, _ST_SPY, DateTime(2024, 1, 16), DateTime(2024, 1, 18, 23, 59))
+    @test g.closes == [_st_et(Date(2024, 1, 16), 16, 0), _st_et(Date(2024, 1, 18), 16, 0)]
+    @test g.gaps == [_st_et(d, 16, 0)]                   # the nominal close it could not place
+    println("  session gap reported at: ", only(g.gaps))
+end
+
+@testset "session_closes: a session the window only partly covers is not counted" begin
+    d = Date(2024, 1, 16)
+    data = MarketData(InMemory(_st_session(d, 480.0)))
+    # Starts after 09:30 ET: the run never saw the session end to end, so it
+    # is outside the window rather than a short one.
+    late = session_closes(data, _ST_SPY, _st_et(d, 10, 0), DateTime(2024, 1, 16, 23, 59))
+    @test isempty(late.closes) && isempty(late.gaps)
+    # Ends before 16:00 ET: the same.
+    early = session_closes(data, _ST_SPY, DateTime(2024, 1, 16), _st_et(d, 15, 0))
+    @test isempty(early.closes) && isempty(early.gaps)
+    # The whole window: one session.
+    whole = session_closes(data, _ST_SPY, DateTime(2024, 1, 16), DateTime(2024, 1, 16, 23, 59))
+    @test whole.closes == [_st_et(d, 16, 0)]
+end
+
+@testset "session_closes: reads only the session windows, never between them" begin
+    # The production spot tree carries extended-hours prints, and an instant
+    # outside every session window can hold two disagreeing rows. A grid that
+    # range-read across the gaps between sessions would abort on it; reading
+    # one window at a time never sees it.
+    d1, d2 = Date(2024, 1, 16), Date(2024, 1, 17)
+    overnight = _st_et(d1, 19, 12)                      # after the close, before the open
+    spots = vcat(_st_session(d1, 480.0), _st_session(d2, 482.0))
+    data = MarketData(InMemory(spots))
+    g = session_closes(data, _ST_SPY, DateTime(2024, 1, 16), DateTime(2024, 1, 17, 23, 59))
+    @test g.closes == [_st_et(d1, 16, 0), _st_et(d2, 16, 0)]
+    # The instant between the two sessions is never read: `between` over it
+    # is where a conflicting pair would surface.
+    @test isempty(between(data, SpotPrice, _ST_SPY, overnight, overnight))
+end
+
+@testset "session_closes: the grid agrees with what :session_close settles at" begin
+    # The same rule, read two ways: the grid's close for a date is the price
+    # `settlement_price` uses for a contract expiring on it.
+    d = Date(2024, 1, 18)
+    data = MarketData(InMemory(_st_session(d, 486.0)))
+    contract = _st_call(d, 480.0)
+    cut = TimeCut(data, _st_et(d, 16, 0))
+    g = session_closes(data, _ST_SPY, DateTime(2024, 1, 18), DateTime(2024, 1, 18, 23, 59))
+    @test only(g.closes) == _st_et(d, 16, 0)
+    @test settlement_price(:session_close, cut, contract, _st_et(d, 16, 0)) == 486.0
+end

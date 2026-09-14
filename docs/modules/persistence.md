@@ -18,9 +18,8 @@ Hive-partitioned parquet under `<store_root>/runs/run_id=<hash>/`:
     events.parquet       # 1 row per ledger event, in sequence order
     orders.parquet       # 1 row per order record
     order_legs.parquet   # 1 row per order leg, with its observation
-    pnl_series.parquet   # 1 row per sample
     artifacts/           # rendered outputs (plots, ...), regenerable
-      equity_curve.png
+      marked_curve.png
   run_id=8a1c.../
     ...
 ```
@@ -55,6 +54,33 @@ save_run(store, result, config_toml;                   # returns run id = full_h
 load_run(store, run_id) :: ExperimentResult
 ```
 
+### Inputs are read back; anything derived is recomputed
+
+The ledger and the config are the run's **authoritative inputs** and are
+read back as written. Everything derived from them -- the marked curve,
+the per-trade dollars, every metric -- is **recomputed** on load and never
+hydrated from a file. `metrics.parquet` is therefore an export for
+cross-run SQL, not an input to an `ExperimentResult`: a loaded result is
+truthful to the ledger and the market data it just read, and cannot report
+a number its own inputs no longer produce.
+
+**Loading degrades by piece.** The ledger and the always-on core metrics
+are functions of the ledger, so they always come back. The marked curve is
+not -- marking an open lot needs the run's market data -- so `load_run`
+reopens `exp.data`. On a machine where that data is absent the curve is
+`nothing` and the **whole** optional metric set is omitted, `:profit_factor`
+included even though it reads trades and needs no curve: every metric takes
+both inputs, so the dispatch table does not record which one each reads and
+the omission cannot be selective. The path
+metrics are absent from `metrics` (absent, not `NaN`: see
+[metrics](metrics.md)), and the rest loads normally with a warning naming
+the cause.
+
+That boundary makes the backlog item **Dataset fingerprint in identity**
+load-bearing. Previously stale or re-collected data could make a *rerun*
+differ under one id; now a plain load can differ while appearing to read
+recorded history. This round names that risk and does not solve it.
+
 `save_run` validates that `config_toml` rebuilds the saved
 `result.experiment`: same `full_hash` and same human `name` label. That
 keeps the manifest, saved config, and `load_run(...).experiment`
@@ -62,14 +88,12 @@ coherent even though `name` is deliberately excluded from identity. It
 also runs the whole-ledger `check_join` before creating the run folder
 or writing any file.
 
-`load_run` reads the six parquets plus the saved `config.toml`,
-rebuilds the live `Experiment` via `load_experiment_str`, rebuilds the
-ledger, and reconstructs `pnl_series` and the `metrics` `NamedTuple`
-(integer types preserved for `n_round_trips` / `n_opens` / `n_closes`,
-NaN / Inf preserved verbatim). The rebuilt `Experiment.data` does
-**not** need its data on disk -- it holds provider specs, pure values,
-so inspecting `ledger` / `pnl_series` / `metrics` always works; only
-`run_experiment` (which opens the data) throws on a missing root.
+`load_run` reads the ledger tables plus the saved `config.toml`, rebuilds
+the live `Experiment` via `load_experiment_str`, rebuilds the ledger, and
+then recomputes the marked curve and the metrics. The rebuilt
+`Experiment.data` holds provider specs, pure values, so the ledger and the
+trade metrics load on any machine; only the curve needs the data tree to be
+present.
 
 ### The write and load paths validate, they never trust
 
@@ -155,7 +179,11 @@ the hash; `load_run` refuses a run whose version is absent or differs,
 with a message that says to rerun its config. Version 2 was the
 data-kinds migration (every run id changed with the identity
 projection). Version 3 was the ledger: `positions.parquet` gave way to
-`events`, `orders` and `order_legs`. Version 4 is the identity break --
+`events`, `orders` and `order_legs`. Version 5 is the marked curve:
+`pnl_series.parquet` and the manifest's `window_end_spot` left with the
+`PnLSeries` type they exported, `n_marked` joined `n_unmarked`, and the
+derived tables that replace the series belong to the second half of the
+outputs round. Version 4 is the identity break --
 the venue's two choices and the resolved contract facts joined
 `core_hash`, so every stored run id moved. It is also what separates the
 schema-3 tree from today's code: those runs were written before the
@@ -205,14 +233,18 @@ equals the saved one exactly. `group` is a SQL keyword: the column is
 | `to_ts` | TIMESTAMP | evaluation window end |
 | `n_events` | BIGINT | `length(result.ledger)` |
 | `n_orders` | BIGINT | `length(result.ledger.orders)` |
-| `n_opens` | BIGINT | from `PnLSeries` |
-| `n_closes` | BIGINT | from `PnLSeries` |
-| `n_unmarked` | BIGINT | from `PnLSeries`; a placeholder until slice 5 |
-| `window_end_spot` | DOUBLE | from `PnLSeries`; a placeholder until slice 5 (`NaN`) |
+| `n_opens` | BIGINT | `Open` fills in the ledger |
+| `n_closes` | BIGINT | `Close` fills in the ledger |
+| `n_marked` | BIGINT | session closes the run marked; NULL when it carries no curve |
+| `n_unmarked` | BIGINT | session closes it could not mark; NULL when it carries no curve |
 | `commit_sha` | VARCHAR | git commit of the code that produced the run |
 | `dirty` | BOOLEAN | working tree had uncommitted changes |
 | `written_at` | TIMESTAMP | UTC time of the save |
-| `schema_version` | INTEGER | manifest schema version (`RUN_SCHEMA_VERSION`, currently 4); outside the hash |
+| `schema_version` | INTEGER | manifest schema version (`RUN_SCHEMA_VERSION`, currently 5); outside the hash |
+
+`n_marked` / `n_unmarked` are NULL rather than 0 when the saved result had
+no curve: "no curve at all" and "a curve that marked nothing" are different
+facts and must not read the same in SQL.
 
 ### `metrics.parquet`
 
@@ -225,7 +257,8 @@ Long form so the schema is stable as metrics come and go.
 | `value` | DOUBLE |
 
 `NaN` and `±Infinity` are stored verbatim (cast via `'NaN'::DOUBLE` on
-write).
+write). An export only: `load_run` recomputes every metric and never reads
+this file.
 
 ### `events.parquet`
 
@@ -292,24 +325,14 @@ against. `bid` and `ask` keep the source's nullability.
 | `spot` | DOUBLE |
 | `spot_at` | TIMESTAMP |
 
-### `pnl_series.parquet`
-
-One row per sample, post-sort by timestamp (matches `PnLSeries`).
-
-| column | type |
-|---|---|
-| `run_id` | VARCHAR |
-| `idx` | BIGINT |
-| `timestamp` | TIMESTAMP |
-| `pnl` | DOUBLE |
-
 ## Key decisions
 
 | Decision | Why |
 |---|---|
 | **Parquet + DuckDB-as-engine, no single-file DB** | Matches the `data` module's existing pattern. Files are inspectable from any parquet-aware tool; a single corrupt run doesn't take down the whole store; `rm -rf <run_dir>` is a valid delete. |
 | **Hive partition `run_id=<hash>`** | DuckDB and pandas / polars all understand the layout natively. Cross-run queries are one parquet glob, no separate manifest table to keep in sync. |
-| **The ledger stored as it is: events with the kind's own columns, plus the order journal** | The events are the facts and the journal is what each decision saw; storing derived tables instead would let a stored run disagree with its own replay. Round trips, marks, equity and failures arrive as their own tables in slice 6. |
+| **The ledger stored as it is: events with the kind's own columns, plus the order journal** | The events are the facts and the journal is what each decision saw; storing derived tables instead would let a stored run disagree with its own replay. Round trips, marks, equity and failures arrive as their own export tables in the second half of the outputs round. |
+| **Derived results are recomputed on load, never read** | A stored derived table is a claim frozen at write time. Recomputing from the ledger and the market data means a loaded result cannot disagree with its own inputs -- and it turns "the data moved" into a visible, named degradation instead of a silently stale number. |
 | **Write and load validate the join; load rebuilds through `commit!`** | `save_run` checks before creating a folder. A load must fail on a dangling fill, duplicate execution id, field mismatch or invalid simulated price, never drop the join. Reusing `commit!` means append invariants are not copied. |
 | **`load_run` returns `ExperimentResult`, not a separate `StoredRun`** | Same type as `run_experiment` means same recipes / `show` / downstream consumers. Specs are pure values, so the rebuilt experiment only touches the data when run, while the ledger / pnl / metrics remain inspectable. |
 | **Long-form `metrics.parquet`** | Optional metrics come and go per run; a wide schema would force columns to NULL across runs and break naive `UNION ALL` reads. Long form is stable and trivially pivotable. |
@@ -320,8 +343,10 @@ One row per sample, post-sort by timestamp (matches `PnLSeries`).
 
 ## Future work
 
-- Slice 6: `round_trips`, `marks`, `equity` and `failures` tables, a
-  completeness flag in the manifest, `compare_runs.jl` over them.
+- The second half of the outputs round: `round_trips`, `marks`, `equity`
+  and `failures` export tables, a completeness flag in the manifest, and
+  `compare_runs.jl` over them. Exports only -- the load path will keep
+  recomputing.
 - Write-to-temp-then-rename for atomic saves.
 - Compute reuse: on a `core_hash` + `commit_sha` hit with a clean tree,
   load the cached ledger and recompute only the outputs instead of

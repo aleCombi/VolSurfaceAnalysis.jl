@@ -751,10 +751,8 @@ end
     trips = round_trips(L)
     @test [r.pnl for r in trips] == [4370, 4870]  # (8500 - 4000) - 65 - 65, (11000 - 6000) - 65 - 65
     @test sum(r.pnl for r in trips) == book.cash
-    s = pnl_series(L)
-    @test s.pnl ≈ [92.40]                        # one structure sample at the close instant
-    @test s.timestamps == [_LG_T_CLOSE]
-    @test s.n_opens == 2 && s.n_closes == 2
+    @test trade_pnl(L) ≈ [92.40]                 # one structure trade at the close instant
+    @test n_opens(L) == 2 && n_closes(L) == 2
     @test book == book_as_known(L, 10) == book_effective(L, _LG_FAR)
     @test check_join(L) === nothing
     @test L.next_group == 2                      # a named group mints nothing

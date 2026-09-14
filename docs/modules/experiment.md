@@ -12,25 +12,31 @@ window.
 ```mermaid
 flowchart LR
     Exp[Experiment] -->|open_data| RB([run_backtest])
-    RB -->|Ledger| PS([pnl_series])
-    PS -->|PnLSeries| CM([compute_metrics])
+    RB -->|Ledger| MC([marked_curve])
+    RB -->|Ledger| CM([compute_metrics])
+    MC -->|MarkedCurve| CM
     Exp -->|requested| CM
     CM -->|NamedTuple| ER[ExperimentResult]
-    PS -->|series| ER
+    MC -->|curve| ER
     RB -->|Ledger| ER
     Exp -->|provenance| ER
 ```
 
 Per call to `run_experiment`: open the data (`with_data`), tick the
 engine on the clock through the experiment's own venue, check that the window
-holds a clock tick, build the `PnLSeries` from the ledger's round trips,
-compute always-on plus requested optional metrics, close the data, and
-pack everything (including the originating `Experiment`) into one
-`ExperimentResult`. Everything that touches readers runs inside
-`with_data`; the `Experiment` itself holds specs only. Open lots at the
-window end stay open and contribute nothing until the equity curve of
-slice 5 marks them; nothing is force-settled, and expiries inside the
-window are booked by the engine's lifecycle step.
+holds a clock tick, build the [`MarkedCurve`](metrics.md) over the window's
+session closes, compute always-on plus requested optional metrics, close
+the data, and pack everything (including the originating `Experiment`) into
+one `ExperimentResult`. Everything that touches readers runs inside
+`with_data`; the `Experiment` itself holds specs only.
+
+Marking runs here, and here only, because it is **not** a pure function of
+the ledger: valuing an open lot needs market data, so it must happen while
+the cut is open. Open lots at the window end stay open -- nothing is
+force-settled, and expiries inside the window are booked by the engine's
+lifecycle step -- and the marked curve is what values them at each session
+close. Everything else in the result is derived from the ledger and is
+recomputed rather than stored (see [persistence](persistence.md)).
 
 ## The abstraction
 
@@ -40,7 +46,7 @@ struct OutputSpec
     metric_params :: Dict{Symbol,NamedTuple}
     artifacts     :: Vector{Symbol}
 end
-OutputSpec(; metrics=<all registered>, metric_params=Dict(), artifacts=[:equity_curve])
+OutputSpec(; metrics=<all registered>, metric_params=Dict(), artifacts=[:marked_curve])
 
 struct Experiment
     name       :: String
@@ -61,7 +67,7 @@ Experiment(; name, agent, data, clock, from, to,
 struct ExperimentResult
     experiment :: Experiment
     ledger     :: Ledger          # events and the order journal
-    pnl_series :: PnLSeries
+    curve      :: Union{MarkedCurve,Nothing}   # nothing when market data was absent
     metrics    :: NamedTuple
 end
 
@@ -153,8 +159,10 @@ identity (`core_hash` / `full_hash` via `identity.jl`).
 | `[venue]` names an unknown fill rule or cost model, or an unknown key | `load_experiment` errors naming the known ones. A typo would otherwise take the default silently and fork the run id from the intent. |
 | Data root missing on this machine | `open_data` throws `ArgumentError` at the start of the run; loading the config succeeds. |
 | `exp.outputs.metrics` contains an unknown symbol | `compute_metrics` errors with the offending symbol and the known list. |
-| Agent / Policy never trades | `result.ledger` is empty with no orders and `result.pnl_series.pnl` is empty; always-on metrics are `0.0` / `0` / `NaN` per their empty-series conventions. |
-| Lots still open at the window end | They stay open in `book_effective(result.ledger, exp.to)` and contribute no sample; `window_end_spot` is `NaN` and `n_unmarked` is `0` until slice 5 retires both. |
+| Agent / Policy never trades | `result.ledger` is empty with no orders and `trade_pnl(result.ledger)` is empty; the marked curve is a flat zero over the window's sessions; always-on metrics are `0.0` / `0` / `NaN` per their empty-input conventions. |
+| Lots still open at the window end | They stay open in `book_effective(result.ledger, exp.to)` and produce no *trade*; the marked curve values them at every session close, and `n_unmarked(result.curve)` counts the closes where it could not. |
+| The window covers no whole trading session | The curve has no points and no unmarked entries: the session is outside the window, not unanswerable inside it. |
+| An open lot has no quote mid and no surface price at a session close | That session joins `unmarked_at` with reason `:no_mark`; the run completes and `marked_curve` warns with the count. |
 
 ## Config loading
 
@@ -296,8 +304,8 @@ scratch dir without persisting.
 ## Future work
 
 - Compute reuse: when a new experiment's `core_hash` matches a stored
-  run produced by the same code, load its `pnl_series` and recompute
-  only the outputs instead of re-running the backtest.
+  run produced by the same code, load its ledger and recompute only the
+  outputs instead of re-running the backtest.
 - A curation gate over the knowledge base (draft / accept / retract).
 - Parallel sweeps: an `experiments::Vector{Experiment}` runner that
   parallelizes across runs (the engine is single-threaded; the

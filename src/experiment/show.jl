@@ -13,7 +13,7 @@ end
 function Base.show(io::IO, ::MIME"text/plain", r::ExperimentResult)
     e = r.experiment
     L = r.ledger
-    s = r.pnl_series
+    c = r.curve
     kinds = ((Fill, "fills"), (Match, "matches"), (Expiry, "expiries"), (Fee, "fees"))
     per_kind = join(("$(count(x -> x isa T, L.events)) $name" for (T, name) in kinds), ", ")
     book = book_as_known(L, last_sequence(L))
@@ -23,9 +23,16 @@ function Base.show(io::IO, ::MIME"text/plain", r::ExperimentResult)
     println(io, "  clock       ", kind_name(kind(e.clock)), " / ", e.clock.sel)
     println(io, "  agent       ", typeof(e.agent))
     println(io, "  events      ", length(L), "  (", per_kind, ")")
-    println(io, "  orders      ", length(L.orders), "  (round trips: ", length(s.pnl), ")")
+    println(io, "  orders      ", length(L.orders),
+                "  (round trips: ", length(trade_pnl(L)), ")")
     println(io, "  book        ", length(open_lots(book)), " open lots in ",
                 length(open_groups(book)), " open groups, cash USD ", _usd(book.cash))
+    if c === nothing
+        println(io, "  curve       not built (market data unavailable)")
+    else
+        println(io, "  curve       ", n_marked(c), " marked sessions, ",
+                    n_unmarked(c), " unmarked")
+    end
     println(io)
     println(io, "Metrics:")
     width = isempty(keys(r.metrics)) ? 0 : maximum(length(string(k)) for k in keys(r.metrics))
