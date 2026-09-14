@@ -40,8 +40,8 @@ Progress toward vision:
    with `current_policy(a, t, cut, book) -> Policy` (the layer that owns
    refit / learning / policy evolution); `StaticAgent` wraps a fixed
    Policy. `TimeCut` gives no-lookahead a supported-interface guarantee;
-   `run_backtest(agent, data, from, to, clock; fill_rule, cost_model,
-   settlement_rule, tick_cents)` drives the tick loop on the
+   `run_backtest(agent, data, from, to, clock; fill_rule, cost_model)`
+   drives the tick loop on the
    experiment's declared `Clock`, prices every leg of every order
    through the simulated venue (`docs/modules/backtest.md`:
    `:cross_spread` on the tick, IBKR Pro's US options commissions as
@@ -50,8 +50,10 @@ Progress toward vision:
    append. Lifecycle runs first at every tick and once more at the
    evaluation endpoint: `settlements` says which lots fell due and at
    what price, the ledger's own `record_expiry!` books each one, and the
-   settlement rule (`:session_close`) reads sessions off the spot tree,
-   consulting the NYSE calendar only to contradict it.
+   settlement rule reads sessions off the spot tree, consulting the NYSE
+   calendar only to contradict it; which rule a lot gets is the contract
+   fact `contract_spec(u).settlement`, and `:session_close` (PM) is the
+   one style served.
 5. **Metric computation** -- on the ledger. `PnLSeries` is built by
    `pnl_series(::Ledger)` from the ledger's round trips, one sample per
    structure closed at one instant, in USD. Always-on core metrics
@@ -91,8 +93,12 @@ Progress toward vision:
    `code_provenance`). `save_run` writes, `load_run` rebuilds the ledger
    through `commit!` and `check_join` and reads back into an
    `ExperimentResult` (specs are pure values, so loading works
-   off-machine; the manifest `schema_version`, now 3, refuses runs
-   written under the positions schema). Cross-run queries are DuckDB
+   off-machine; the manifest `schema_version`, now 4, refuses runs
+   written under the positions schema and under the pre-identity one).
+   Every value that changes a result is either in `core_hash` -- the data
+   specs, clock, agent, window, the venue's `fill_rule` / `cost_model`,
+   and the contract facts resolved for the experiment's underlying -- or a
+   stated constant in code. Cross-run queries are DuckDB
    SQL against the parquet glob. Compute reuse (skip the backtest on a
    `core_hash` hit) and a curation gate are the next slices.
 
@@ -291,7 +297,50 @@ failed.** What the review deferred is in the backlog below.
   and stays in the book handed to every later decision, and
   `lot.contract.expiry <= t` is what tells a policy it holds one,
   inclusive because the settlement interval is.
-  Next: the settlement rule and the venue into config and identity.
+  **PR 3 landed 2026-09-14**
+  ([docs/proposals/ledger-identity.md](proposals/ledger-identity.md)):
+  config and identity, the run-id break. Four values changed results and
+  appeared in no run id. Two of them are choices and are now config:
+  `fill_rule` and `cost_model` are `Experiment` fields, read from an
+  optional `[venue]` table whose two keys both default to today's values,
+  and they enter `core_hash` -- together with the `ContractSpec` resolved
+  for the experiment's one underlying, which is what puts the contract
+  table's facts in the hash without forking every id on an entry the run
+  never touches. The other two are not choices at all. The tick is
+  `const TICK_CENTS = 1` (every underlying the table lists trades in
+  penny increments at every premium), still a defaulted parameter of
+  `fill_price` / `fill_legs` / `check_join` so the join check can
+  recompute a fill from an observation and say which tick it checked
+  against. Settlement style is a contract fact: `settlements` routes per
+  lot off `contract_spec(u).settlement`, and `run_backtest` has no
+  `settlement_rule` or `tick_cents` keyword left. The settlement *price
+  source* stays hardcoded, deliberately: `:session_close`'s replacement
+  is an official-close feed, which arrives as a market-data kind with a
+  provider spec -- already inside identity -- not as a venue symbol.
+  `AMSettled` is named at both ends: `load_experiment` refuses such a
+  config when it reads it, and `settlements` throws
+  `UnsupportedSettlement`, which is deliberately *not* caught and warned
+  like `UnpriceableLeg` -- that names one lot unpriceable at this
+  instant, this names a contract class nothing here can settle, so the
+  run stops. `:session_open` stays unwritten: there is no AM-settled
+  underlying to test it against, and an untested settlement rule is worse
+  than an absent one. `RUN_SCHEMA_VERSION` is 4, so every stored run id
+  moved; the version is also what finally separates the schema-3 tree
+  (runs written before lifecycle booked expiries) from runs of the same
+  config made now. `market_data.md`'s `SpotPrice` paragraph now states
+  what the tree actually provides rather than what the rule needs:
+  Polygon's minute aggregates deliberately update on extended-hours
+  trades (SPY on 2024-12-24 holds bars from 04:00 to 16:59 ET), so the
+  six early closes settle at their 13:00 ET prints on a *measured*
+  property of the data -- zero bars in (13:00, 16:00] ET on every one of
+  them -- rather than on a guarantee, and the official-close kind is what
+  would make that structural. Results are unchanged by construction: only
+  ids move. **Gate: 3418 passed, 0 failed, 0 errored, 0 broken.** The
+  ten-year strangle rerun (same 4478 `Expiry` events over 1699 instants,
+  same 2240 orders, same metrics, new run id) is the regression that
+  closes the round.
+  Next: PR 4, outputs -- `pnl_series`, the metrics, the equity curve and
+  the structure series.
 
 ## Backlog
 
@@ -304,8 +353,8 @@ intended direction, but not currently in flight.
   departure in settlement: the official closing auction is not in minute
   bars, so the 16:00 (or 13:00) print takes its place. A source of
   *official* closes would remove the departure outright, and with it the
-  early-close exposure the regular-session `SpotPrice` contract currently
-  covers by assumption -- an official close is stamped by its session
+  early-close exposure the production spot tree currently avoids by
+  measurement rather than by contract -- an official close is stamped by its session
   rather than inferred from a window, so an extended-hours print could
   not be mistaken for one. Candidate source: Polygon's daily aggregates,
   which `massive/polygon` may already deliver; whether they carry the

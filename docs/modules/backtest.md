@@ -97,17 +97,23 @@ whole-ledger form remains the persistence write/load audit.
 ## The venue
 
 Shaped like Interactive Brokers, as three values: a price rule, a cost
-model and the class's tick, keywords on `run_backtest` (defaults in
-`run_experiment`) until slice 4 puts them in config and identity, along
-with the settlement rule. The
-rule and the model are symbols dispatched through two small tables in
-the `_METRIC_TABLE` style; `Fill.fill_rule` is literally the table key.
+model and the class's tick. The rule and the model are symbols dispatched
+through two small tables in the `_METRIC_TABLE` style (`Fill.fill_rule`
+is literally the table key) and they are *choices*, so they are
+[`Experiment`](experiment.md) fields, part of `core_hash`, and keywords
+here with the same defaults for a direct caller. The tick is not a
+choice: `TICK_CENTS`, a constant, because every underlying the contract
+table lists trades in penny increments at every premium. It stays a
+parameter of `fill_price`, `fill_legs` and `check_join` so the join check
+can recompute a fill from an observation and state the tick it checked
+against. Settlement style is not a value here at all: it is a contract
+fact, read per lot from `contract_spec`.
 
 - **Structure.** A combo order fills in whole units or not at all, as
   a guaranteed combo does at IBKR; a lone leg never happens. This is
   not a value: it is `record_order!` plus the engine pricing every leg
   first.
-- **Price** (`fill_price(rule, bid, ask, side, tick_cents)`, raw values
+- **Price** (`fill_price(rule, bid, ask, side, tick_cents = TICK_CENTS)`, raw values
   in so `check_join` can recompute it from an observation).
   `:cross_spread`: a buy takes the ask, a sale the bid, rounded onto the
   tick away from the trader (rule R5 below); a missing required side is
@@ -132,28 +138,37 @@ the listed date at 16:00 ET; nothing constrains it to that. What settles
 a contract is the *session-close print*: the underlying's last
 regular-hours print of the settlement session, which the rule reads as
 the last print of its reference window and which is the same thing only
-under the regular-session `SpotPrice` contract
-([`market_data`](market_data.md)). That is a stated departure from the
+where the spot tree holds regular-session prints alone
+([`market_data`](market_data.md) records what the production tree
+actually holds). That is a stated departure from the
 facts -- the official closing auction is not in the data -- and it is
 the only one here; the payoff itself is real, intrinsic under exercise
 by exception.
 
+**Which lot settles under which rule is a contract fact.**
+`settlements` reads `contract_spec(underlying).settlement` per lot, so a
+book holding two styles settles each correctly; a run-level symbol could
+not, and agreed with the table today only because every underlying it
+lists is `PMSettled`. A style no rule serves is
+`UnsupportedSettlement`, which stops the run -- see the failures below.
+
 **Sessions come from the spot tree; the calendar only contradicts it.** A
 date is a session when the underlying printed in the reference window on
 it, and its close is the last of those prints. Nothing else is
-consulted, so an early close needs no early-close table -- but what
-makes the answer right there is an *input contract*, not the bounds:
-`SpotPrice` providers serve regular-session prints only
-([`market_data`](market_data.md)), and under that contract the last
-print in the window of a 13:00 ET close is the 13:00 one. Break the
-contract and the rule breaks silently: a 15:59 extended-hours print on
-an early-close day is inside the 09:30-16:00 window and becomes the
-settlement price, and nothing here can tell it apart from a regular one
--- a `SpotPrice` does not record which session it came from, and no
-narrower window helps, since 15:59 is regular-hours-shaped. The six
-early-close sessions of a ten-year SPY run settle at their 13:00 prints
-because the tree they read holds nothing after 13:00 on those dates,
-which is the contract holding, not the rule guaranteeing it. The
+consulted, so an early close needs no early-close table -- but what makes
+the answer right there is a property of the input, not of the bounds: the
+last print in the window of a 13:00 ET close is the 13:00 one only where
+the tree holds regular-session prints alone. Where it does not, the rule
+breaks silently: a 15:59 extended-hours print on an early-close day is
+inside the 09:30-16:00 window and becomes the settlement price, and
+nothing here can tell it apart from a regular one -- a `SpotPrice` does
+not record which session it came from, and no narrower window helps,
+since 15:59 is regular-hours-shaped. The production tree does serve
+extended hours and is *measured* not to print inside that window on the
+dates that matter, which is why the six early-close sessions of a
+ten-year SPY run settle at their 13:00 prints;
+[`market_data`](market_data.md) records the requirement, the measurement
+and the official-close data kind that would make it structural. The
 exchange calendar answers one question only, and it is a *check*: a
 printless date the calendar calls open is a data gap, named and
 reported, never evidence that the exchange was closed (design rule 7). Ad-hoc closures the calendar may lag behind have
@@ -200,10 +215,11 @@ could never close. It applies only when the calendar calls the listed
 date open; when the listed date is not a session at all, the walk back
 answers as it does for any closure. An expiry at exactly 09:30 ET is a
 one-instant window, not a degenerate one, and settles at the opening
-print. `SettlementStyle` already distinguishes the two styles and every
-underlying in the contract table is `PMSettled`, so nothing served today
-reaches this; the `:session_open` rule that would serve it is future
-work recorded beside `_SETTLEMENT_RULES`.
+print. `SettlementStyle` distinguishes the two styles and every underlying in
+the contract table is `PMSettled`, so `:pre_open_expiry` is this rule's
+own domain edge rather than a stand-in for the AM case; the
+`:session_open` rule that would serve AM settlement is unwritten on
+purpose, since there is no AM-settled underlying to test it against.
 
 **The settlement instant is always the contract's expiry.** When the
 reference price comes from an earlier session -- an unscheduled closure
@@ -240,6 +256,15 @@ and reporting at the boundary rather than at the call site is what makes
 that structural. `settlements` mutates no state; it is not
 side-effect-free, and the distinction is deliberate.
 
+**An unserved settlement style stops the run.** `UnsupportedSettlement`
+is deliberately *not* caught and warned that way. `UnpriceableLeg` names
+one lot whose price is unavailable at this instant, and design rule 7
+says leave it open and say so; `UnsupportedSettlement` names a contract
+class the codebase cannot settle at all, which every later tick would
+answer identically. Finishing the run would report a position that was
+never valued as though it were merely still open. It is a configuration
+error, and `load_experiment` refuses such a config when it reads it.
+
 Early assignment and physical delivery are not modelled: SPY
 cash-settles at intrinsic here instead of delivering shares. Marking a
 lot still open past the window end belongs to the equity curve, not to
@@ -249,21 +274,22 @@ the lifecycle.
 
 ```julia
 run_backtest(agent::Agent,  data, from, to, clock; fill_rule = :cross_spread,
-             cost_model = :ibkr_pro_us_options,
-             settlement_rule = :session_close, tick_cents = 1) -> Ledger
+             cost_model = :ibkr_pro_us_options) -> Ledger
 run_backtest(policy::Policy, data, from, to, clock; kw...)      -> Ledger   # StaticAgent wrapper
 
 resolve_quote(cut::TimeCut, contract::ContractKey, t) -> OptionQuote
-fill_legs(cut, order::Order, t; fill_rule, cost_model, tick_cents)
+fill_legs(cut, order::Order, t; fill_rule, cost_model, tick_cents = TICK_CENTS)
     -> (prices, fees, observations, fill_rule)                  # record_order!'s per-leg keywords
 settlement_price(rule::Symbol, cut::TimeCut, contract::ContractKey, t) -> Float64
-settlements(cut, book::Book, prev, t; settlement_rule)
+settlements(cut, book::Book, prev, t)
     -> (settled::Vector{Tuple{Lot,Float64}}, unsettled::Vector{UnpriceableLeg})
-check_join(L::Ledger; tick_cents = 1) -> Nothing
-check_join(L::Ledger, rec::OrderRecord; tick_cents = 1) -> Nothing
+check_join(L::Ledger; tick_cents = TICK_CENTS) -> Nothing
+check_join(L::Ledger, rec::OrderRecord; tick_cents = TICK_CENTS) -> Nothing
 
-fill_price(rule::Symbol, bid, ask, side::Side, tick_cents::Int) -> Union{Float64,Missing}
+fill_price(rule::Symbol, bid, ask, side::Side, tick_cents::Int = TICK_CENTS) -> Union{Float64,Missing}
 commission(model::Symbol, prices, quantities) -> Vector{Int}
+const TICK_CENTS = 1
+struct UnsupportedSettlement <: Exception    # underlying, style
 ```
 
 Ticks come from the declared clock (the timestamps of one kind for one
@@ -271,14 +297,12 @@ selector, part of core identity) unless the agent's `tick_times`
 override returns a schedule; a candidate with no data yields `Order[]`
 in `decide`. Expiries inside the window are booked; lots still open
 after the window-end pass stay open, and nothing is force-settled.
-Because the settlement rule is not yet in config or identity, this
-changes results under unchanged run ids, and nothing on disk tells the
-two apart: `load_run` checks the schema number, not which code produced
-the run, and schema 3 was already being written before lifecycle
-existed. A stored schema-3 run can therefore hold orders and no
-expiries, load clean, and carry the same run id as a run of the same
-config made now, with different events and different realized results.
-Separating them is the identity work of the next slice.
+Every value that changes what the loop produces is now either a declared
+input of the run id (the two venue choices, the resolved contract facts)
+or a constant in code (`TICK_CENTS`, the `:session_close` price source).
+The schema-3 runs that predate lifecycle are separated from today's by
+the manifest version rather than by their ids, which do not distinguish
+them; `load_run` refuses them (see [`persistence`](persistence.md)).
 
 ## `check_join`: the cross-record contract
 
@@ -311,7 +335,8 @@ own `DuplicateExecution`, not repeated here.
 | A lot falls due on a date with no prints that the exchange calendar calls open | `UnpriceableLeg(..., :unexpected_gap)` from `settlement_price`; `settlements` warns once and the lot stays open |
 | The walk back for a settlement session exhausts its bound | `UnpriceableLeg(..., :no_session)`, the same way |
 | `settlement_price` is called with a cut that does not reach the contract's expiry | `UnpriceableLeg(..., :no_session_close)`, the rule's domain; unreachable from the tick loop |
-| A contract expires before 09:30 ET on a listed date the calendar calls open | `UnpriceableLeg(..., :pre_open_expiry)`: the AM-settled contract, which the close-settled rule does not serve. On a listed date the calendar calls closed the walk back answers as usual |
+| A contract expires before 09:30 ET on a listed date the calendar calls open | `UnpriceableLeg(..., :pre_open_expiry)`: the window the close-settled rule would read is empty by construction. On a listed date the calendar calls closed the walk back answers as usual |
+| A lot whose underlying settles in a style no rule serves | `UnsupportedSettlement(underlying, style)` from `settlements`: the run stops, nothing is written, and the lot stays open. Not caught and warned like an unpriceable lot -- `load_experiment` refuses such a config at load |
 | A lot is still open after the window-end pass | stays open; nothing is force-settled |
 | An unknown settlement rule | error naming the known ones |
 | Nothing serves the leg's underlying (quotes or spots) | `UnservedSelector`, from the data layer |
@@ -333,10 +358,10 @@ before the order.
 |---|---|
 | **The engine computes, the ledger records** | `fill_legs` is a pure function of the cut and the order; `record_order!` mints every id and the group inside one transaction and constructs the record before committing events. The engine keeps no parallel journal; a live loop replaces `fill_legs` with the broker's reports without touching the writer. |
 | **Every leg priced before anything is written** | Proposal decision 10: a structure fills whole or not at all, as a guaranteed combo does at IBKR. A leg that cannot be priced is an error before the batch, so no partial structure ever reaches the ledger. |
-| **Venue as two symbol tables and a tick, no type hierarchy** | Three plain values are what config and identity will carry in slice 4; `Fill.fill_rule` already stores the key. A hierarchy would name the same three things twice. |
+| **Venue as two symbol tables and a tick, no type hierarchy** | Two plain symbols are what config and identity carry, and the tick is a constant; `Fill.fill_rule` already stores the key. A hierarchy -- or a `VenueSpec` struct -- would name the same things twice. |
 | **R5: fill prices on the tick, rounded away from the trader** | The ledger refuses cash that is not whole cents; synthesized and modelled quotes are not on the tick; exchanges only trade on it. Rounding against the trader keeps the rule as conservative as crossing the spread already is. The observation keeps the raw quote; the fill carries the tick price. |
 | **Observations recorded per leg, fills carry none** | Research records what pricing saw. This slice retains an observation row with optional quote sides for broker executions but ignores it during validation; truly observation-less live records arrive with the adapter. The join is validated, never assumed. |
-| **Sessions come from the spot tree; the calendar only contradicts it** | A date is a session when the underlying printed in the reference window, so an early close needs no table: under the regular-session `SpotPrice` contract the last print in the window is the 13:00 one. A calendar as the source would have to carry every half-day and every ad-hoc closure correctly forever; as the check it only has to answer whether a printless date was closed, and design rule 7 makes a wrong answer loud. The cost is that the correctness of an early close is the data's to keep -- an extended-hours print inside the window would settle the contract instead, undetectably -- which is why the contract is written down where the kind is defined. |
+| **Sessions come from the spot tree; the calendar only contradicts it** | A date is a session when the underlying printed in the reference window, so an early close needs no table: where the tree holds regular-session prints alone, the last print in the window is the 13:00 one. A calendar as the source would have to carry every half-day and every ad-hoc closure correctly forever; as the check it only has to answer whether a printless date was closed, and design rule 7 makes a wrong answer loud. The cost is that the correctness of an early close is the data's to keep -- an extended-hours print inside the window would settle the contract instead, undetectably -- which is why the requirement, and what the production tree measurably gives, are written down where the kind is defined. |
 | **The settlement instant is always the contract's expiry** | When the reference price comes from an earlier session, the departure from reality is *which print stands in for the official close*, never *when the obligation ceased to exist*. The engine always passes the contract's expiry; the ledger's `_check_expiry` permits settlement at or after it, which is what makes an expiry booked at a later tick legal. The equality is this engine's choice, not the ledger's rule. |
 | **The lifecycle computes, the ledger records** | `settlements` is a function of the cut and the book, `fill_legs`' twin; the writer is the ledger's `record_expiry!`. The engine gains no expiry queue, no cached calendar and no `try`/`catch` in the loop -- `prev` is a loop variable, not state. |
 | **Settlement as a symbol through a table, no type hierarchy** | The same shape as `_FILL_RULES` and `_COST_MODELS`, and the same reason: the value config and identity will carry is a symbol, so a struct would name one thing twice. |
@@ -374,11 +399,11 @@ window end is marked; metrics and persistence.
 |---|---|---|
 | A multi-leg option order fills in whole units or not at all | Interactive Brokers, [Understanding Guaranteed vs. Non-guaranteed Combination Orders](https://www.ibkrguides.com/kb/guaranteed-non-guaranteed-combo-orders.htm): "a guaranteed multi-leg order is one in which executions are guaranteed to be delivered simultaneously for each leg and in proportion to the leg ratio" | `record_order!` plus every leg priced first; a lone leg never happens |
 | Commission per contract by premium tier, with a per-order minimum | Interactive Brokers, [US options commissions](https://www.interactivebrokers.com/en/pricing/commissions-options.php), IBKR Pro fixed, monthly volume ≤ 10,000, fetched 2026-09-12: USD 0.25 below a 0.05 premium, 0.50 from 0.05 to below 0.10, 0.65 at 0.10 and above, minimum USD 1.00 per order; the page's worked examples are the test literals | `:ibkr_pro_us_options`; one `Fee` per fill |
-| Options on SPY, QQQ and IWM quote and trade in one-cent increments at every premium | MIAX, [Options Penny Program, all options exchanges](https://www.miaxglobal.com/markets/us-options/all-options-exchanges/penny-program), describing the industry-wide Penny Interval Program: penny classes trade in $0.01 below $3.00 and $0.05 at or above, but options overlying QQQ, SPY and IWM "are quoted and traded in minimum increments of $0.01 for all series regardless of the price" | `tick_cents = 1`; a non-penny tick per class is a later model |
+| Options on SPY, QQQ and IWM quote and trade in one-cent increments at every premium | MIAX, [Options Penny Program, all options exchanges](https://www.miaxglobal.com/markets/us-options/all-options-exchanges/penny-program), describing the industry-wide Penny Interval Program: penny classes trade in $0.01 below $3.00 and $0.05 at or above, but options overlying QQQ, SPY and IWM "are quoted and traded in minimum increments of $0.01 for all series regardless of the price" | `const TICK_CENTS = 1`, a constant rather than config, since every underlying the contract table lists is one of those three; a non-penny tick per class is a later model |
 | An execution report carries a broker-assigned execution id, unique per report | FIX [ExecutionReport (35=8)](https://www.onixs.biz/fix-dictionary/4.4/msgtype_8_8.html), `ExecID` (tag 17) | one execution id per fill, minted by the writer here, reported by the broker live; a duplicate is refused |
 | Backend selection by symbol through a dispatch table with defaults | Optim.jl, MLJ.jl; this repo's `_METRIC_TABLE` | `_FILL_RULES`, `_COST_MODELS`, `_SETTLEMENT_RULES` |
 | An expiring in-the-money listed option is exercised without an instruction | OCC / The Options Industry Council, [Options exercise FAQ](https://www.optionseducation.org/referencelibrary/faq/options-exercise), checked 2026-09-13: "'Exercise by exception' is an administrative procedure used by OCC to expedite the exercise of expiring options by clearing members. In this procedure, OCC exercises options that are in-the-money by specified threshold amounts unless the clearing member submits instructions not to exercise" | an expiring lot settles at intrinsic against the settlement session's close, with no closing order; the OCC threshold itself is not modelled |
-| The exchange's closed days and its 13:00 ET early closes are calendar facts, not data | NYSE, [Holidays & Trading Hours](https://www.nyse.com/markets/hours-calendars), checked 2026-09-13: the annual holiday list, and "Each market will close early at 1:00 p.m. (1:15 p.m. for eligible options)" on the named half-days | the calendar is the *check* on a printless date, never the source of sessions; early closes need no table, since under the regular-session `SpotPrice` contract the session's last print in the window is the 13:00 one -- a provider serving extended-hours prints defeats that, which is the contract's reason for existing |
+| The exchange's closed days and its 13:00 ET early closes are calendar facts, not data | NYSE, [Holidays & Trading Hours](https://www.nyse.com/markets/hours-calendars), checked 2026-09-13: the annual holiday list, and "Each market will close early at 1:00 p.m. (1:15 p.m. for eligible options)" on the named half-days | the calendar is the *check* on a printless date, never the source of sessions; early closes need no table, since the session's last print in the window is the 13:00 one wherever the tree holds regular-session prints alone -- a provider serving extended-hours prints defeats that, which is why the requirement is stated where the kind is defined |
 | An expiring listed option stops trading at the 16:00 ET close, and settles against the underlying's 16:00 ET close | Cboe, [Equity Options Extended Trading Hours FAQ](https://www.cboe.com/document/tech-spec/content/technical-specifications/equity-options-extended-trading-hours-faq/regular-trading-hours-vs.-globalcurb-trading-hours/), checked 2026-09-13: "Expiring equity single stock options will trade until 4:00 p.m. ET as part of RTH and 4:15 p.m. ET in the Curb session on expiration day", and "OCC also bases in/out-of-the-money determination based on the 4:00 p.m. ET closing price of the underlying equity security" | `fill_legs` refuses a leg at or after its contract's expiry (`:expired_contract`), and the settlement price is the underlying's session-close print. **Stated departure:** the 16:15 ET Curb session is not modelled, so this venue stops fifteen minutes before the real one does; a contract's expiry is stamped at 16:00 ET (`parse_polygon_ticker`), which is the RTH close and the instant OCC prices against |
 | An exchange calendar as a library, not a hand-rolled table | [BusinessDays.jl](https://github.com/JuliaFinance/BusinessDays.jl) `USNYSE`, checked 2026-09-13 at v0.9.25: it carries the weekends, the ten annual holidays, both national days of mourning (2018-12-05, 2025-01-09) and the 2012 Hurricane Sandy closure | `isbday(USNYSE(), d)` is the whole calendar check; the ad-hoc `const` set beside it is **empty**, kept as the seam for a future closure the library will not have on the day |
 
