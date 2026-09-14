@@ -195,8 +195,14 @@ printless open dates separately as `gaps` rather than skipping them, the
 `:unexpected_gap` case in grid form, and it counts a session only when
 its *whole* reference window lies inside the requested bounds: a window
 the bounds clip is a session the caller did not see end to end, which is
-temporal absence, not a failure. One pass over the window's prints, so
-enumerating ten years costs one range read rather than one per date.
+temporal absence, not a failure.
+
+It reads **one session window at a time**, exactly the windows
+`:session_close` reads, and never the gaps between them. That is not an
+implementation detail: the regular-session `SpotPrice` contract is claimed
+inside those windows and nowhere else, and the production tree does hold a
+disagreeing pair at an overnight instant, so a single range read across ten
+years would abort on data the rule is not entitled to and does not need.
 
 **The reference window never runs past the expiry instant.** It opens at
 09:30 ET and closes at the earlier of 16:00 ET and the contract's own

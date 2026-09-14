@@ -352,8 +352,10 @@ core metric functions (`total_pnl`, `n_round_trips`, `hit_rate`, `n_opens`,
 | `MarkedCurve` built from mismatched or unsorted vectors | `ArgumentError` naming which pair disagrees; nothing is constructed. |
 | `trade_pnl` called with an unknown `unit` | `ArgumentError` naming the two units. |
 | `compute_metrics` called with an unknown symbol | Errors loudly with the offending symbol and the list of known names. |
-| `compute_metrics` with `curve === nothing` | Curve metrics are omitted from the result; trade metrics and counts are unaffected. |
-| Sharpe / Sortino / volatility on `<2` session changes or zero variance | Returns `NaN`. |
+| `compute_metrics` with `curve === nothing` | **Every** optional metric is omitted, `:profit_factor` included though it needs no curve: each metric takes both inputs, so the table cannot say which ones to keep. The always-on core is unaffected. |
+| Sharpe / Sortino on `<2` session changes or zero variance | Returns `NaN`. |
+| Volatility on `<2` session changes | Returns `NaN`; on zero variance it returns `0.0`, which is the true dispersion, not an unanswerable question. |
+| Sortino on constant *negative* changes | Defined, not `NaN`: the mean is negative and the downside deviation is non-zero. `NaN` is for no downside at all. |
 | Profit factor on all-breakeven or empty trades | Returns `NaN`. Wins with zero losses returns `Inf`. |
 
 ## Future work

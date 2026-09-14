@@ -937,20 +937,52 @@ end
     @test whole.closes == [_st_et(d, 16, 0)]
 end
 
-@testset "session_closes: reads only the session windows, never between them" begin
-    # The production spot tree carries extended-hours prints, and an instant
-    # outside every session window can hold two disagreeing rows. A grid that
-    # range-read across the gaps between sessions would abort on it; reading
-    # one window at a time never sees it.
+# The production tree really holds a disagreeing pair at an overnight instant
+# (2026-02-07T00:12 UTC, 690.21 vs 690.22), and the regular-session
+# `SpotPrice` contract is claimed inside the session windows and nowhere else.
+# So this fixture carries an actual conflict where the tree does: two rows,
+# one instant, two prices, between one close and the next open.
+#
+# It goes through parquet rather than `InMemory`, because `InMemory` collapses
+# snapshots in its constructor and would refuse the pair before a reader ever
+# saw it -- on disk is the only place a conflict can wait to be read.
+#
+# This is a regression, not an illustration. An implementation that range read
+# across the gap would raise `ConflictingRecords` and build no grid at all;
+# reading one window at a time never meets the pair. A fixture without the
+# conflict passes either way, which is what made the earlier version of this
+# test vacuous.
+mktempdir() do root
+    spots = joinpath(root, "spots_1min")
     d1, d2 = Date(2024, 1, 16), Date(2024, 1, 17)
-    overnight = _st_et(d1, 19, 12)                      # after the close, before the open
-    spots = vcat(_st_session(d1, 480.0), _st_session(d2, 482.0))
-    data = MarketData(InMemory(spots))
-    g = session_closes(data, _ST_SPY, DateTime(2024, 1, 16), DateTime(2024, 1, 17, 23, 59))
-    @test g.closes == [_st_et(d1, 16, 0), _st_et(d2, 16, 0)]
-    # The instant between the two sessions is never read: `between` over it
-    # is where a conflicting pair would surface.
-    @test isempty(between(data, SpotPrice, _ST_SPY, overnight, overnight))
+    # Vendor time: a row stamped one minute before the instant it stands for.
+    _md_write_spot_parquet(
+        joinpath(spots, "date=2024-01-16", "symbol=SPY", "data.parquet"),
+        [_st_et(d1, 9, 29), _st_et(d1, 9, 59), _st_et(d1, 15, 59),
+         _st_et(d1, 19, 11), _st_et(d1, 19, 11)],      # the conflicting pair
+        [475.0, 478.0, 480.0, 690.21, 690.22])
+    _md_write_spot_parquet(
+        joinpath(spots, "date=2024-01-17", "symbol=SPY", "data.parquet"),
+        [_st_et(d2, 9, 29), _st_et(d2, 9, 59), _st_et(d2, 15, 59)],
+        [477.0, 480.0, 482.0])
+
+    @testset "session_closes: reads only the session windows, never between them" begin
+        with_data(MarketData(ParquetSpots(spots))) do data
+            overnight = _st_et(d1, 19, 12)     # after the close, before the open
+            # The pair is genuinely poisonous: anything reading that instant throws.
+            @test_throws ConflictingRecords only_or_missing(
+                at(data, SpotPrice, _ST_SPY, overnight))
+            @test_throws ConflictingRecords collect(
+                between(data, SpotPrice, _ST_SPY, _st_et(d1, 16, 0), _st_et(d2, 9, 30)))
+
+            # The grid spans both sessions across it and is untroubled.
+            g = session_closes(data, _ST_SPY, DateTime(2024, 1, 16),
+                               DateTime(2024, 1, 17, 23, 59))
+            @test g.closes == [_st_et(d1, 16, 0), _st_et(d2, 16, 0)]
+            @test isempty(g.gaps)
+            println("  grid stepped over a conflicting overnight pair at: ", overnight)
+        end
+    end
 end
 
 @testset "session_closes: the grid agrees with what :session_close settles at" begin
