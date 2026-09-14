@@ -200,7 +200,7 @@ end
             @test r.n_closes == res.pnl_series.n_closes == 2
             @test isnan(r.window_end_spot)
             @test r.n_unmarked == res.pnl_series.n_unmarked == 0
-            @test r.schema_version == 3
+            @test r.schema_version == 4
             @test !(:n_positions in propertynames(r))
         end
         GC.gc()
@@ -546,14 +546,14 @@ end
     end
 end
 
-@testset "manifest schema_version: written as 3, and load_run refuses other versions" begin
+@testset "manifest schema_version: written as 4, and load_run refuses other versions" begin
     mktempdir() do tmp
         res = _build_smoke_result()
         with_run_store(joinpath(tmp, "kb")) do store
             id = save_run(store, res, _SMOKE_CONFIG)
             path = replace(joinpath(run_dir(store, id), "manifest.parquet"), "\\" => "/")
             r = first(collect(DBInterface.execute(store.con, "SELECT schema_version FROM '$path'")))
-            @test r.schema_version == VolSurfaceAnalysis.RUN_SCHEMA_VERSION == 3
+            @test r.schema_version == VolSurfaceAnalysis.RUN_SCHEMA_VERSION == 4
             @test load_run(store, id) isa ExperimentResult
 
             # a manifest written before the column existed
@@ -569,6 +569,17 @@ end
             err = try load_run(store, id); nothing catch e; e end
             @test err isa ArgumentError
             @test occursin("schema_version 2", err.msg)
+
+            # and the version before this one. A schema-3 run's id was
+            # computed without the venue or the contract facts, and the tree
+            # holds runs made before the lifecycle booked expiries at all --
+            # an id that matches one of those says nothing about whether the
+            # same code produced it, so the version is what refuses them.
+            DBInterface.execute(store.con, "CREATE OR REPLACE TABLE m AS SELECT * EXCLUDE (schema_version), 3::INTEGER AS schema_version FROM '$path'")
+            DBInterface.execute(store.con, "COPY m TO '$path' (FORMAT PARQUET)")
+            err = try load_run(store, id); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("schema_version 3", err.msg) && occursin("rerun the config", err.msg)
         end
         GC.gc()
     end
