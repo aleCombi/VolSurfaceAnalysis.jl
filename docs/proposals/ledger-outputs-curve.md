@@ -209,9 +209,13 @@ risk-free rate, capital or NAV reporting, and a second policy.
 - Pin the schema-version bump and the absence of `PnLSeries`, including
   a home for `n_opens` and `n_closes` and structure-grouped dollar inputs
   for hit rate and profit factor.
-- Rerun the ten-year strangle and verify that its ledger remains 13,438
-  events, 2,240 orders and USD 32,008.66 cash. Record ratio values before
-  and after rather than asserting equality; changing them is expected.
+- Rerun the ten-year strangle and verify that its ledger remains 13,204
+  events, 2,201 orders and USD 29,942.23 cash. That is the bar-end
+  baseline, which this round builds on and must not disturb; the
+  pre-correction 13,438 / 2,240 / USD 32,008.66 belong to a clock that
+  leaked a minute of the future and are not the target. Record ratio
+  values before and after rather than asserting equality; changing them
+  is the point.
 
 Tests remain beside the source they exercise, one test file per source
 file. New failure paths use named errors, and their tests check the

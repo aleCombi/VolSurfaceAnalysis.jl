@@ -456,20 +456,24 @@ failed.** What the review deferred is in the backlog below.
   is what moves `full_hash` while `core_hash` -- a projection marks cannot
   reach -- stays put, so an existing ledger remains reusable.
   `RUN_SCHEMA_VERSION` is 5 and `pnl_series.parquet` is no longer written.
-  **Gate: 3575 passed, 0 failed, 0 errored, 0 broken.** The ten-year
-  strangle rerun is unchanged where it must be -- 13,438 events, 2,240
-  orders, USD 32,008.66 cash, 2,239 trades, `total_pnl` 31,785.96,
-  `hit_rate` 0.7937, `profit_factor` 1.3288 -- and its `core_hash` is the
-  same `838ba0b70857c331` it was before the round while `full_hash` moved
-  from `b47d70c2da9b4dd5` to `8ef088528631c194`. Its curve marks **2,516
-  sessions with none unmarked**: across ten years every open lot at every
-  session close had a two-sided quote, so the surface fallback never fired
-  and the named-failure path never ran on real data. The ratios moved as
-  expected, trade-sampled to session-sampled: sharpe 1.3481 to 1.1144,
-  sortino 1.5077 to 1.2785, volatility 2653.68 to 2857.75, max_drawdown
-  6047.20 to 6079.20. The last is the telling one -- the old figure was
-  the deepest trough of *closed* trades, and the new one sees the book
-  while it is open.
+  **Gate: 3719 passed, 0 failed, 0 errored, 0 broken.** Measured against
+  the bar-end baseline, not the pre-correction one: the ten-year strangle
+  rerun is unchanged where it must be -- 13,204 events, 2,201 orders,
+  USD 29,942.23 cash, 2,200 trades, `total_pnl` 29,694.53, `hit_rate`
+  0.7805, `profit_factor` 1.3028 -- and its `core_hash` is the same
+  `2bde5de695f9c90a` it was before the round while `full_hash` moved from
+  `f555f4bdbaf8d1d8` to `6990a511c201c1aa`. Its curve marks **2,515 of
+  2,516 sessions**. The one it cannot mark is 2018-10-25T20:00:00,
+  `:no_mark`: no two-sided quote for an open lot at that close and no
+  surface stamped there either, on the single day whose entry-instant
+  chain visibility the bar-end correction also moved. So the named-failure
+  path does fire on real data, once in ten years, and the break costs the
+  two observations either side of it -- 2,513 session changes from 2,515
+  marked points. The ratios moved as expected, trade-sampled to
+  session-sampled: sharpe 1.2686 to 1.0389, sortino 1.4208 to 1.1898,
+  volatility 2681.17 to 2852.16, max_drawdown 6399.89 to 6431.04. The
+  last is the telling one -- the old figure was the deepest trough of
+  *closed* trades, and the new one sees the book while it is open.
   One thing the round found in the data: the SPY spot tree holds two
   disagreeing rows at 2026-02-07T00:12:00 (690.21 vs 690.22), an
   extended-hours instant. `session_closes` reads one session window at a

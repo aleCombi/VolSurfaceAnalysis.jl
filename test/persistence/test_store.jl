@@ -635,6 +635,12 @@ end
 # Fri 2024-01-19, plus one option bar so the bar root is a real tree. The
 # strangle ledger is flat from 2024-01-18, so the book needs no mark at
 # that session's close and the curve is the realised total.
+#
+# Rows are written in VENDOR time and read back in visibility time, one
+# minute later (`bar_visible_at`). So the 14:29 row is the 09:30 ET open and
+# the 20:59 row is the 16:00 ET close: written a minute earlier than the
+# instant they stand for. Writing 21:00 here would put the close outside the
+# 09:30-16:00 window, which is the whole point of the convention.
 function _st_session_tree(root::AbstractString)
     options_root = joinpath(root, "options_1min")
     spot_root    = joinpath(root, "spots_1min")
@@ -659,8 +665,8 @@ function _st_session_tree(root::AbstractString)
         spath = replace(joinpath(sdir, "data.parquet"), "\\" => "/")
         DBInterface.execute(db, """
             COPY (SELECT * FROM (VALUES
-                (TIMESTAMP '2024-01-19 14:30:00', 480.0::DOUBLE),
-                (TIMESTAMP '2024-01-19 21:00:00', 483.0::DOUBLE)
+                (TIMESTAMP '2024-01-19 14:29:00', 480.0::DOUBLE),
+                (TIMESTAMP '2024-01-19 20:59:00', 483.0::DOUBLE)
             ) AS t(timestamp, close)) TO '$spath' (FORMAT PARQUET);
         """)
     finally
@@ -764,9 +770,9 @@ end
                 spath = replace(joinpath(sdir, "data.parquet"), "\\" => "/")
                 DBInterface.execute(db, """
                     COPY (SELECT * FROM (VALUES
-                        (TIMESTAMP '2024-01-19 14:30:00', 480.0::DOUBLE),
-                        (TIMESTAMP '2024-01-19 21:00:00', 483.0::DOUBLE),
-                        (TIMESTAMP '2024-01-19 21:00:00', 483.5::DOUBLE)
+                        (TIMESTAMP '2024-01-19 14:29:00', 480.0::DOUBLE),
+                        (TIMESTAMP '2024-01-19 20:59:00', 483.0::DOUBLE),
+                        (TIMESTAMP '2024-01-19 20:59:00', 483.5::DOUBLE)
                     ) AS t(timestamp, close)) TO '$spath' (FORMAT PARQUET);
                 """)
             finally
