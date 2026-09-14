@@ -335,7 +335,7 @@ failed.** What the review deferred is in the backlog below.
   property of the data -- zero bars in (13:00, 16:00] ET on every one of
   them -- rather than on a guarantee, and the official-close kind is what
   would make that structural. Results are unchanged by construction: only
-  ids move. **Gate: 3418 passed, 0 failed, 0 errored, 0 broken.** The
+  ids move. **Gate: 3425 passed, 0 failed, 0 errored, 0 broken.** The
   ten-year strangle rerun (same 4478 `Expiry` events over 1699 instants,
   same 2240 orders, same metrics, new run id) is the regression that
   closes the round.

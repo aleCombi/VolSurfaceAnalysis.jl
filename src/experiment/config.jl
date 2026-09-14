@@ -520,33 +520,28 @@ function _experiment_from_cfg(cfg::AbstractDict)::Experiment
     any(kind(s) === kind(clock) for s in data.entries) || error(
         "load_experiment: clock kind \"$(kind_name(kind(clock)))\" has no [data.*] table")
     agent = build_agent(Dict{String,Any}(agent_tbl))
-    # One experiment, one underlying. The clock selector says *when* to
-    # step; fills resolve prices per leg. Asserting the two agree is what
-    # makes that safe by construction -- a policy that declares nothing
-    # statically cannot be checked here, and is not.
-    declared = declared_underlyings(agent)
-    isempty(declared) || clock.sel in declared || error(
-        "load_experiment: the agent declares $(join(string.(declared), ", ")) " *
-        "but the clock steps on $(clock.sel); an experiment ticks and trades " *
-        "on one underlying")
     # Settlement style is a contract fact, and only `PMSettled` has a rule
     # (`settlements`). A config whose underlying settles otherwise cannot be
     # run at all, so it fails when it is read rather than hours into a
-    # backtest at the first expiry. A clock that names something other than
-    # an underlying has no contract facts to check and is `run_experiment`'s
-    # error, raised there and by identity.
+    # backtest at the first expiry -- the same named failure the lifecycle
+    # step would raise there. A clock that names something other than an
+    # underlying has no contract facts to check and is
+    # `_experiment_underlying`'s error, raised below.
     if clock.sel isa Underlying
         style = contract_spec(clock.sel).settlement
-        style === PMSettled || error(
-            "load_experiment: $(clock.sel) options are $style and no settlement rule " *
-            "serves that style; an experiment can only run a PMSettled underlying")
+        style === PMSettled || throw(UnsupportedSettlement(clock.sel, style))
     end
     venue_tbl = get(cfg, "venue", Dict{String,Any}())
     venue_tbl isa AbstractDict || error("load_experiment: [venue] must be a table")
     venue = build_venue(Dict{String,Any}(venue_tbl))
     outputs = haskey(cfg, "outputs") ?
         build_output_spec(Dict{String,Any}(cfg["outputs"])) : OutputSpec()
-    return Experiment(; name=name, agent=agent, data=data, clock=clock,
-                       from=from, to=to, fill_rule=venue.fill_rule,
-                       cost_model=venue.cost_model, outputs=outputs)
+    exp = Experiment(; name=name, agent=agent, data=data, clock=clock,
+                      from=from, to=to, fill_rule=venue.fill_rule,
+                      cost_model=venue.cost_model, outputs=outputs)
+    # One experiment, one underlying -- asserted here so a config fails when
+    # it is read, and asserted again wherever the answer is used, because
+    # `Experiment` is public and a config is not the only way to build one.
+    _experiment_underlying(exp)
+    return exp
 end

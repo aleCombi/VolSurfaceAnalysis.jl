@@ -126,17 +126,28 @@ struct ExperimentResult
     metrics    :: NamedTuple
 end
 
-# The underlying an experiment ticks and trades on, from its clock. One
-# experiment is one underlying (`load_experiment` asserts a declared
-# policy underlying agrees), so this is also the underlying whose contract
-# facts identity projects. Identity and the runner share the check so that
-# a mis-specified clock reads the same either way, rather than surfacing as
-# a `MethodError` out of `contract_spec`.
+# The underlying an experiment ticks and trades on, and the assertion that
+# there is only one of it. The clock says *when* to step; fills resolve
+# prices per leg, so nothing but this check stops a policy trading an
+# underlying the clock never names.
+#
+# Identity, the loader and the runner all come through here, because all
+# three depend on the answer being single and they are reachable
+# independently: `Experiment` is a public kwarg constructor, so a config is
+# not the only way to build one, and identity projects this underlying's
+# contract facts. Checking only at load would leave a directly-built
+# experiment hashing one underlying's multiplier while trading another's --
+# the run id would then be wrong rather than merely coarse. A policy that
+# declares nothing statically cannot be checked, and is not.
 function _experiment_underlying(exp::Experiment)::Underlying
     u = exp.clock.sel
     u isa Underlying || error(
-        "run_experiment: the clock selector must be an Underlying (an experiment ticks " *
-        "on an underlying's grid), got $(typeof(u)) for experiment $(exp.name)")
+        "experiment $(exp.name): the clock selector must be an Underlying (an experiment " *
+        "ticks on an underlying's grid), got $(typeof(u))")
+    declared = declared_underlyings(exp.agent)
+    isempty(declared) || u in declared || error(
+        "experiment $(exp.name): the agent declares $(join(string.(declared), ", ")) " *
+        "but the clock steps on $(u); an experiment ticks and trades on one underlying")
     return u
 end
 

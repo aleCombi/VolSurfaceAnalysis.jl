@@ -344,6 +344,32 @@ end
     @test VolSurfaceAnalysis._hash16(VolSurfaceAnalysis._canonical(d)) == core_hash(base)
 end
 
+@testset "identity: a policy trading another underlying is refused, not hashed" begin
+    # `Experiment` is a public kwarg constructor, so a config is not the only
+    # way to build one and the loader's one-underlying assertion is not the
+    # only gate that matters. Identity projects the *clock* underlying's
+    # contract facts; a policy trading a different one would be hashed
+    # against the wrong multiplier -- a wrong run id, not a coarse one. The
+    # id must not exist rather than be wrong.
+    base = load_experiment_str(_id_toml())
+    elsewhere = StaticAgent(DailyShortStrangle(underlying = Underlying("QQQ"),
+                                               entry_time = Time(15, 45),
+                                               expiry_interval = Day(1),
+                                               put_delta = 0.2, call_delta = 0.2,
+                                               quantity = 1))
+    mismatched = Experiment(name="crossed", agent=elsewhere, data=base.data,
+                            clock=base.clock, from=base.from, to=base.to)
+    for f in (core_hash, full_hash)
+        err = try f(mismatched); nothing catch e; e end
+        @test err isa ErrorException
+        @test occursin("QQQ", err.msg) && occursin("SPY", err.msg)
+    end
+    # and the agreeing spelling of the same experiment hashes.
+    agreed = Experiment(name="crossed", agent=base.agent, data=base.data,
+                        clock=base.clock, from=base.from, to=base.to)
+    @test core_hash(agreed) isa String
+end
+
 @testset "identity: a clock that names no underlying is the runner's error" begin
     # There are no contract facts to resolve for a currency, and the failure
     # a reader should see is the one `run_experiment` gives for the same

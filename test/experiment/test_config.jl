@@ -346,8 +346,14 @@ end
         # a contract fact, so the loader can see it from the clock alone.
         cfg = replace(_CFG_HEAD, "SPY" => ticker(_CFG_AM))
         err = try load_experiment_str(cfg); nothing catch e; e end
-        @test err isa ErrorException
-        @test occursin(ticker(_CFG_AM), err.msg) && occursin("AMSettled", err.msg)
+        # The same named failure the lifecycle step raises, not a bare error:
+        # the loader and `settlements` refuse one condition, so a reader who
+        # has met one has met the other.
+        @test err isa UnsupportedSettlement
+        @test err.underlying == _CFG_AM && err.style === AMSettled
+        msg = sprint(showerror, err)
+        @test occursin("UnsupportedSettlement", msg)
+        @test occursin(ticker(_CFG_AM), msg) && occursin("AMSettled", msg)
         # The PM-settled spelling of the same config loads.
         @test load_experiment_str(_CFG_HEAD) isa Experiment
     end

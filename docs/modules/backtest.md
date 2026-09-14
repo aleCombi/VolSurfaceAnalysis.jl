@@ -263,7 +263,8 @@ says leave it open and say so; `UnsupportedSettlement` names a contract
 class the codebase cannot settle at all, which every later tick would
 answer identically. Finishing the run would report a position that was
 never valued as though it were merely still open. It is a configuration
-error, and `load_experiment` refuses such a config when it reads it.
+error, and `load_experiment` throws the same type when it reads such a
+config, so a reader who has met one has met the other.
 
 Early assignment and physical delivery are not modelled: SPY
 cash-settles at intrinsic here instead of delivering shares. Marking a
