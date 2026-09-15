@@ -28,7 +28,8 @@ using DuckDB: DBInterface
 #                       no special case; the curve itself is not exported
 #                       under schema 5 and so is not compared here.
 # - manifest.parquet    `n_events`, `n_orders`, `n_opens`, `n_closes`,
-#                       `n_marked`, `n_unmarked`, `n_metrics`, `n_failures`
+#                       `n_marked`, `n_unmarked`, `n_metrics`,
+#                       `n_mark_failures` and `n_settlement_failures`
 #                       exactly (NULL == NULL).
 # A row present on one side only is a difference.
 
@@ -103,7 +104,7 @@ end
 
 function compare_manifest()
     fields = ["n_events", "n_orders", "n_opens", "n_closes", "n_marked", "n_unmarked",
-              "n_metrics", "n_failures"]
+              "n_metrics", "n_mark_failures", "n_settlement_failures"]
     ra = _rows("SELECT $(join(fields, ", ")) FROM $(_pq(joinpath(dir_a, "manifest.parquet")))")
     rb = _rows("SELECT $(join(fields, ", ")) FROM $(_pq(joinpath(dir_b, "manifest.parquet")))")
     if length(ra) != 1 || length(rb) != 1

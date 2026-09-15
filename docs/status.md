@@ -665,6 +665,50 @@ decision named here now lives in the module docs.
   `metrics.parquet` were each refused by name, and swapping the recorded
   `Manifest.toml` reproduced with zero divergences while reporting
   `BusinessDays 0.0.1 -> 0.9.25`.
+  **The second-pass review commit landed 2026-09-15**, closing the four
+  findings a re-review of that commit raised. The blocker: *failure
+  membership was interchangeable across stages*. A single `n_failures`
+  policed the table's size and nothing inside it, and the curve/failure
+  agreement ignores every non-mark row, so changing one of two mark
+  failures at an unmarked instant into a settlement failure -- or deleting
+  a settlement failure and duplicating a mark failure -- kept the count,
+  kept the agreement, and moved what the run is recorded to have asked.
+  The manifest now keeps **one count per stage** (`n_mark_failures`,
+  `n_settlement_failures`), `stage` is a closed vocabulary refused on both
+  the write and the load path, and the agreement check is explicitly the
+  mark rows' guard while the settlement count guards the rest.
+  `RUN_SCHEMA_VERSION` moves to **8**: a schema-7 manifest wrote only the
+  total, so it cannot say what its stages held and would be silently
+  exempt from the new check -- it is refused by version like every earlier
+  one, with no migration. Three non-blocking findings went with it. The
+  reproduction report said "neither names a version" whenever two
+  `Manifest.toml` digests differed with the version maps agreeing, which
+  is false when both documents name many versions and only a comment, the
+  project hash or a dependency path moved; it now says the documents
+  differ with no recorded version changes. The version map was keyed by
+  package **name**, so two distinct packages sharing a name (which Pkg
+  supports) collapsed and a version move in the overwritten one vanished
+  from the report; it is keyed by UUID now, with the name kept for display
+  and the uuid printed when the name does not identify the package alone.
+  And `persistence.md` contradicted the code in three places -- one count
+  per output table (there is no order-leg count and the curve has two), no
+  earlier schema holding a curve or failure table (6 and 7 both do, they
+  just lack the evidence a later reader checks), and persistence not
+  interpreting the dependency document (it reads it for provenance) --
+  all three corrected.
+  **Gate: 4005 passed, 0 failed, 0 errored, 0 broken** (2m12s), up from
+  3,978. The witness was re-exercised again: the schema-7 folder was
+  refused by name, re-saved from the same config at schema 8 -- same
+  `run_id=f402707b152aab0c`, 13,204 events, 2,201 orders, USD 29,942.23
+  cash, `sharpe` 1.0389, 2,515 of 2,516 sessions marked, 2 retained mark
+  failures -- and `reproduce` reported `:reproduced` with **zero
+  divergences** in 96 s, both environments identical. On copies in `/tmp`,
+  retagging one of the two mark failures as a settlement failure was
+  refused (`n_mark_failures says 2 ... hold 1`), and against a consistent
+  baseline carrying one settlement failure, deleting it while duplicating
+  a mark failure -- the row count unchanged at three -- was refused too,
+  as was deleting it on its own (`n_settlement_failures says 1 ... hold
+  0`) and retagging a row to a stage no pass emits.
 
 ## Backlog
 
@@ -711,7 +755,7 @@ intended direction, but not currently in flight.
 - **Reproducibility harness for stored runs.** The comparison itself
   landed as `reproduce(store, run_id)`; what remains is the harness around
   it. Opt-in, data-gated integration tests that reproduce every stored
-  schema-7 run and skip cleanly where the source data is absent (a
+  schema-8 run and skip cleanly where the source data is absent (a
   data-less machine must *skip*, while an invoked reproduction on one
   reports inability rather than success); `scripts/revalidate_runs.jl`, a
   utility that refreshes a run's `commit_sha` / `dirty` after a successful

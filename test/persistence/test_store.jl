@@ -228,12 +228,15 @@ end
             @test r.n_closes == n_closes(res.ledger) == 2
             @test r.n_marked == n_marked(res.curve) == 3
             @test r.n_unmarked == n_unmarked(res.curve) == 0
-            # Every output table has a count: the two the ledger and the
-            # curve do not cover are what keep a truncated metrics or
-            # failures table different from one that recorded nothing.
+            # Every output table has membership evidence: the ones the
+            # ledger and the curve do not cover are what keep a truncated
+            # metrics or failures table different from one that recorded
+            # nothing. The failures are counted stage by stage, so a row
+            # cannot change stage under a total that never moves.
             @test r.n_metrics == length(res.metrics) == 7
-            @test r.n_failures == length(res.failures) == 0
-            @test r.schema_version == 7
+            @test r.n_mark_failures == 0 && r.n_settlement_failures == 0
+            @test !(:n_failures in propertynames(r))
+            @test r.schema_version == 8
             @test !(:n_positions in propertynames(r))
             @test !(:window_end_spot in propertynames(r))
         end
@@ -584,14 +587,14 @@ end
     end
 end
 
-@testset "manifest schema_version: written as 7, and load_run refuses other versions" begin
+@testset "manifest schema_version: written as 8, and load_run refuses other versions" begin
     mktempdir() do tmp
         res = _build_smoke_result()
         with_run_store(joinpath(tmp, "kb")) do store
             id = save_run(store, res, _SMOKE_CONFIG)
             path = replace(joinpath(run_dir(store, id), "manifest.parquet"), "\\" => "/")
             r = first(collect(DBInterface.execute(store.con, "SELECT schema_version FROM '$path'")))
-            @test r.schema_version == VolSurfaceAnalysis.RUN_SCHEMA_VERSION == 7
+            @test r.schema_version == VolSurfaceAnalysis.RUN_SCHEMA_VERSION == 8
             @test load_run(store, id) isa ExperimentResult
 
             # a manifest written before the column existed
@@ -632,11 +635,28 @@ end
             # cannot tell a truncated output table from an empty one. That
             # is a fact about the record, not about the reader, and no
             # migration can add evidence a save never wrote down.
-            DBInterface.execute(store.con, "CREATE OR REPLACE TABLE m AS SELECT * EXCLUDE (schema_version, n_metrics, n_failures), 6::INTEGER AS schema_version FROM '$path'")
+            DBInterface.execute(store.con, "CREATE OR REPLACE TABLE m AS SELECT * EXCLUDE (schema_version, n_metrics, n_mark_failures, n_settlement_failures), 6::INTEGER AS schema_version FROM '$path'")
             DBInterface.execute(store.con, "COPY m TO '$path' (FORMAT PARQUET)")
             err = try load_run(store, id); nothing catch e; e end
             @test err isa ArgumentError
             @test occursin("schema_version 6", err.msg) && occursin("rerun the config", err.msg)
+
+            # And schema 7, the version just before this one: it counted the
+            # failures as one total, which cannot tell a settlement failure
+            # from a mark failure. A manifest that only ever wrote the total
+            # down is exempt from the per-stage check unless the version
+            # refuses it outright, so it is refused outright.
+            id2 = save_run(store, res, _SMOKE_CONFIG)
+            path2 = _st_pq(joinpath(run_dir(store, id2), "manifest.parquet"))
+            DBInterface.execute(store.con,
+                "CREATE OR REPLACE TABLE m AS SELECT * EXCLUDE (schema_version, " *
+                "n_mark_failures, n_settlement_failures), " *
+                "(n_mark_failures + n_settlement_failures)::BIGINT AS n_failures, " *
+                "7::INTEGER AS schema_version FROM '$path2'")
+            DBInterface.execute(store.con, "COPY m TO '$path2' (FORMAT PARQUET)")
+            err = try load_run(store, id2); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("schema_version 7", err.msg) && occursin("rerun the config", err.msg)
         end
         GC.gc()
     end
@@ -922,7 +942,8 @@ end
         res = _build_smoke_result()
         for (col, bad) in (("n_events", 9), ("n_orders", 3), ("n_opens", 1),
                            ("n_closes", 5), ("n_marked", 2), ("n_unmarked", 7),
-                           ("n_metrics", 4), ("n_failures", 2))
+                           ("n_metrics", 4), ("n_mark_failures", 2),
+                           ("n_settlement_failures", 2))
             with_run_store(joinpath(tmp, "kb_" * col)) do store
                 id = save_run(store, res, _SMOKE_CONFIG)
                 path = _st_pq(joinpath(run_dir(store, id), "manifest.parquet"))
@@ -1065,7 +1086,7 @@ end
             DBInterface.execute(store.con, "COPY f TO '$path' (FORMAT PARQUET)")
             err = try load_run(store, id); nothing catch e; e end
             @test err isa ArgumentError
-            @test occursin("n_failures", err.msg) && occursin("hold 2", err.msg)
+            @test occursin("n_settlement_failures", err.msg) && occursin("hold 0", err.msg)
         end
         GC.gc()
 
@@ -1081,7 +1102,96 @@ end
             DBInterface.execute(store.con, "COPY f TO '$path' (FORMAT PARQUET)")
             err = try load_run(store, id); nothing catch e; e end
             @test err isa ArgumentError
-            @test occursin("n_failures", err.msg) && occursin("hold 2", err.msg)
+            @test occursin("n_mark_failures", err.msg) && occursin("hold 1", err.msg)
+        end
+        GC.gc()
+    end
+end
+
+@testset "load_run: failure membership is not interchangeable across stages" begin
+    mktempdir() do tmp
+        broken = DateTime(2024, 1, 17, 21, 0)
+        # One settlement failure and two mark failures at one broken
+        # session: the shape a single total cannot police, because every
+        # rearrangement below keeps the number of rows exactly.
+        fs = [RunFailure(DateTime(2024, 1, 16, 14, 0), :settlement,
+                         "SPY 2024-01-16T21:00:00 470.0P lot@2", :unexpected_gap),
+              _st_mark_failure(broken, "SPY 2024-01-19T21:00:00 480.0P lot@1"),
+              _st_mark_failure(broken, "SPY 2024-01-19T21:00:00 490.0C lot@3")]
+        curve = MarkedCurve([DateTime(2024, 1, 16, 21, 0)], [0.0], [broken], [:no_mark])
+        res = _build_smoke_result(; curve = curve, failures = fs)
+
+        # (1) One of the two mark failures retagged as a settlement failure.
+        # The total is unchanged, the unmarked session still keeps a mark
+        # failure carrying its reason, and the agreement check -- which sees
+        # mark rows only -- is satisfied. Only the per-stage counts know a
+        # question was moved from one pass to the other.
+        with_run_store(joinpath(tmp, "kb_retag")) do store
+            id = save_run(store, res, _SMOKE_CONFIG)
+            path = _st_pq(joinpath(run_dir(store, id), "failures.parquet"))
+            DBInterface.execute(store.con,
+                "CREATE OR REPLACE TABLE f AS SELECT * EXCLUDE (stage), " *
+                "CASE WHEN subject LIKE '%480.0P%' THEN 'settlement' ELSE stage END " *
+                "AS stage FROM '$path'")
+            DBInterface.execute(store.con, "COPY f TO '$path' (FORMAT PARQUET)")
+            # The row count is exactly what it was.
+            @test length(_st_rows(store, joinpath(run_dir(store, id), "failures.parquet"))) == 3
+            err = try load_run(store, id); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("n_mark_failures", err.msg) &&
+                  occursin("says 2", err.msg) && occursin("hold 1", err.msg)
+        end
+        GC.gc()
+
+        # (2) The settlement failure deleted and an existing mark failure
+        # duplicated in its place. Same number of rows again, the curve
+        # still agrees with the mark rows instant and reason, and the
+        # settlement question simply vanishes. Both per-stage counts are
+        # violated -- one row too many under :mark, one too few under
+        # :settlement -- and the first of them names the defect. (Deleting
+        # the settlement row on its own is the case above, which names
+        # `n_settlement_failures`.)
+        with_run_store(joinpath(tmp, "kb_swap")) do store
+            id = save_run(store, res, _SMOKE_CONFIG)
+            path = _st_pq(joinpath(run_dir(store, id), "failures.parquet"))
+            DBInterface.execute(store.con,
+                "CREATE OR REPLACE TABLE f AS " *
+                "SELECT * FROM '$path' WHERE stage <> 'settlement' " *
+                "UNION ALL SELECT * FROM '$path' WHERE subject LIKE '%490.0C%'")
+            DBInterface.execute(store.con, "COPY f TO '$path' (FORMAT PARQUET)")
+            @test length(_st_rows(store, joinpath(run_dir(store, id), "failures.parquet"))) == 3
+            err = try load_run(store, id); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("n_mark_failures", err.msg) &&
+                  occursin("says 2", err.msg) && occursin("hold 3", err.msg)
+        end
+        GC.gc()
+
+        # And a stage no pass emits is refused outright: the counts cover
+        # exactly the stages the writer names, so a row outside them is a
+        # row nothing counts.
+        with_run_store(joinpath(tmp, "kb_stage")) do store
+            id = save_run(store, res, _SMOKE_CONFIG)
+            path = _st_pq(joinpath(run_dir(store, id), "failures.parquet"))
+            DBInterface.execute(store.con,
+                "CREATE OR REPLACE TABLE f AS SELECT * EXCLUDE (stage), " *
+                "CASE WHEN stage = 'settlement' THEN 'rollover' ELSE stage END " *
+                "AS stage FROM '$path'")
+            DBInterface.execute(store.con, "COPY f TO '$path' (FORMAT PARQUET)")
+            err = try load_run(store, id); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("rollover", err.msg) && occursin(":mark", err.msg) &&
+                  occursin(":settlement", err.msg)
+        end
+        GC.gc()
+
+        # The writer refuses one too, before it can be written down.
+        with_run_store(joinpath(tmp, "kb_write")) do store
+            bad = _build_smoke_result(; curve = curve,
+                failures = [RunFailure(broken, :rollover, "SPY", :no_mark)])
+            err = try save_run(store, bad, _SMOKE_CONFIG); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("rollover", err.msg) && occursin(":mark", err.msg)
         end
         GC.gc()
     end
@@ -1458,4 +1568,62 @@ end
         end
         GC.gc()
     end
+end
+
+@testset "dependency provenance: packages are matched by UUID, not by name" begin
+    # Pkg allows two distinct packages with the same name in one
+    # environment. Keyed by name, the later block overwrites the earlier
+    # one and a version move in the earlier package leaves the report
+    # entirely -- the report would say the documents agree on versions
+    # while one of them moved.
+    stored = """
+    julia_version = "1.12.0"
+    manifest_format = "2.0"
+
+    [[deps.Widget]]
+    uuid = "11111111-1111-1111-1111-111111111111"
+    version = "1.0.0"
+
+    [[deps.Widget]]
+    uuid = "22222222-2222-2222-2222-222222222222"
+    version = "2.0.0"
+    """
+    fresh = replace(stored, "version = \"1.0.0\"" => "version = \"1.5.0\"")
+    changed = VolSurfaceAnalysis._deps_changes(stored, fresh)
+    @test length(changed) == 1
+    moved = only(changed)
+    @test occursin("Widget", moved) && occursin("1.0.0", moved) && occursin("1.5.0", moved)
+    # The name alone does not say which Widget moved, so the uuid is on the
+    # line; the package that did not move is not reported at all.
+    @test occursin("11111111-1111-1111-1111-111111111111", moved)
+    @test !occursin("2.0.0", moved)
+
+    # A name is still just a display label when it is unambiguous.
+    one = """
+    [[deps.BusinessDays]]
+    uuid = "33333333-3333-3333-3333-333333333333"
+    version = "0.9.25"
+    """
+    @test only(VolSurfaceAnalysis._deps_changes(one,
+            replace(one, "0.9.25" => "0.9.26"))) == "BusinessDays 0.9.25 -> 0.9.26"
+end
+
+@testset "dependency provenance: documents that differ with no version change say so" begin
+    # Two documents that name many versions, none of which moved: a
+    # comment, the project hash or a dependency path changed. Reporting
+    # that "neither names a version" would be false -- both name one.
+    stored = """
+    julia_version = "1.12.0"
+    project_hash = "aaaa"
+
+    [[deps.BusinessDays]]
+    uuid = "33333333-3333-3333-3333-333333333333"
+    version = "0.9.25"
+    """
+    fresh = replace(stored, "aaaa" => "bbbb")
+    msg = only(VolSurfaceAnalysis._deps_changes(stored, fresh))
+    @test occursin("documents differ", msg) && occursin("no recorded version changes", msg)
+    @test !occursin("neither names a version", msg)
+    # Identical documents report nothing at all.
+    @test isempty(VolSurfaceAnalysis._deps_changes(stored, stored))
 end

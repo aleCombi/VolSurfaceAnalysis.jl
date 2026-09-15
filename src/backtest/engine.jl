@@ -98,6 +98,13 @@ struct RunFailure
     reason  :: Symbol
 end
 
+# The whole vocabulary of `stage`, in the canonical order failures sort by.
+# Two passes ask questions and no third one does, so the column is closed:
+# a stored failure naming any other stage belongs to no pass this code runs
+# and is a defect, not a row to keep. It lives beside `RunFailure` because
+# the producers define it; persistence checks stored rows against it.
+const RUN_FAILURE_STAGES = (:mark, :settlement)
+
 # The subject of a failure about one contract, and about one lot of it.
 # Two lots of the same contract ask two questions at one instant; the
 # opening fill id is what distinguishes their answers.

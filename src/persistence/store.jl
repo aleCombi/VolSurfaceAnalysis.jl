@@ -35,11 +35,12 @@
 # every leg row is accounted for, so a changed `order_leg_id`, a shifted
 # `leg_idx` or a leg belonging to no order is named rather than sorted
 # away. The manifest's counts are checked against what was rebuilt -- every
-# output table has one, so recorded absence and truncation stay different
-# facts (design rule 7) -- and the curve's unmarked entries against the
-# failures, instant *and* reason, so a truncated table, a mixed save or
-# contradictory evidence is caught even when every individual constructor
-# is satisfied.
+# output table has membership evidence, and the failures have one count per
+# stage, so recorded absence, truncation and a row moved from one stage to
+# another stay different facts (design rule 7) -- and the curve's unmarked
+# entries against the mark-stage failures, instant *and* reason, so a
+# truncated table, a mixed save or contradictory evidence is caught even
+# when every individual constructor is satisfied.
 #
 # Run identity is `full_hash(result.experiment)` -- the canonical hash of
 # the resolved experiment (see experiment/identity.jl), not the raw TOML
@@ -58,7 +59,14 @@ using TOML
 # written under another version rather than rebuilding a result its files
 # cannot describe; the message says to rerun the config, because no
 # migration can recover a curve or a failure table that was never written.
-const RUN_SCHEMA_VERSION = 7
+const RUN_SCHEMA_VERSION = 8
+
+# The manifest column carrying the membership evidence for one failure
+# stage. One count per stage, not one for the table: a single total is
+# blind to a row that moved from one stage to another, and the two stages
+# are guarded by different things -- the mark rows by the curve they must
+# agree with, the settlement rows by nothing else at all.
+_failure_count_column(stage::Symbol)::String = "n_" * String(stage) * "_failures"
 
 """
     RunStore
@@ -224,12 +232,17 @@ does not supply provenance records an unknown, uncacheable run.
 the environment that produced the run rather than re-resolved here; its
 absence is [`MissingManifest`](@ref), raised before the run folder exists.
 
+A failure naming a stage no pass emits is refused rather than written: the
+manifest counts the failures stage by stage, so such a row would land in
+the record with no count covering it.
+
 Writes, as two inputs and five outputs:
 
 - `config.toml`, `Manifest.toml` -- the bytes passed in, verbatim.
 - `manifest.parquet` -- one row indexing the run: both hashes, the name,
-  the window, one count per output table, the code provenance, the write
-  time and the schema version.
+  the window, the membership counts (the ledger's four, the curve's two,
+  the metrics' one, and one per failure stage), the code provenance, the
+  write time and the schema version.
 - `metrics.parquet`, `events.parquet`, `orders.parquet`,
   `order_legs.parquet`, `failures.parquet` -- the run's outputs.
 - `curve.parquet` -- the marked curve, **only when the result carries
@@ -305,7 +318,7 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         n_marked BIGINT,
         n_unmarked BIGINT,
         n_metrics BIGINT,
-        n_failures BIGINT,
+        $(join(("$(_failure_count_column(s)) BIGINT" for s in RUN_FAILURE_STAGES), ",\n        ")),
         commit_sha VARCHAR,
         dirty BOOLEAN,
         written_at TIMESTAMP,
@@ -313,10 +326,13 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
     )"""
     # `n_marked` / `n_unmarked` are NULL when the run carries no curve at
     # all, which is a different fact from a curve that marked nothing.
-    # `n_metrics` / `n_failures` are never NULL: both tables are always
-    # written, so zero means "asked, and nothing to record" while a missing
-    # count would mean the index cannot say -- and an index that cannot say
-    # is exactly what lets a truncated table read as an empty one.
+    # `n_metrics` and the per-stage failure counts are never NULL: both
+    # tables are always written, so zero means "asked, and nothing to
+    # record" while a missing count would mean the index cannot say -- and
+    # an index that cannot say is exactly what lets a truncated table read
+    # as an empty one. The failures are counted per stage, because one
+    # total cannot tell a settlement failure from a mark failure and so
+    # accepts a record whose rows changed stage.
     cols = [
         "run_id"         => _str_sql(id),
         "core_hash"      => _str_sql(core_hash(exp)),
@@ -330,12 +346,17 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         "n_marked"       => c === nothing ? "NULL" : string(n_marked(c)),
         "n_unmarked"     => c === nothing ? "NULL" : string(n_unmarked(c)),
         "n_metrics"      => string(length(result.metrics)),
-        "n_failures"     => string(length(result.failures)),
+    ]
+    for s in RUN_FAILURE_STAGES
+        push!(cols, _failure_count_column(s) =>
+                    string(count(f -> f.stage === s, result.failures)))
+    end
+    append!(cols, [
         "commit_sha"     => _str_sql(commit_sha),
         "dirty"          => dirty ? "TRUE" : "FALSE",
         "written_at"     => _dt_sql(Dates.now(UTC)),
         "schema_version" => string(RUN_SCHEMA_VERSION),
-    ]
+    ])
     _write_parquet(store, joinpath(dir, "manifest.parquet"), schema, [_insert_sql(cols)])
 end
 
@@ -574,6 +595,16 @@ const _FAILURES_SCHEMA = """(
 
 function _write_failures(store::RunStore, dir::AbstractString, id::AbstractString,
                          failures::AbstractVector{RunFailure})
+    # The manifest counts the failures stage by stage, so a stage no pass
+    # emits would be written with no count covering it -- and a row nothing
+    # counts is exactly the membership hole the counts exist to close.
+    for f in failures
+        f.stage in RUN_FAILURE_STAGES || throw(ArgumentError(
+            "save_run: failure at $(f.at) names the stage :$(f.stage), but a " *
+            "run's failures come from the stages " *
+            "$(join((":" * String(s) for s in RUN_FAILURE_STAGES), ", ")); " *
+            "no pass asks a question under :$(f.stage)"))
+    end
     inserts = String[_insert_sql([
         "run_id"  => _str_sql(id),
         "instant" => _dt_sql(f.at),
@@ -612,10 +643,14 @@ the manifest's counts against what was rebuilt, naming the column and both
 values on a mismatch; every stored leg against the order that claims it,
 so a changed `order_leg_id`, a shifted `leg_idx` or a leg no order owns is
 named rather than sorted away; and the curve's unmarked entries against
-the failures, which must agree instant *and* reason. Every output table
-has a count, so a truncated table and a table that recorded nothing stay
-different facts (design rule 7): an empty `metrics.parquet` is a defect
-unless the run reported no metrics. NULL curve counts mean the run carried
+the **mark-stage** failures, which must agree instant *and* reason. Every
+output table has membership evidence, so a truncated table and a table
+that recorded nothing stay different facts (design rule 7): an empty
+`metrics.parquet` is a defect unless the run reported no metrics. The
+failures are counted **per stage** and their `stage` is a closed
+vocabulary, so a row retagged from one stage to another, or one naming a
+stage no pass emits, is refused too: a single total would accept both, and
+the curve answers for the mark rows only. NULL curve counts mean the run carried
 no curve and `curve.parquet` must be absent; zero counts mean a recorded
 curve with no entries of that kind, and the file must be there. Counts are
 consistency checks -- they expose a truncated table or a mixed save that
@@ -625,8 +660,8 @@ metric is right; a plausible but stale price loads.
 Throws `ArgumentError` if the run folder or any required file is missing,
 or if the manifest's `schema_version` is absent or differs from
 `RUN_SCHEMA_VERSION`: rerun its config to regenerate it. There is no
-migration -- no earlier schema holds a curve or a failure table to
-migrate from.
+migration -- an older manifest never wrote today's counts down, and a
+run's witness cannot be invented after the fact.
 """
 function load_run(store::RunStore, run_id::AbstractString)::ExperimentResult
     _assert_open(store)
@@ -652,7 +687,7 @@ function load_run(store::RunStore, run_id::AbstractString)::ExperimentResult
 
     ledger   = _load_ledger(store, dir)
     curve    = _load_curve(store, dir, manifest)
-    failures = _load_failures(store, dir)
+    failures = _load_failures(store, dir, run_id)
     metrics  = _load_metrics(store, dir)
 
     _check_counts(run_id, manifest, ledger, curve, metrics, failures)
@@ -678,12 +713,25 @@ function _check_counts(run_id, manifest, L::Ledger, curve::Union{MarkedCurve,Not
     _count_mismatch(run_id, "n_opens", manifest.n_opens, n_opens(L))
     _count_mismatch(run_id, "n_closes", manifest.n_closes, n_closes(L))
     # Membership evidence for the two tables no structural relationship
-    # covers. Without them an empty `metrics.parquet` reads as a run that
+    # covers. Without it an empty `metrics.parquet` reads as a run that
     # reported no metrics, and a deleted settlement failure -- or one of two
     # mark failures at a session that keeps the other -- reads as a question
     # nobody asked.
-    for (col, stored, actual) in (("n_metrics", manifest.n_metrics, length(metrics)),
-                                  ("n_failures", manifest.n_failures, length(failures)))
+    #
+    # The failures are counted **per stage**. A single total is blind to
+    # membership *within* the table: it accepts a record that keeps the
+    # number of rows and moves one between stages, and the two stages are
+    # answered for by different things -- a mark row by the curve instant it
+    # must agree with, a settlement row by nothing else at all. So retagging
+    # one of two mark failures as a settlement failure, or deleting a
+    # settlement row and duplicating a mark row, would both pass a total and
+    # every structural check there is; only a count per stage knows.
+    counts = Pair{String,Int}["n_metrics" => length(metrics)]
+    for s in RUN_FAILURE_STAGES
+        push!(counts, _failure_count_column(s) => count(f -> f.stage === s, failures))
+    end
+    for (col, actual) in counts
+        stored = getproperty(manifest, Symbol(col))
         stored === nothing && throw(ArgumentError(
             "load_run: run $run_id manifest records no $col; without it a " *
             "truncated table reads as one that recorded nothing -- rerun " *
@@ -715,6 +763,12 @@ end
 # whose every failure says `:unexpected_gap`, which is two tables
 # describing two different runs. A truncation, or a rewritten reason on
 # either side, breaks the agreement.
+#
+# It sees the **mark** rows only, deliberately: a settlement failure is
+# about a lot the lifecycle could not close, and no curve entry answers for
+# one. Their membership is `n_settlement_failures`, and the mark rows'
+# is `n_mark_failures`, which is what stops a row from being moved between
+# the two stages under a total that never changes.
 function _check_curve_failure_agreement(run_id, curve::Union{MarkedCurve,Nothing},
                                         failures::AbstractVector{RunFailure})
     reasons_at = Dict{DateTime,Vector{Symbol}}()
@@ -761,7 +815,11 @@ function _load_manifest(store::RunStore, dir::AbstractString)
     version = has(:schema_version) ? Int(r.schema_version) : 0
     version == RUN_SCHEMA_VERSION || return (schema_version = version,)
     num(col) = has(col) ? Int(getproperty(r, col)) : nothing
-    return (schema_version = version,
+    # One entry per failure stage, under the column the writer names it by,
+    # so a stage added to `RUN_FAILURE_STAGES` needs no second edit here.
+    stage_counts = NamedTuple{Tuple(Symbol(_failure_count_column(s)) for s in RUN_FAILURE_STAGES)}(
+        Tuple(num(Symbol(_failure_count_column(s))) for s in RUN_FAILURE_STAGES))
+    return merge((schema_version = version,
             core_hash  = String(r.core_hash),
             n_events   = num(:n_events),
             n_orders   = num(:n_orders),
@@ -770,9 +828,8 @@ function _load_manifest(store::RunStore, dir::AbstractString)
             n_marked   = num(:n_marked),
             n_unmarked = num(:n_unmarked),
             n_metrics  = num(:n_metrics),
-            n_failures = num(:n_failures),
             commit_sha = has(:commit_sha) ? String(r.commit_sha) : "",
-            dirty      = has(:dirty) ? Bool(r.dirty) : true)
+            dirty      = has(:dirty) ? Bool(r.dirty) : true), stage_counts)
 end
 
 # One event from its row, through the kind's constructor so every
@@ -914,12 +971,26 @@ end
 
 # In the run's own canonical order, which is what makes a stored failure
 # table and a freshly produced one comparable row by row.
-function _load_failures(store::RunStore, dir::AbstractString)::Vector{RunFailure}
+#
+# `stage` is a closed vocabulary, checked here: a row naming a stage no
+# pass emits is a defect, not a question this run asked. It has to be
+# refused rather than counted, because the per-stage counts cover exactly
+# the stages the writer emits -- a row outside them is a row nothing counts.
+function _load_failures(store::RunStore, dir::AbstractString,
+                        run_id::AbstractString)::Vector{RunFailure}
     path = joinpath(dir, "failures.parquet")
     rows = _select_rows(store, path,
         "SELECT * FROM '$(_sql_pq_path(path))' ORDER BY instant, stage, subject, reason")
-    return RunFailure[RunFailure(DateTime(r.instant), Symbol(String(r.stage)),
-                                 String(r.subject), Symbol(String(r.reason))) for r in rows]
+    out = RunFailure[RunFailure(DateTime(r.instant), Symbol(String(r.stage)),
+                                String(r.subject), Symbol(String(r.reason))) for r in rows]
+    for f in out
+        f.stage in RUN_FAILURE_STAGES || throw(ArgumentError(
+            "load_run: run $run_id records a failure at $(f.at) under the " *
+            "stage :$(f.stage), but a run's failures come from the stages " *
+            "$(join((":" * String(s) for s in RUN_FAILURE_STAGES), ", ")); " *
+            "no pass asks a question under :$(f.stage)"))
+    end
+    return out
 end
 
 # The metrics the run reported, read back in the order it wrote them. The
@@ -982,7 +1053,9 @@ What [`reproduce`](@ref) found. `status` is one of:
 `stored_code` and `fresh_code` are the recorded and the running
 `(commit_sha, dirty)`; `stored_deps` and `fresh_deps` are the digests of
 the two dependency documents and `deps_changed` names every package whose
-version moved between them. Dataset versioning is deliberately not in
+version moved between them, matched by UUID rather than by name, because
+two distinct packages may share a name. Two documents that differ while
+every recorded version agrees say that instead. Dataset versioning is deliberately not in
 identity (see the module doc), so a divergence attributes to code or
 dependencies by elimination -- which needs **both** environments named,
 not only both commits. Identical commits with different dependencies are a
@@ -1031,12 +1104,18 @@ end
 _deps_digest(toml::AbstractString)::String =
     isempty(toml) ? "(unknown)" : bytes2hex(sha256(codeunits(String(toml))))[1:16]
 
-# Package name => resolved version, plus the Julia version the environment
+# UUID => (name, resolved version), plus the Julia version the environment
 # was resolved for. Manifest format 2.0 nests packages under `deps`;
 # format 1.0 puts them at the top level. A stdlib entry carries no version
 # and contributes nothing to name.
-function _deps_versions(toml::AbstractString)::Dict{String,String}
-    out = Dict{String,String}()
+#
+# The key is the **UUID**, not the name. Pkg allows two distinct packages
+# with the same name in one environment (see the Conventions section of the
+# module doc), and a map keyed by name collapses them: the later entry
+# overwrites the earlier one, so a version change in the earlier package
+# disappears from the report entirely. The name stays, for display.
+function _deps_versions(toml::AbstractString)::Dict{String,Tuple{String,String}}
+    out = Dict{String,Tuple{String,String}}()
     isempty(toml) && return out
     parsed = try
         TOML.parse(String(toml))
@@ -1044,7 +1123,7 @@ function _deps_versions(toml::AbstractString)::Dict{String,String}
         return out
     end
     jv = get(parsed, "julia_version", nothing)
-    jv isa AbstractString && (out["julia"] = String(jv))
+    jv isa AbstractString && (out["julia_version"] = ("julia", String(jv)))
     entries = get(parsed, "deps", parsed)
     entries isa AbstractDict || return out
     for (name, es) in entries
@@ -1052,22 +1131,37 @@ function _deps_versions(toml::AbstractString)::Dict{String,String}
         for e in es
             e isa AbstractDict || continue
             v = get(e, "version", nothing)
-            v isa AbstractString && (out[String(name)] = String(v))
+            v isa AbstractString || continue
+            u = get(e, "uuid", nothing)
+            # A package with no uuid at all is not something Pkg writes; key
+            # it by name so it is still reported rather than dropped.
+            out[u isa AbstractString ? String(u) : "name:" * String(name)] =
+                (String(name), String(v))
         end
     end
     return out
 end
 
 # One line per package that moved, `absent` naming either side that does
-# not have it at all. Two documents that differ but name no version at all
-# (unparseable, or empty) still say so rather than reading as identical.
+# not have it at all. Packages are matched by UUID; the uuid joins the line
+# only when the name alone would not say which package moved, which is the
+# whole reason the map is not keyed by name.
+#
+# Two documents that differ while their version maps agree say exactly
+# that: many versions may be recorded and none of them moved, and only a
+# comment, the project hash or a dependency path changed.
 function _deps_changes(stored::AbstractString, fresh::AbstractString)::Vector{String}
     s, f = _deps_versions(stored), _deps_versions(fresh)
-    changed = ["$n $(get(s, n, "absent")) -> $(get(f, n, "absent"))"
-               for n in sort!(collect(union(keys(s), keys(f))))
-               if get(s, n, nothing) != get(f, n, nothing)]
+    ks = collect(union(keys(s), keys(f)))
+    name_of(k) = first(get(s, k, get(f, k, ("?", ""))))
+    version_of(d, k) = haskey(d, k) ? last(d[k]) : "absent"
+    shared = Set(n for n in unique(name_of.(ks)) if count(==(n), name_of.(ks)) > 1)
+    sort!(ks; by = k -> (name_of(k), k))
+    changed = [name_of(k) * (name_of(k) in shared ? " [$k]" : "") * " " *
+               version_of(s, k) * " -> " * version_of(f, k)
+               for k in ks if version_of(s, k) != version_of(f, k)]
     if isempty(changed) && _deps_digest(stored) != _deps_digest(fresh)
-        return ["the two dependency documents differ but neither names a version"]
+        return ["the two dependency documents differ; no recorded version changes"]
     end
     return changed
 end

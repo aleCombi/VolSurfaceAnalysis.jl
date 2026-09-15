@@ -131,32 +131,61 @@ failures recorded at that instant. `load_run` checks both. Instants alone
 would accept a curve reporting `:no_mark` at a session whose every failure
 says `:unexpected_gap` -- two tables describing two different runs.
 
+The agreement sees the **mark** rows only, and that is the boundary
+between the two guards: a settlement failure is about a lot the lifecycle
+could not close, and no curve entry answers for one. The settlement rows'
+membership is their own count, and `stage` is a **closed vocabulary** --
+the two stages the producers emit and no others -- so a row naming a third
+stage is refused rather than counted as something. Without both of those,
+membership is interchangeable across stages: retagging one of two mark
+failures as a settlement failure, or deleting a settlement row and
+duplicating a mark row, keeps the number of rows, keeps the curve's
+agreement with the mark rows, and moves a question from one pass to
+another with nothing to notice.
+
 ### Counts, and NULL versus zero
 
-The manifest keeps **one count per output table** and `load_run` **checks
-every one** against what it rebuilt, naming the column and both values on a
-mismatch. They are cheap and they catch the one defect the per-record
-constructors cannot see: a truncated table, or a mixed save that every
-individual check accepts. They are consistency checks, not proof that any
-price or metric is right.
+The manifest keeps **membership evidence for every output table**, and
+`load_run` **checks every count** against what it rebuilt, naming the
+column and both values on a mismatch. The counts do not map one-to-one
+onto the tables: the ledger has four, the curve two, the metrics one, and
+the failures one **per stage**. The order legs have none, because they are
+not a membership question a count answers -- every leg row is accounted
+for against the order that claims it, by identity and arithmetic. The
+counts are cheap and they catch the one defect the per-record constructors
+cannot see: a truncated table, or a mixed save that every individual check
+accepts. They are consistency checks, not proof that any price or metric
+is right.
 
 The coverage has to be complete, because a count is the only membership
 evidence a table with no structural relationship has. The ledger counts
 are checked against the rebuilt ledger and the curve counts against the
-stored curve; `n_metrics` and `n_failures` are what keep an empty
-`metrics.parquet` from reading as a run that reported no metrics, and a
-deleted settlement failure -- which no curve entry answers for -- from
-reading as a question nobody asked. Deleting one of two mark failures at a
-session that keeps the other passes every structural check there is; only
-the count knows. A truncated record is not an empty one (design rule 7).
+stored curve; the metric count and the per-stage failure counts are what
+keep an empty `metrics.parquet` from reading as a run that reported no
+metrics, and a deleted settlement failure -- which no curve entry answers
+for -- from reading as a question nobody asked. Deleting one of two mark
+failures at a session that keeps the other passes every structural check
+there is; only the count knows. A truncated record is not an empty one
+(design rule 7).
+
+The failures are counted **per stage** for the same reason and one step
+further in: a single total polices the table's size and nothing inside it.
+It accepts every rearrangement that keeps the row count -- a mark failure
+retagged as a settlement failure at an unmarked instant that keeps
+another, or a settlement row deleted and a mark row duplicated -- and both
+of those change what the run is recorded to have asked. One count per
+stage is what makes the stages non-interchangeable, and the closed `stage`
+vocabulary is what keeps a row from escaping every count by naming a stage
+no pass emits. The writer refuses such a failure too, before it reaches
+the folder.
 
 NULL curve counts mean the run recorded no curve, and `curve.parquet` must
 then be absent; zero means a recorded curve with no entries of that kind,
 and the file must be present. An absent curve and a present-but-empty one
 stay different facts on disk, in the file list and in SQL alike.
-`n_metrics` and `n_failures` are never NULL: both tables are always
-written, so zero means "asked, and nothing to record", and a manifest that
-cannot say is itself the defect.
+`n_metrics` and the per-stage failure counts are never NULL: both tables
+are always written, so zero means "asked, and nothing to record", and a
+manifest that cannot say is itself the defect.
 
 ### `reproduce`: the other operation
 
@@ -317,13 +346,20 @@ projection). Version 3 was the ledger: `positions.parquet` gave way to
 `PnLSeries` type they exported and `n_marked` joined `n_unmarked`.
 Version 6 is the persistence split: `Manifest.toml`, `curve.parquet` and
 `failures.parquet` arrive and the load path stops recomputing. Version 7
-completes the index over them: `n_metrics` and `n_failures` join the
-manifest, so every output table has membership evidence and a truncated
-one stops reading as an empty one. It refuses 5 and 6 like every other
-older version, and there is no migration -- no earlier schema holds a
-curve or a failure table to migrate *from*, a schema-6 manifest never
-wrote down the two counts, and a run's witness cannot be invented after
-the fact. Version 4 is the identity break --
+began the index over them: `n_metrics` and a single `n_failures` joined
+the manifest, so every output table had membership evidence and a
+truncated one stopped reading as an empty one. Version 8 finishes it:
+`n_failures` gives way to **one count per failure stage**
+(`n_mark_failures`, `n_settlement_failures`), which is what makes the
+stages non-interchangeable -- a total accepts any rearrangement that keeps
+the row count. Each version refuses every other, and there is no
+migration. Schemas 6 and 7 do hold a curve and a failure table, but not
+the evidence about them a later reader checks: a schema-6 manifest never
+wrote a failure count down at all and a schema-7 one wrote only the total,
+so neither can say what its stages held, and a run's witness cannot be
+invented after the fact. An older manifest is refused by version
+precisely so it is not silently exempt from a check its columns cannot
+answer. Version 4 is the identity break --
 the venue's two choices and the resolved contract facts joined
 `core_hash`, so every stored run id moved. It is also what separates the
 schema-3 tree from today's code: those runs were written before the
@@ -339,8 +375,9 @@ script: the store held one run each time.
 `artifacts/` subdir, the DuckDB connection used for writing, the load
 path's rebuilding of the ledger through the ledger's own checks, the
 record's internal consistency (the manifest counts, the stored legs'
-identity against the orders that claim them, and curve/failure agreement
-on instants and reasons), and the comparison `reproduce` performs.
+identity against the orders that claim them, the failures' per-stage
+membership and closed stage vocabulary, and curve/failure agreement on
+instants and reasons), and the comparison `reproduce` performs.
 
 **Does NOT own:**
 
@@ -390,17 +427,20 @@ equals the saved one exactly. `group` is a SQL keyword: the column is
 | `n_marked` | BIGINT | session closes the run marked; NULL when it carries no curve |
 | `n_unmarked` | BIGINT | session closes it could not mark; NULL when it carries no curve |
 | `n_metrics` | BIGINT | metrics the run reported; never NULL |
-| `n_failures` | BIGINT | questions the run left unanswered; never NULL |
+| `n_mark_failures` | BIGINT | sessions the marking pass left unanswered; never NULL |
+| `n_settlement_failures` | BIGINT | lots the lifecycle left unanswered; never NULL |
 | `commit_sha` | VARCHAR | git commit of the code that produced the run |
 | `dirty` | BOOLEAN | working tree had uncommitted changes |
 | `written_at` | TIMESTAMP | UTC time of the save |
-| `schema_version` | INTEGER | manifest schema version (`RUN_SCHEMA_VERSION`, currently 7); outside the hash |
+| `schema_version` | INTEGER | manifest schema version (`RUN_SCHEMA_VERSION`, currently 8); outside the hash |
 
 `n_marked` / `n_unmarked` are NULL rather than 0 when the saved result had
 no curve: "no curve at all" and "a curve that marked nothing" are different
-facts and must not read the same in SQL. `n_metrics` / `n_failures` have
-no such case -- both tables are always written -- so a NULL there is a
-defective index and `load_run` says so.
+facts and must not read the same in SQL. `n_metrics` and the per-stage
+failure counts have no such case -- both tables are always written -- so a
+NULL there is a defective index and `load_run` says so. The failure counts
+are per stage, not per table: one total cannot tell a settlement failure
+from a mark failure, so it accepts a record whose rows changed stage.
 
 ### `metrics.parquet`
 
@@ -445,7 +485,7 @@ empty means the run asked and nothing went unanswered.
 |---|---|---|
 | `run_id` | VARCHAR | |
 | `instant` | TIMESTAMP | when the question was asked |
-| `stage` | VARCHAR (`'settlement'` / `'mark'`) | which pass asked it |
+| `stage` | VARCHAR (`'settlement'` / `'mark'`) | which pass asked it; a closed vocabulary, refused on both the write and the load path if it names anything else |
 | `subject` | VARCHAR | the lot, contract or underlying it was about |
 | `reason` | VARCHAR | the `UnpriceableLeg` name |
 
@@ -524,7 +564,7 @@ against. `bid` and `ask` keep the source's nullability.
 | **Outputs are stored as evidence, and read back rather than recomputed** | A stored derived table is a claim frozen at write time, and that is exactly what a reproduction check needs to disagree with. Recomputing on load destroys the witness: two fresh computations can agree perfectly and both differ from the recorded run. `load_run` returns what was observed then; `reproduce` asks whether today's code and data still produce it. Reverses the 2026-09-14 rule. |
 | **No `round_trips.parquet`** | It would serve a real goal once a concrete cross-run trade query needs it, and there is no such consumer. The ledger already records the trade facts and the stored metrics witness their reported reductions. The limit accepted: this round does not independently freeze every intermediate result of the round-trip algorithm. Revisit when a query earns the schema, not because it appeared in an earlier four-table list. |
 | **No completeness flag** | "No unmarked sessions and no retained failures" would not assert that every open lot was valued at the window endpoint: the curve samples whole session closes and the endpoint need not be one. The counts and the failure records already say exactly what was answered; a stronger endpoint assertion needs new valuation work. |
-| **The dependency manifest is copied, not re-resolved** | `Manifest.toml` beside the project is Pkg's own record of the environment that ran. Re-resolving it at save time would record what today's registry picks, not what the run loaded. It is an input document this module does not interpret -- with the code checkout and its `Project.toml`, `Pkg.instantiate` restores the environment, so persistence needs no bespoke environment reader. |
+| **The dependency manifest is copied, not re-resolved** | `Manifest.toml` beside the project is Pkg's own record of the environment that ran. Re-resolving it at save time would record what today's registry picks, not what the run loaded. It is stored verbatim and read for one purpose only -- naming the two environments, package by package, in a reproduction report, matched by UUID because two packages may share a name. It is not read to *restore* anything: with the code checkout and its `Project.toml`, `Pkg.instantiate` restores the environment outside this process, so persistence needs no bespoke environment reader. |
 | **A failure is a row, never an event** | A lot that could not be settled and a session that could not be marked are things that did *not* happen. Inventing ledger events for them would put fictions in the journal of facts, and warning about them loses them when the run ends. They ride out on the result and land in their own table. |
 | **Named columns at every insert** | A positional `VALUES (...)` list makes a miscount write a value into the neighbouring column of the right type, and nothing in the type system catches it. Naming the columns removes the event table's per-kind NULL padding too, since DuckDB nulls what an insert does not name. The bytes written are identical, so it is not a schema change. |
 | **Write and load validate the join; load rebuilds through `commit!`** | `save_run` checks before creating a folder. A load must fail on a dangling fill, duplicate execution id, field mismatch or invalid simulated price, never drop the join. Reusing `commit!` means append invariants are not copied. |
@@ -540,7 +580,7 @@ against. `bid` and `ask` keep the source's nullability.
 ## Future work
 
 - Opt-in, data-gated integration tests that `reproduce` every stored
-  schema-7 run, skipping cleanly where the source data is absent.
+  schema-8 run, skipping cleanly where the source data is absent.
 - `scripts/revalidate_runs.jl`: refresh a run's `commit_sha` / `dirty`
   after a *successful* reproduction. Read-only stays the rule for
   `reproduce` itself -- a refresh must never be a side effect of
@@ -564,5 +604,6 @@ against. `bid` and `ask` keep the source's nullability.
 | Decision | Source checked | Finding |
 |---|---|---|
 | `Manifest.toml` stored verbatim as the run's dependency record, beside the project rather than as a bespoke environment dump | [Pkg's Project and Manifest documentation](https://pkgdocs.julialang.org/v1/toml-files/) (checked 2026-09-15) | Pkg describes the manifest as the *resolved* dependency record used alongside the project: the exact versions an environment loaded. It is an environment record, not an archive of local path dependencies or dirty source trees -- so copying it records what ran, and `Pkg.instantiate` against it plus the recorded checkout restores that environment. A missing one is therefore a real gap, named rather than written as an empty document. |
+| Matching packages between two stored `Manifest.toml`s: by UUID, not by name | [Pkg's Project and Manifest documentation](https://pkgdocs.julialang.org/v1/toml-files/#Multiple-packages-with-the-same-name) (checked 2026-09-15) | Pkg documents that one environment may resolve two **distinct packages that share a name**, told apart by their UUIDs. A version map keyed by name therefore collapses them -- the later `[[deps.<Name>]]` block overwrites the earlier one -- and a version move in the overwritten package disappears from a reproduction report entirely, which is the one thing that report exists to say. So the map is keyed by UUID and the name is display only; the UUID joins the printed line exactly when the name does not identify the package on its own. |
 | Reading a stored `Manifest.toml` for provenance: which key holds the resolved versions | [Pkg's Project and Manifest documentation](https://pkgdocs.julialang.org/v1/toml-files/) (checked 2026-09-15) | `manifest_format` 2.0 nests the resolved packages under a `deps` table (`[[deps.<Name>]]` blocks, each with `version` for a registered package and none for a stdlib); format 1.0 puts the same blocks at the top level, and both carry `julia_version`. So a report reads `deps` when it is there and the top level otherwise, and a package with no version contributes nothing to name. This is provenance only -- restoring an environment is still `Pkg.instantiate` outside the process. |
 | `reproduce` as a plain verb, no `!`, living in persistence beside save and load | [Julia style guide](https://docs.julialang.org/en/v1/manual/style-guide/) (checked 2026-09-15) | `!` is reserved for functions that modify their arguments. `reproduce` reads the store, reruns, and writes nothing, so the bang would be a false promise in the other direction. Its tests sit in the matching `test/persistence/` file, following the mirrored-tree layout the rest of the suite uses. |

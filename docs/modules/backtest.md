@@ -344,6 +344,7 @@ fill_price(rule::Symbol, bid, ask, side::Side, tick_cents::Int = TICK_CENTS) -> 
 commission(model::Symbol, prices, quantities) -> Vector{Int}
 const TICK_CENTS = 1
 struct RunFailure                            # at, stage, subject, reason
+const RUN_FAILURE_STAGES = (:mark, :settlement)   # the whole vocabulary of `stage`
 struct UnsupportedSettlement <: Exception    # underlying, style
 ```
 
