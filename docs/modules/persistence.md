@@ -12,17 +12,27 @@ Hive-partitioned parquet under `<store_root>/runs/run_id=<hash>/`:
 ```
 <root>/runs/
   run_id=deea7f6b1cf56779/
-    config.toml          # raw input TOML bytes, verbatim
-    manifest.parquet     # 1 row of run-level metadata
-    metrics.parquet      # long: (run_id, metric_name, value)
-    events.parquet       # 1 row per ledger event, in sequence order
-    orders.parquet       # 1 row per order record
-    order_legs.parquet   # 1 row per order leg, with its observation
+    config.toml          # INPUT:  raw input TOML bytes, verbatim
+    Manifest.toml        # INPUT:  the resolved dependency record, verbatim
+    manifest.parquet     # INDEX:  1 row of run-level metadata
+    metrics.parquet      # OUTPUT: long: (run_id, metric_name, value)
+    events.parquet       # OUTPUT: 1 row per ledger event, in sequence order
+    orders.parquet       # OUTPUT: 1 row per order record
+    order_legs.parquet   # OUTPUT: 1 row per order leg, with its observation
+    curve.parquet        # OUTPUT: the marked curve; absent when there is none
+    failures.parquet     # OUTPUT: what the run could not answer
     artifacts/           # rendered outputs (plots, ...), regenerable
       marked_curve.png
   run_id=8a1c.../
     ...
 ```
+
+**A run folder has two jobs**, and every file serves one of them. It keeps
+the *inputs* needed to run the experiment again -- the config, the
+dependency record, and the code provenance on the manifest row -- and the
+*outputs* needed to verify that a rerun produced the same answer. The
+manifest indexes them and records their provenance. A file belongs here
+when it serves one of those two goals and not otherwise.
 
 The query substrate is parquet: every run-level table is parquet, so
 any tool that reads it (DuckDB CLI, pandas, polars, a notebook in
@@ -50,50 +60,117 @@ Base.isopen(store) :: Bool
 run_dir(store, run_id) :: String                       # path helper
 
 save_run(store, result, config_toml;                   # returns run id = full_hash
-         commit_sha="", dirty=true) :: String
+         commit_sha="", dirty=true,
+         manifest_toml=dependency_manifest()) :: String
 load_run(store, run_id) :: ExperimentResult
+reproduce(store, run_id) :: ReproductionReport
 ```
 
-### Inputs are read back; anything derived is recomputed
+### The record is read back; reproducing it is a different operation
 
-The ledger and the config are the run's **authoritative inputs** and are
-read back as written. Everything derived from them -- the marked curve,
-the per-trade dollars, every metric -- is **recomputed** on load and never
-hydrated from a file. `metrics.parquet` is therefore an export for
-cross-run SQL, not an input to an `ExperimentResult`: a loaded result is
-truthful to the ledger and the market data it just read, and cannot report
-a number its own inputs no longer produce.
+**The reason to store outputs is evidence.** Reproducibility needs inputs:
+the config, the code version, the dependency versions. Outputs are not
+needed to produce the answer again -- they are needed to verify that it is
+the same answer. So `load_run` reads the record as it was written: the
+ledger, the marked curve, the failures the run retained and the metrics it
+reported. It recomputes nothing and **opens no market data**.
 
-**Loading degrades by piece.** The ledger and the always-on core metrics
-are functions of the ledger, so they always come back. The marked curve is
-not -- marking an open lot needs the run's market data -- so `load_run`
-reopens `exp.data`. On a machine where that data is absent the curve is
-`nothing` and the **whole** optional metric set is omitted, `:profit_factor`
-included even though it reads trades and needs no curve: every metric takes
-both inputs, so the dispatch table does not record which one each reads and
-the omission cannot be selective. The path
-metrics are absent from `metrics` (absent, not `NaN`: see
-[metrics](metrics.md)), and the rest loads normally with a warning naming
-the cause.
+This reverses the recompute-on-load rule of 2026-09-14, deliberately. That
+rule's ground was that a loaded result must agree with the inputs
+available now. The new ground is that loading must preserve what was
+observed *then*, because a reproduction check needs a witness it can
+disagree with: two fresh computations against today's code and tree can
+agree perfectly and both differ from the recorded run, and their agreement
+would then prove nothing about that run. Under the old rule, inspecting
+the witness destroyed it.
 
-That boundary makes the backlog item **Dataset fingerprint in identity**
-load-bearing. Previously stale or re-collected data could make a *rerun*
-differ under one id; now a plain load can differ while appearing to read
-recorded history. This round names that risk and does not solve it.
+**Portability is explicitly not a concern.** Loading on a machine without
+the data tree is not the case this design serves -- it simply works,
+because nothing on the load path asks the data anything. There is no
+degrade-by-piece path any more and no warning about an absent tree: a
+loaded curve is the stored curve, or the run carried none.
+
+The consequence to hold: a loaded result is a claim frozen at write time,
+and a plausible but stale price still loads. Whether today's code and data
+still produce it is what `reproduce` answers, and nothing else does.
 
 `save_run` validates that `config_toml` rebuilds the saved
 `result.experiment`: same `full_hash` and same human `name` label. That
 keeps the manifest, saved config, and `load_run(...).experiment`
 coherent even though `name` is deliberately excluded from identity. It
 also runs the whole-ledger `check_join` before creating the run folder
-or writing any file.
+or writing any file, and it takes the dependency manifest **verbatim from
+the environment that produced the run** rather than re-resolving it at
+save time. A missing one is `MissingManifest`, named before the folder
+exists rather than silently written as an empty document.
 
-`load_run` reads the ledger tables plus the saved `config.toml`, rebuilds
-the live `Experiment` via `load_experiment_str`, rebuilds the ledger, and
-then recomputes the marked curve and the metrics. The rebuilt
-`Experiment.data` holds provider specs, pure values, so the ledger and the
-trade metrics load on any machine; only the curve needs the data tree to be
-present.
+### What the two output tables hold
+
+`curve.parquet` is the existing `MarkedCurve` in stored form, preserving
+both pairs of vectors: each marked session with its profit in USD, and
+each unmarked instant with its reason. **An unmarked row has no profit** --
+not zero, not NaN, not the previous session's number, but NULL. There is
+no separate marks or equity export and no per-lot mark history: the curve
+is the one path result.
+
+`failures.parquet` records every unanswered question a *completed* run
+retained -- its instant, its subject and its named reason. Two producers
+fill it: the engine's lifecycle passes, for a lot left open because no
+honest settlement price existed, and the marking pass, for a session close
+the curve could not mark. Neither is a ledger event, because nothing
+happened; no replay of the journal can recover one, so the run that
+observed them is the only thing that can carry them out. The subject
+carries enough lineage to tell two questions apart -- a lot names its
+contract and its opening fill, a printless session names its underlying.
+
+A broken session is counted **once** on the curve however many of its lots
+failed, and each failed lot is its own row here. The two must agree
+instant for instant, and `load_run` checks that they do.
+
+### Counts, and NULL versus zero
+
+The manifest keeps six counts and `load_run` **checks every one** against
+what it rebuilt, naming the column and both values on a mismatch. They are
+cheap and they catch the one defect the per-record constructors cannot
+see: a truncated table, or a mixed save that every individual check
+accepts. They are consistency checks, not proof that any price or metric
+is right.
+
+NULL curve counts mean the run recorded no curve, and `curve.parquet` must
+then be absent; zero means a recorded curve with no entries of that kind,
+and the file must be present. An absent curve and a present-but-empty one
+stay different facts on disk, in the file list and in SQL alike.
+
+### `reproduce`: the other operation
+
+`reproduce(store, run_id)` reads the saved inputs and provenance, rebuilds
+the experiment, reruns it against live data, and compares the fresh
+outputs with the stored witness field by field: event order and fields,
+order records and their observations, curve instants and profits, failure
+subjects and reasons, and metric names and values. A row present on one
+side only is a divergence like any other. Each difference is identified by
+output, row identity and field, with both values -- never a bare boolean.
+
+Integers, timestamps, identifiers and reasons compare exactly. Finite
+floating values use a documented absolute tolerance; NaN matches NaN and
+an infinity matches the same-signed infinity, both settled **before** any
+subtraction, because `NaN - NaN` answers nothing about whether two runs
+agreed.
+
+The report names one of three outcomes: reproduced, diverged, or could not
+be reproduced. Inability is never reported as a successful comparison of
+empty outputs. Data this machine cannot open is inability. So is a stored
+config that no longer hashes to the folder it sits in: that is a named
+identity mismatch carrying the regenerated projection for diagnosis, not a
+quiet lookup of whatever run the new id points at.
+
+It uses the running code and environment and reports their provenance
+beside the recorded one. It does not switch checkouts or instantiate
+packages inside the caller's process -- the run's own `Manifest.toml` is
+what makes a separate rerun under the recorded environment possible. **It
+never writes**: no fresh result is saved over the witness, and refreshing
+a run's provenance after a successful reproduction is a separate utility,
+never a side effect of this one.
 
 ### The write and load paths validate, they never trust
 
@@ -158,11 +235,31 @@ Both hashes come from `to_dict`, an identity projection (in the
 experiment module) that emits one entry per data kind, the clock, the
 agent, the window, the venue's two choices and the contract facts
 resolved for the experiment's underlying, omitting non-result-affecting
-fields (cache sizes, readers, part order). The parquet specs' root sits in a
-reserved `dataset` slot of that projection, the place a logical
-dataset id and version would go; they also project the bar-stamp
+fields (cache sizes, readers, part order). They also project the bar-stamp
 convention as the constant `"bar_end"`, which is what moved every run id
 when bar-end visibility landed.
+
+**The projection is the definition of sameness; the hash is a lookup key
+over it.** It can be computed before a run, so asking whether a run
+already exists is a folder-existence check and two machines with the same
+resolved inputs agree on the id without a coordinator. Existence alone
+does not certify a *complete* save, which is what the manifest counts are
+for. The projection is not stored: it is deterministically derived from
+the config by the code that reads it, so it is regenerated when diagnosing
+an identity mismatch rather than kept as a file that could go stale.
+
+**The `dataset` slot holds a root path, and that is the accepted
+contract.** Dataset versioning is dropped, not deferred: the Massive OHLCV
+trees are trusted as stable and their schema is trusted, so there will be
+no fingerprint and no dataset version in identity. Live with both edges of
+that: identical trees at two paths get different ids, and the same path
+does not detect changed bytes. Under this decision a divergence found by
+`reproduce` attributes to code or dependencies by elimination -- the run
+records both, through `commit_sha`, `dirty` and the stored
+`Manifest.toml`, and a controlled rerun separates their effects. That is
+attribution under the data contract, not a content check `reproduce`
+performs. Neither code provenance nor dependency versions enter either
+hash.
 
 **Runs written under bar-open visibility do not reproduce.** They keep
 their own ids -- the corrected code hashes the same config to a different
@@ -181,9 +278,12 @@ data-kinds migration (every run id changed with the identity
 projection). Version 3 was the ledger: `positions.parquet` gave way to
 `events`, `orders` and `order_legs`. Version 5 is the marked curve:
 `pnl_series.parquet` and the manifest's `window_end_spot` left with the
-`PnLSeries` type they exported, `n_marked` joined `n_unmarked`, and the
-derived tables that replace the series belong to the second half of the
-outputs round. Version 4 is the identity break --
+`PnLSeries` type they exported and `n_marked` joined `n_unmarked`.
+Version 6 is the persistence split: `Manifest.toml`, `curve.parquet` and
+`failures.parquet` arrive and the load path stops recomputing. It refuses
+5 like every other older version, and there is no migration -- no earlier
+schema holds a curve or a failure table to migrate *from*, and a run's
+witness cannot be invented after the fact. Version 4 is the identity break --
 the venue's two choices and the resolved contract facts joined
 `core_hash`, so every stored run id moved. It is also what separates the
 schema-3 tree from today's code: those runs were written before the
@@ -196,8 +296,10 @@ script: the store held one run each time.
 ## Responsibility boundaries
 
 **Owns:** storage layout, parquet schemas for the output tables, the
-`artifacts/` subdir, the DuckDB connection used for writing, and the
-load path's rebuilding of the ledger through the ledger's own checks.
+`artifacts/` subdir, the DuckDB connection used for writing, the load
+path's rebuilding of the ledger through the ledger's own checks, the
+record's internal consistency (the manifest counts and curve/failure
+agreement), and the comparison `reproduce` performs.
 
 **Does NOT own:**
 
@@ -210,6 +312,13 @@ load path's rebuilding of the ledger through the ledger's own checks.
 - Querying. SQL on the parquet tree is the API.
 - Code provenance capture. `commit_sha` / `dirty` are produced by
   `code_provenance` and passed into `save_run` by the caller.
+- Producing the outputs it stores. The curve and the failures are the
+  run's, built by [`metrics`](metrics.md) and [`backtest`](backtest.md)
+  while the data was open; `reproduce` re-runs the experiment through
+  `run_experiment` and does not reimplement any part of it.
+- Restoring a dependency environment. It stores `Manifest.toml` and does
+  not read it: `Pkg.instantiate` against the recorded checkout is the
+  operation, performed outside the caller's process.
 - Artifact rendering. The store records what was written; rendering is
   script-level (`scripts/lib/artifacts.jl`), so the core stays Plots-free.
 - Atomicity guarantees beyond best-effort. A crash mid-`save_run` can
@@ -240,7 +349,7 @@ equals the saved one exactly. `group` is a SQL keyword: the column is
 | `commit_sha` | VARCHAR | git commit of the code that produced the run |
 | `dirty` | BOOLEAN | working tree had uncommitted changes |
 | `written_at` | TIMESTAMP | UTC time of the save |
-| `schema_version` | INTEGER | manifest schema version (`RUN_SCHEMA_VERSION`, currently 5); outside the hash |
+| `schema_version` | INTEGER | manifest schema version (`RUN_SCHEMA_VERSION`, currently 6); outside the hash |
 
 `n_marked` / `n_unmarked` are NULL rather than 0 when the saved result had
 no curve: "no curve at all" and "a curve that marked nothing" are different
@@ -257,8 +366,41 @@ Long form so the schema is stable as metrics come and go.
 | `value` | DOUBLE |
 
 `NaN` and `±Infinity` are stored verbatim (cast via `'NaN'::DOUBLE` on
-write). An export only: `load_run` recomputes every metric and never reads
-this file.
+write), because a NaN sharpe is information about the run. Absence of a
+row still means "not computed", which is different from every number
+including NaN. `load_run` reads this table back as the metrics the run
+reported; the column is DOUBLE, so an integer metric returns as a Float64
+of the same value, which compares equal and is the whole of what a metric
+is. A metric that does not reduce to a number is refused at save time
+rather than written as a NaN that would claim it was computed.
+
+### `curve.parquet`
+
+The `MarkedCurve` in stored form, both pairs of vectors, marked rows
+first. **Absent entirely when the run carried no curve**, which the
+manifest's NULL counts say too.
+
+| column | type | notes |
+|---|---|---|
+| `run_id` | VARCHAR | |
+| `kind` | VARCHAR (`'marked'` / `'unmarked'`) | which pair the row belongs to |
+| `instant` | TIMESTAMP | the session close (`at` is a DuckDB keyword) |
+| `profit` | DOUBLE | marked profit in USD; **NULL on an unmarked row** |
+| `reason` | VARCHAR | why it could not be marked; NULL on a marked row |
+
+### `failures.parquet`
+
+One row per unanswered question the run retained, in the run's canonical
+order (instant, then stage, then subject, then reason). Always written;
+empty means the run asked and nothing went unanswered.
+
+| column | type | notes |
+|---|---|---|
+| `run_id` | VARCHAR | |
+| `instant` | TIMESTAMP | when the question was asked |
+| `stage` | VARCHAR (`'settlement'` / `'mark'`) | which pass asked it |
+| `subject` | VARCHAR | the lot, contract or underlying it was about |
+| `reason` | VARCHAR | the `UnpriceableLeg` name |
 
 ### `events.parquet`
 
@@ -331,10 +473,16 @@ against. `bid` and `ask` keep the source's nullability.
 |---|---|
 | **Parquet + DuckDB-as-engine, no single-file DB** | Matches the `data` module's existing pattern. Files are inspectable from any parquet-aware tool; a single corrupt run doesn't take down the whole store; `rm -rf <run_dir>` is a valid delete. |
 | **Hive partition `run_id=<hash>`** | DuckDB and pandas / polars all understand the layout natively. Cross-run queries are one parquet glob, no separate manifest table to keep in sync. |
-| **The ledger stored as it is: events with the kind's own columns, plus the order journal** | The events are the facts and the journal is what each decision saw; storing derived tables instead would let a stored run disagree with its own replay. Round trips, marks, equity and failures arrive as their own export tables in the second half of the outputs round. |
-| **Derived results are recomputed on load, never read** | A stored derived table is a claim frozen at write time. Recomputing from the ledger and the market data means a loaded result cannot disagree with its own inputs -- and it turns "the data moved" into a visible, named degradation instead of a silently stale number. |
+| **The ledger stored as it is: events with the kind's own columns, plus the order journal** | The events are the facts and the journal is what each decision saw; storing a derived table *in place of* them would let a stored run disagree with its own replay. The curve and the failures are stored beside them, not instead. |
+| **Outputs are stored as evidence, and read back rather than recomputed** | A stored derived table is a claim frozen at write time, and that is exactly what a reproduction check needs to disagree with. Recomputing on load destroys the witness: two fresh computations can agree perfectly and both differ from the recorded run. `load_run` returns what was observed then; `reproduce` asks whether today's code and data still produce it. Reverses the 2026-09-14 rule. |
+| **No `round_trips.parquet`** | It would serve a real goal once a concrete cross-run trade query needs it, and there is no such consumer. The ledger already records the trade facts and the stored metrics witness their reported reductions. The limit accepted: this round does not independently freeze every intermediate result of the round-trip algorithm. Revisit when a query earns the schema, not because it appeared in an earlier four-table list. |
+| **No completeness flag** | "No unmarked sessions and no retained failures" would not assert that every open lot was valued at the window endpoint: the curve samples whole session closes and the endpoint need not be one. The counts and the failure records already say exactly what was answered; a stronger endpoint assertion needs new valuation work. |
+| **The dependency manifest is copied, not re-resolved** | `Manifest.toml` beside the project is Pkg's own record of the environment that ran. Re-resolving it at save time would record what today's registry picks, not what the run loaded. It is an input document this module does not interpret -- with the code checkout and its `Project.toml`, `Pkg.instantiate` restores the environment, so persistence needs no bespoke environment reader. |
+| **A failure is a row, never an event** | A lot that could not be settled and a session that could not be marked are things that did *not* happen. Inventing ledger events for them would put fictions in the journal of facts, and warning about them loses them when the run ends. They ride out on the result and land in their own table. |
+| **Named columns at every insert** | A positional `VALUES (...)` list makes a miscount write a value into the neighbouring column of the right type, and nothing in the type system catches it. Naming the columns removes the event table's per-kind NULL padding too, since DuckDB nulls what an insert does not name. The bytes written are identical, so it is not a schema change. |
 | **Write and load validate the join; load rebuilds through `commit!`** | `save_run` checks before creating a folder. A load must fail on a dangling fill, duplicate execution id, field mismatch or invalid simulated price, never drop the join. Reusing `commit!` means append invariants are not copied. |
-| **`load_run` returns `ExperimentResult`, not a separate `StoredRun`** | Same type as `run_experiment` means same recipes / `show` / downstream consumers. Specs are pure values, so the rebuilt experiment only touches the data when run, while the ledger / pnl / metrics remain inspectable. |
+| **`load_run` returns `ExperimentResult`, not a separate `StoredRun`** | Same type as `run_experiment` means same recipes / `show` / downstream consumers, and it is what lets `reproduce` compare the two sides with one set of accessors. Specs are pure values, so the rebuilt experiment only touches the data when it is actually run. |
+| **The reproduction report is two flat records, not a hierarchy** | A `ReproductionReport` holding `Divergence` rows says everything the report has to say: an outcome, why when there is no outcome to compare, both provenances, and each difference by output, row and field. No abstract type, no per-output subtype -- a table of differences is data. |
 | **Long-form `metrics.parquet`** | Optional metrics come and go per run; a wide schema would force columns to NULL across runs and break naive `UNION ALL` reads. Long form is stable and trivially pivotable. |
 | **NaN / Inf preserved, not nulled** | A NaN sharpe (e.g. one trade, zero variance) is meaningful information about that run; collapsing it to NULL would lose the distinction from "metric not requested." |
 | **Caller passes the TOML bytes** | The TOML is the source of truth for what was run; pushing the bytes through `save_run` keeps the persistence layer ignorant of how the `Experiment` was built and avoids stashing config strings on `Experiment` itself. |
@@ -343,11 +491,17 @@ against. `bid` and `ask` keep the source's nullability.
 
 ## Future work
 
-- The second half of the outputs round: `round_trips`, `marks`, `equity`
-  and `failures` export tables, a completeness flag in the manifest, and
-  `compare_runs.jl` over them. Exports only -- the load path will keep
-  recomputing.
-- Write-to-temp-then-rename for atomic saves.
+- Opt-in, data-gated integration tests that `reproduce` every stored
+  schema-6 run, skipping cleanly where the source data is absent.
+- `scripts/revalidate_runs.jl`: refresh a run's `commit_sha` / `dirty`
+  after a *successful* reproduction. Read-only stays the rule for
+  `reproduce` itself -- a refresh must never be a side effect of
+  divergence, and must never replace the output evidence or the
+  originating dependency document.
+- `compare_runs.jl` over the curve and the failures, not only the manifest
+  and the metrics.
+- Write-to-temp-then-rename for atomic saves. The manifest counts catch a
+  mixed save on load; they do not make a multi-file save atomic.
 - Compute reuse: on a `core_hash` + `commit_sha` hit with a clean tree,
   load the cached ledger and recompute only the outputs instead of
   re-running the backtest.
@@ -356,3 +510,10 @@ against. `bid` and `ask` keep the source's nullability.
 - Cross-run viz recipes built on the SQL queries demonstrated above.
 - Delete / archive helpers (`drop_run(store, id)`). For now a manual
   `rm -rf <run_dir>` is the API.
+
+## Conventions consulted
+
+| Decision | Source checked | Finding |
+|---|---|---|
+| `Manifest.toml` stored verbatim as the run's dependency record, beside the project rather than as a bespoke environment dump | [Pkg's Project and Manifest documentation](https://pkgdocs.julialang.org/v1/toml-files/) (checked 2026-09-15) | Pkg describes the manifest as the *resolved* dependency record used alongside the project: the exact versions an environment loaded. It is an environment record, not an archive of local path dependencies or dirty source trees -- so copying it records what ran, and `Pkg.instantiate` against it plus the recorded checkout restores that environment. A missing one is therefore a real gap, named rather than written as an empty document. |
+| `reproduce` as a plain verb, no `!`, living in persistence beside save and load | [Julia style guide](https://docs.julialang.org/en/v1/manual/style-guide/) (checked 2026-09-15) | `!` is reserved for functions that modify their arguments. `reproduce` reads the store, reruns, and writes nothing, so the bang would be a false promise in the other direction. Its tests sit in the matching `test/persistence/` file, following the mirrored-tree layout the rest of the suite uses. |

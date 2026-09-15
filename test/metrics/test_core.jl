@@ -27,7 +27,7 @@ end
     L, _ = _lg_case_open_at_end()
     trades = trade_pnl(L)
     @test total_pnl(trades) ≈ 50.0            # the one closed structure, and only it
-    c = marked_curve(L, _mk_data(), _MK_UND, _MK_FROM, _MK_TO)
+    c = marked_curve(L, _mk_data(), _MK_UND, _MK_FROM, _MK_TO).curve
     # The open put is worth something at every session close, so the curve's
     # last level is a different number by construction. Widening total_pnl to
     # mean that is exactly what decision 8 forbids.

@@ -73,7 +73,7 @@ end
 
 @testset "run_backtest(policy): NoOpPolicy yields an empty ledger with no orders" begin
     f = _en_fixture()
-    L = run_backtest(NoOpPolicy(), f.data, f.ts1, f.ts3, _EN_CLOCK)
+    L = run_backtest(NoOpPolicy(), f.data, f.ts1, f.ts3, _EN_CLOCK).ledger
     @test L isa Ledger
     @test isempty(L)
     @test isempty(L.orders)
@@ -106,7 +106,7 @@ end
 @testset "run_backtest(policy): a single fill books one order, one fill and one fee" begin
     f = _en_fixture()
     p = _OpenOnceAt(f.ts2, Order(:call, [Leg(f.call, Long, 1, Open)]))
-    L = run_backtest(p, f.data, f.ts1, f.ts3, _EN_CLOCK)
+    L = run_backtest(p, f.data, f.ts1, f.ts3, _EN_CLOCK).ledger
     @test length(L) == 2
     @test length(L.orders) == 1
     rec = only(L.orders)
@@ -131,7 +131,7 @@ end
 
 @testset "run_backtest(policy): open then close, the Close leg names the group" begin
     f = _en_fixture()
-    L = run_backtest(_OpenThenClose(f.ts1, f.ts3, f.call), f.data, f.ts1, f.ts3, _EN_CLOCK)
+    L = run_backtest(_OpenThenClose(f.ts1, f.ts3, f.call), f.data, f.ts1, f.ts3, _EN_CLOCK).ledger
     @test [typeof(e) for e in L.events] == [Fill, Fee, Fill, Match, Fee]
     @test length(L.orders) == 2
     r1, r2 = L.orders
@@ -158,7 +158,7 @@ end
 @testset "run_backtest: the book handed to decide is the known book" begin
     f = _en_fixture()
     p = _Recording(_OpenThenClose(f.ts1, f.ts3, f.call))
-    L = run_backtest(p, f.data, f.ts1, f.ts3, _EN_CLOCK)
+    L = run_backtest(p, f.data, f.ts1, f.ts3, _EN_CLOCK).ledger
     @test length(p.seen) == 3                            # one per tick
     @test [t for (t, _) in p.seen] == [f.ts1, f.ts2, f.ts3]
     for rec in L.orders
@@ -185,8 +185,8 @@ VolSurfaceAnalysis.current_policy(a::_SwapAgent, t::DateTime, ::TimeCut, ::Book)
 @testset "run_backtest(agent): StaticAgent matches the bare-policy result" begin
     f = _en_fixture()
     p = _OpenOnceAt(f.ts2, Order(:call, [Leg(f.call, Long, 1, Open)]))
-    via_policy = run_backtest(p, f.data, f.ts1, f.ts3, _EN_CLOCK)
-    via_agent  = run_backtest(StaticAgent(p), f.data, f.ts1, f.ts3, _EN_CLOCK)
+    via_policy = run_backtest(p, f.data, f.ts1, f.ts3, _EN_CLOCK).ledger
+    via_agent  = run_backtest(StaticAgent(p), f.data, f.ts1, f.ts3, _EN_CLOCK).ledger
     @test length(via_agent) == length(via_policy) == 2
     @test length(via_agent.orders) == length(via_policy.orders) == 1
     @test via_agent.events[1].price == via_policy.events[1].price == 5.10
@@ -198,9 +198,9 @@ end
     order = Order(:call, [Leg(f.call, Long, 1, Open)])
     agent_fires  = _SwapAgent(f.ts2, _OpenOnceAt(f.ts3, order))
     agent_silent = _SwapAgent(f.ts3 + Second(1), _OpenOnceAt(f.ts3, order))
-    fired = run_backtest(agent_fires, f.data, f.ts1, f.ts3, _EN_CLOCK)
+    fired = run_backtest(agent_fires, f.data, f.ts1, f.ts3, _EN_CLOCK).ledger
     @test length(fired.orders) == 1 && count(e -> e isa Fill, fired.events) == 1
-    silent = run_backtest(agent_silent, f.data, f.ts1, f.ts3, _EN_CLOCK)
+    silent = run_backtest(agent_silent, f.data, f.ts1, f.ts3, _EN_CLOCK).ledger
     @test isempty(silent) && isempty(silent.orders)
 end
 
@@ -210,12 +210,12 @@ end
     # A clock on a selector nothing serves is a broken configuration, not an
     # empty grid: enumerating it throws rather than running zero ticks.
     @test_throws UnservedSelector run_backtest(p, f.data, f.ts1, f.ts3,
-                                               Clock{OptionQuote}(Underlying("QQQ")))
+                                               Clock{OptionQuote}(Underlying("QQQ"))).ledger
     # A clock on the spot grid ticks at the same instants here.
-    L = run_backtest(p, f.data, f.ts1, f.ts3, Clock{SpotPrice}(_EN_UND))
+    L = run_backtest(p, f.data, f.ts1, f.ts3, Clock{SpotPrice}(_EN_UND)).ledger
     @test length(L.orders) == 1 && count(e -> e isa Fill, L.events) == 1
     # the venue's values are keywords: a free venue books no fees
-    free = run_backtest(p, f.data, f.ts1, f.ts3, _EN_CLOCK; cost_model=:none)
+    free = run_backtest(p, f.data, f.ts1, f.ts3, _EN_CLOCK; cost_model=:none).ledger
     @test [typeof(e) for e in free.events] == [Fill]
     @test book_as_known(free, 1).cash == -51000
 end
@@ -225,13 +225,13 @@ end
     p = _OpenOnceAt(f.ts2, Order(:call, [Leg(f.call, Long, 1, Open)]))
     # served, but no spot at the fill instant
     thin_spots = MarketData(entry(f.data, OptionQuote), InMemory([SpotPrice(_EN_UND, f.spot, f.ts1)]))
-    @test_throws UnpriceableLeg run_backtest(p, thin_spots, f.ts1, f.ts3, _EN_CLOCK)
-    err = try run_backtest(p, thin_spots, f.ts1, f.ts3, _EN_CLOCK); nothing catch e; e end
+    @test_throws UnpriceableLeg run_backtest(p, thin_spots, f.ts1, f.ts3, _EN_CLOCK).ledger
+    err = try run_backtest(p, thin_spots, f.ts1, f.ts3, _EN_CLOCK).ledger; nothing catch e; e end
     @test err isa UnpriceableLeg && err.reason == :no_spot && err.contract == f.call && err.t == f.ts2
     @test occursin("UnpriceableLeg", sprint(showerror, err)) && occursin("no_spot", sprint(showerror, err))
     # nothing serves SpotPrice for SPY at all: structural, so it is named by the data layer
     no_spots = MarketData(entry(f.data, OptionQuote), InMemory(SpotPrice[]))
-    @test_throws UnservedSelector run_backtest(p, no_spots, f.ts1, f.ts3, _EN_CLOCK)
+    @test_throws UnservedSelector run_backtest(p, no_spots, f.ts1, f.ts3, _EN_CLOCK).ledger
     # a strike not in the chain, and a masked instant, are :no_quote
     cut = TimeCut(f.data, f.ts1)
     bogus = ContractKey(_EN_UND, 999.0, f.expiry, Call)
@@ -240,7 +240,7 @@ end
     err = try resolve_quote(cut, f.call, f.ts2); nothing catch e; e end   # masked by the cut
     @test err isa UnpriceableLeg && err.reason == :no_quote && err.t == f.ts2
     @test_throws UnpriceableLeg run_backtest(_OpenOnceAt(f.ts2, Order(:bogus, [Leg(bogus, Long, 1, Open)])),
-                                             f.data, f.ts1, f.ts3, _EN_CLOCK)
+                                             f.data, f.ts1, f.ts3, _EN_CLOCK).ledger
     # a missing ask on a Long leg
     one_sided = OptionQuote("X", _EN_UND, f.expiry, 480.0, Call, 5.00, missing, missing,
                             missing, missing, missing, f.ts1)
@@ -271,12 +271,12 @@ end
     bogus = ContractKey(_EN_UND, 999.0, f.expiry, Call)
     # the second leg has no quote: nothing is written, every counter is at 1
     p = _OpenOnceAt(f.ts2, Order(:half, [Leg(f.call, Long, 1, Open), Leg(bogus, Long, 1, Open)]))
-    err = try run_backtest(p, f.data, f.ts1, f.ts3, _EN_CLOCK); nothing catch e; e end
+    err = try run_backtest(p, f.data, f.ts1, f.ts3, _EN_CLOCK).ledger; nothing catch e; e end
     @test err isa UnpriceableLeg && err.contract == bogus
     # the failure is before anything is written, so run a variant that records the ledger:
     # an agent whose policy fails on the second tick, after a first order landed
     struct_check = _OpenOnceAt(f.ts2, Order(:half, [Leg(f.call, Long, 1, Open), Leg(f.put, Long, 1, Close)]))
-    err = try run_backtest(struct_check, f.data, f.ts1, f.ts3, _EN_CLOCK); nothing catch e; e end
+    err = try run_backtest(struct_check, f.data, f.ts1, f.ts3, _EN_CLOCK).ledger; nothing catch e; e end
     @test err isa NothingToClose
     # the same two orders through record_order! directly, on the ledger the engine would hold
     L = Ledger(); book = L.book
@@ -336,7 +336,7 @@ _en_record_join_error(L, r=only(L.orders); kw...) = try check_join(L, r; kw...);
     end
     f = _en_fixture()
     engine_ledger = run_backtest(_OpenThenClose(f.ts1, f.ts3, f.call),
-                                 f.data, f.ts1, f.ts3, _EN_CLOCK)
+                                 f.data, f.ts1, f.ts3, _EN_CLOCK).ledger
     @test all(check_join(engine_ledger, r) === nothing for r in engine_ledger.orders)
     @test occursin("per-record", string(@doc run_backtest))
 
@@ -418,7 +418,7 @@ end
 
 @testset "check_join: passes on ledgers the writer built, and names every disagreement" begin
     f = _en_fixture()
-    @test check_join(run_backtest(_OpenThenClose(f.ts1, f.ts3, f.call), f.data, f.ts1, f.ts3, _EN_CLOCK)) === nothing
+    @test check_join(run_backtest(_OpenThenClose(f.ts1, f.ts3, f.call), f.data, f.ts1, f.ts3, _EN_CLOCK).ledger) === nothing
     @test check_join(_en_hand_ledger()) === nothing
     @test check_join(Ledger()) === nothing
     L, _ = _lg_case_strangle_closed()
@@ -556,7 +556,7 @@ mktempdir() do root
         contract = ContractKey(_EN_UND, 480.0, DateTime(2024, 2, 16, 21, 0), Call)
         policy = _OpenOnceAt(tick, Order(:buy, [Leg(contract, Long, 1, Open)]))
         L = with_data(data) do d
-            run_backtest(policy, d, tick, tick, _EN_CLOCK)
+            run_backtest(policy, d, tick, tick, _EN_CLOCK).ledger
         end
         f = only(e for e in L.events if e isa Fill)
         @test f.price == 5.00                  # the 15:30-15:31 close, λ = 1 so bid = ask

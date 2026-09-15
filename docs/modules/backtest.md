@@ -280,11 +280,20 @@ with open lots.
 **An unsettleable lot stays open, loudly.** `settlement_price` throws
 the named failure like every other named failure here; `settlements` is
 the one boundary that catches it, warns once with the contract, its
-expiry and the reason, and returns the lot in `unsettled`. A bad day
-must not kill a ten-year run, but it must never pass silently either,
-and reporting at the boundary rather than at the call site is what makes
-that structural. `settlements` mutates no state; it is not
-side-effect-free, and the distinction is deliberate.
+expiry and the reason, and returns the lot paired with the failure in
+`unsettled`. A bad day must not kill a ten-year run, but it must never
+pass silently either, and reporting at the boundary rather than at the
+call site is what makes that structural. `settlements` mutates no state;
+it is not side-effect-free, and the distinction is deliberate.
+
+**And the run keeps it.** A warning does not survive the run, so
+`run_backtest` carries every entry out as a `RunFailure` on its result --
+from **both** lifecycle passes, the window-end one included. It cannot be
+recovered any other way: no event was written, because nothing happened,
+and inventing an `Expiry` for a settlement that did not occur would put a
+fiction in the journal of facts. The lot rides along with the failure
+because the account has to say *which* lot went unanswered, and two lots
+of one contract falling due together are two questions.
 
 **An unserved settlement style stops the run.** `UnsupportedSettlement`
 is deliberately *not* caught and warned that way. `UnpriceableLeg` names
@@ -298,22 +307,24 @@ config, so a reader who has met one has met the other.
 
 Early assignment and physical delivery are not modelled: SPY
 cash-settles at intrinsic here instead of delivering shares. Marking a
-lot still open past the window end belongs to the equity curve, not to
-the lifecycle.
+lot still open past the window end belongs to the marked curve
+([`metrics`](metrics.md)), not to the lifecycle.
 
 ## Public surface
 
 ```julia
 run_backtest(agent::Agent,  data, from, to, clock; fill_rule = :cross_spread,
-             cost_model = :ibkr_pro_us_options) -> Ledger
-run_backtest(policy::Policy, data, from, to, clock; kw...)      -> Ledger   # StaticAgent wrapper
+             cost_model = :ibkr_pro_us_options)
+    -> (ledger::Ledger, failures::Vector{RunFailure})
+run_backtest(policy::Policy, data, from, to, clock; kw...)                  # StaticAgent wrapper
+    -> (ledger::Ledger, failures::Vector{RunFailure})
 
 resolve_quote(cut::TimeCut, contract::ContractKey, t) -> OptionQuote
 fill_legs(cut, order::Order, t; fill_rule, cost_model, tick_cents = TICK_CENTS)
     -> (prices, fees, observations, fill_rule)                  # record_order!'s per-leg keywords
 settlement_price(rule::Symbol, cut::TimeCut, contract::ContractKey, t) -> Float64
 settlements(cut, book::Book, prev, t)
-    -> (settled::Vector{Tuple{Lot,Float64}}, unsettled::Vector{UnpriceableLeg})
+    -> (settled::Vector{Tuple{Lot,Float64}}, unsettled::Vector{Tuple{Lot,UnpriceableLeg}})
 session_closes(m, u::Underlying, from, to)
     -> (closes::Vector{DateTime}, gaps::Vector{DateTime})
 check_join(L::Ledger; tick_cents = TICK_CENTS) -> Nothing
@@ -322,6 +333,7 @@ check_join(L::Ledger, rec::OrderRecord; tick_cents = TICK_CENTS) -> Nothing
 fill_price(rule::Symbol, bid, ask, side::Side, tick_cents::Int = TICK_CENTS) -> Union{Float64,Missing}
 commission(model::Symbol, prices, quantities) -> Vector{Int}
 const TICK_CENTS = 1
+struct RunFailure                            # at, stage, subject, reason
 struct UnsupportedSettlement <: Exception    # underlying, style
 ```
 
@@ -405,6 +417,7 @@ before the order.
 | **`settlement_price` rejects a cut short of the expiry** | The function's name promises a settlement price; a cut that cannot see the session's close has only a provisional print to offer, and design rule 7 says such a question gets a name. Documenting the domain instead would leave an exported function handing a direct caller a confident wrong answer. |
 | **A pre-open expiry names the contract, not the data** | A close-settled rule handed a contract that expires before its session opens has an empty window by construction, and calling that a data gap blames observations that could never exist. It is the AM-settled contract, whose rule (`:session_open`, the opening print) is not written yet; walking back to the previous session instead would settle it against the wrong session entirely. |
 | **The warning lives in `settlements`, not at the call site** | If reporting were the caller's job, the window-end pass could forget it, and a silent gap is exactly the failure design rule 7 exists to prevent. |
+| **The loop returns `(ledger, failures)`, not a new type** | An unsettled lot is a runtime observation with no event behind it, so it cannot be re-derived from what the loop wrote; it has to leave with the result. A named pair is what `settlements`, `session_closes` and `fill_legs` already return -- a struct here would name one ledger and one vector twice. |
 | **`known_to` captured once per tick** | Sequence, not recorded time, bounds what a decision saw; the second order of a tick did not see the first's fills. |
 | **Engine driven by `Agent`, not `Policy`** | Refits, swaps and learning live in the agent layer; one loop serves a fixed policy and a learning agent alike. The bare-`Policy` overload is ergonomics. |
 | **No-lookahead at the type level, through derived data** | `current_policy` and `decide` take `TimeCut`; every read a derived provider makes on the policy's behalf goes through the cut. |
@@ -422,9 +435,10 @@ overload.
 **Does NOT own:** the time cut (a `market_data` type); policy logic
 and policy evolution; data acquisition; opening and closing the data
 (`run_experiment`); the writer, the events, the book and the cash rules
-([`ledger`](ledger.md)) -- `record_expiry!` included; marks and the
-equity curve (slice 5), which is also where a lot still open past the
-window end is marked; metrics and persistence.
+([`ledger`](ledger.md)) -- `record_expiry!` included; marking, which is
+[`metrics`](metrics.md)' and is also where a lot still open past the
+window end is valued; and storing the failures it observes, which is
+[`persistence`](persistence.md)'.
 
 ## Conventions consulted
 

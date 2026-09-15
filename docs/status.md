@@ -92,31 +92,40 @@ Progress toward vision:
    prints the result, and optionally persists it / renders artifacts.
    Parallel sweeps are future work.
 7. **Persistence + identity** -- `RunStore` writes runs to a
-   Hive-partitioned parquet tree at `<root>/runs/run_id=<full_hash>/`
-   (config.toml verbatim, manifest / metrics / events / orders /
-   order_legs parquet, and an `artifacts/` subdir).
+   Hive-partitioned parquet tree at `<root>/runs/run_id=<full_hash>/`.
+   **A run folder has two jobs.** It keeps the inputs needed to run the
+   experiment again -- `config.toml` and `Manifest.toml`, both verbatim,
+   plus the code provenance (`commit_sha` / `dirty` from
+   `code_provenance`) on the manifest row -- and the outputs needed to
+   verify that a rerun produced the same answer: `events` / `orders` /
+   `order_legs`, `metrics`, `curve` and `failures` parquet, with an
+   `artifacts/` subdir beside them.
    Identity is canonical and layered: `full_hash(experiment)` is the
    run id; `core_hash` (data + clock + agent + window) is shared by
    output variations of one backtest. Both come from a `to_dict`
    projection (`experiment/identity.jl`) over the *resolved* experiment,
-   so whitespace / key order / `name` / cache knobs don't fork ids.
-   Every run records code provenance (`commit_sha` / `dirty` from
-   `code_provenance`). `save_run` writes; `load_run` rebuilds the ledger
-   through `commit!` and `check_join` and then **recomputes** everything
-   derived from it -- no derived parquet table is read into a result, so
-   a loaded run cannot report a number its own inputs no longer produce.
-   The marked curve needs the run's market data, so `load_run` reopens it
-   and degrades by piece where it is absent: ledger and trade metrics
-   load, the curve is `nothing` and its path metrics are absent from the
-   result rather than `NaN`. The manifest `schema_version`, now 5,
-   refuses runs written under the positions schema, the pre-identity one
-   and the `pnl_series` one.
+   so whitespace / key order / `name` / cache knobs -- and metric
+   parameters spelled at their defaults -- don't fork ids.
+   **`load_run` reads the record and opens no market data**: the ledger
+   is rebuilt through `commit!` and `check_join`, and the curve, the
+   failures and the metrics come back as the run reported them. The
+   reason is evidence -- recomputing on load destroys the witness a
+   reproduction check needs, since two fresh computations can agree
+   perfectly and both differ from the recorded run. `reproduce(store,
+   run_id)` is the other operation: it reruns against live data and
+   reports success, divergence by output/row/field, or inability, and it
+   never writes over the witness. The manifest `schema_version`, now 6,
+   refuses every earlier schema; none of them holds a curve or a failure
+   table to migrate from.
    Every value that changes a result is either in `core_hash` -- the data
    specs, clock, agent, window, the venue's `fill_rule` / `cost_model`,
    the contract facts resolved for the experiment's underlying, and the
    parquet specs' bar-stamp convention, projected as the constant
    `"bar_end"` because it decides which minute every decision reads --
-   or a stated constant in code. Cross-run queries are DuckDB
+   or a stated constant in code. Dataset versioning is **dropped, not
+   deferred**: the `dataset` slot holds a root path and the Massive trees
+   are trusted as stable, so a divergence attributes to code or
+   dependencies by elimination. Cross-run queries are DuckDB
    SQL against the parquet glob. Compute reuse (skip the backtest on a
    `core_hash` hit) and a curation gate are the next slices.
 
@@ -508,6 +517,57 @@ failed.** What the review deferred is in the backlog below.
   cash, `sharpe` 1.0389, 2,515 of 2,516 sessions marked -- and keeps
   `core_hash` `2bde5de695f9c90a` while its `full_hash` moves from
   `6990a511c201c1aa` to `f402707b152aab0c`.
+  **Commit 2 landed 2026-09-15**: the persistence split. A run folder now
+  has two jobs -- keep the inputs needed to run the experiment again
+  (`config.toml` and `Manifest.toml`, both verbatim, plus the code
+  provenance) and the outputs needed to verify the answer is the same
+  (`curve.parquet` and `failures.parquet` join the ledger tables and the
+  metrics). `load_run` **reads that record and opens no market data**,
+  which reverses the recompute-on-load decision of 2026-09-14: the ground
+  then was that a loaded result must agree with today's inputs, and the
+  ground now is that a reproduction check needs a witness it can disagree
+  with -- two fresh computations can agree perfectly and both differ from
+  the recorded run, and recomputing on load destroyed the only thing that
+  would have said so. `reproduce(store, run_id)` is the other operation:
+  it rebuilds the experiment from the stored config, reruns it against
+  live data, and reports success, divergence by output / row / field with
+  both values, or *inability* -- missing data is inability, never a
+  successful comparison of empty outputs, and a config that no longer
+  hashes to its own folder is a named identity mismatch carrying the
+  regenerated projection. It never writes over the witness. Integers,
+  instants, identifiers and reasons compare exactly; finite floats use an
+  absolute `1e-9`, with NaN matching NaN and same-signed infinities
+  settled before any subtraction.
+  The engine keeps what it could not answer: `settlements(...).unsettled`
+  now leaves `run_backtest` as `RunFailure`s from **both** lifecycle
+  passes, the window-end one included, and marking keeps every failed
+  subject instead of stopping at the first -- a broken session is still
+  one curve entry and as many failure records as it had failed lots.
+  Neither is a ledger event, because nothing happened, so no replay could
+  recover them. `run_backtest` and `marked_curve` return named pairs
+  (`(ledger, failures)`, `(curve, failures)`), the shape `settlements` and
+  `fill_legs` already use. Two backlog items close here: the named-column
+  parquet writes land (positional `VALUES` lists and the events table's
+  per-kind NULL padding are gone; the bytes written are identical, so no
+  schema change of its own), and **Dataset fingerprint in identity is
+  deleted as decided rather than parked again** -- the Massive trees are
+  trusted as stable, the `dataset` slot's root path is the accepted
+  contract, and a divergence therefore attributes to code or dependencies
+  by elimination. `RUN_SCHEMA_VERSION` is 6 and refuses every earlier
+  schema, including 5: none of them holds a curve or a failure table to
+  migrate from. Deliberately not added, with reasons in
+  `persistence.md`: `round_trips.parquet` (no cross-run consumer yet) and
+  the manifest completeness flag (it would not assert what it appears to,
+  since the curve samples whole session closes and the window endpoint
+  need not be one). **Gate: 3911 passed, 0 failed, 0 errored, 0 broken.**
+  The ten-year strangle is unchanged in every figure -- 13,204 events,
+  2,201 orders, USD 29,942.23 cash, `total_pnl` 29,694.53, `sharpe`
+  1.0389, `sortino` 1.1898, `max_drawdown` 6,431.04, `volatility`
+  2,852.16, `profit_factor` 1.3028, 2,515 of 2,516 sessions marked -- and
+  neither hash moves. What is new is the account: that one unmarked
+  session, 2018-10-25T20:00:00, retains **two** `:no_mark` failures, one
+  per open lot of the strangle. The old builder broke at the first lot and
+  reported one reason; both legs were unpriceable all along.
 
 ## Backlog
 
@@ -528,26 +588,6 @@ intended direction, but not currently in flight.
   official close, what kind or provider shape they take, and what that
   costs in identity, is the design note. Not investigated. Parked
   2026-09-13 from the PR #13 review finding.
-- **Named columns in the parquet writes.** Every write site in
-  `src/persistence/store.jl` is `INSERT INTO _writebuf VALUES (...)`,
-  positional, and `events.parquet` is one wide union table, so each event
-  type pads the columns it lacks with positional `"NULL"` strings. A
-  miscount writes a value into the wrong column and nothing in the type
-  system catches it; what defends it today is `load_run` rebuilding
-  through one `commit!` and re-running `check_join`, which turns a
-  misalignment into a load-time failure rather than a plausible wrong
-  number. Naming the columns removes the padding entirely -- DuckDB nulls
-  what an insert does not name -- and the class of bug with it. The file
-  written is byte-identical, so there is no schema version change and no
-  migration. *Considered and rejected:* a table per event type plus a
-  spine by id. Cleaner modelling, but `save_run` has no transaction
-  across files, so a crash between writes would leave fills without their
-  matches and `load_run` would rebuild a wrong ledger rather than fail to
-  find one; and every read of the journal becomes a four-way `UNION ALL`
-  re-sorted by sequence, in `load_run` and in cross-run SQL alike. The
-  sparse columns themselves cost almost nothing -- parquet stores NULLs
-  cheaply. Parked 2026-09-13 from the PR #13 code read; the natural home
-  is whichever slice is already inside `store.jl`.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail
@@ -564,23 +604,17 @@ intended direction, but not currently in flight.
   (`policies.md` Future work) or keep policies as 4-leg inline
   `decide` bodies. Parked 2026-09-08 behind the settle item, which
   landed with slice 3 of the ledger rebuild.
-- **Reproducibility harness for stored runs.** Opt-in, data-gated tests
-  that rerun each saved run (`load_run` -> `run_experiment`) and assert its
-  `metrics` and marked curve still match, auto-skipping where the source data
-  is absent (so CI / data-less machines skip cleanly); plus a
-  `scripts/revalidate_runs.jl` utility that refreshes a run's `commit_sha` /
-  `dirty` when a rerun reproduces it, and *flags* divergences rather than
-  overwriting. Run identity is config-derived (one result per `run_id`), so
-  this is what guards that invariant against code drift. Not started.
-- **Dataset fingerprint in identity.** The parquet specs carry their
-  root in a reserved `dataset` slot of the identity projection; a real
-  logical dataset id and version (so the same tree at two paths, or a
-  re-collected tree at one path, hash right) is its own design note.
-  Declined in data-kinds v3. **Load-bearing since PR 4's first half**:
-  `load_run` recomputes the marked curve from the market data on the
-  machine, so stale or re-collected data can now make a plain *load*
-  differ while appearing to read recorded history -- previously only a
-  rerun could. That round names the risk and does not solve it.
+- **Reproducibility harness for stored runs.** The comparison itself
+  landed as `reproduce(store, run_id)`; what remains is the harness around
+  it. Opt-in, data-gated integration tests that reproduce every stored
+  schema-6 run and skip cleanly where the source data is absent (a
+  data-less machine must *skip*, while an invoked reproduction on one
+  reports inability rather than success); `scripts/revalidate_runs.jl`, a
+  utility that refreshes a run's `commit_sha` / `dirty` after a successful
+  reproduction -- never as a side effect of divergence, and never
+  replacing the stored outputs or the dependency document; and extending
+  `compare_runs.jl` to the curve and the failures rather than the manifest
+  and the metrics alone.
 - **Conflicting extended-hours spot rows.** The SPY tree holds two
   disagreeing rows at 2026-02-07T00:12:00 (690.21 vs 690.22). Nothing in
   the codebase reads outside the regular-session window, so nothing sees

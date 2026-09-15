@@ -122,6 +122,16 @@ consequences worth stating plainly:
 
 - The session appears in `unmarked_at` / `unmarked_reason` and nowhere
   else. `n_unmarked` is how many.
+- **The builder still examines the rest of the session's lots**, and
+  retains a `RunFailure` for each one it cannot price. The running total
+  is discarded: carrying on is for the account of what went unanswered,
+  never for a partial portfolio value. So a broken session is one curve
+  entry and as many failure records as it had failed lots, and the two
+  agree instant for instant. A printless session names its underlying
+  instead of a lot. `marked_curve` returns both, and the run carries them
+  (see [experiment](experiment.md)); only `UnpriceableLeg` is caught, so
+  an unexpected error still propagates rather than becoming an empty
+  output under a successful-looking run.
 - A break costs **two** observations, not one: neither the step into the
   broken session nor the step out of it is a period this run observed. A
   step spanning it would cover two periods while being scaled as one.
@@ -281,9 +291,10 @@ result rather than reported as `NaN`. An absent key says "not computed";
 `NaN` would say "computed, and undefined", a different and false claim. The
 omission is wholesale rather than selective because every metric takes both
 inputs, so the table does not record which one each reads: `:profit_factor`
-goes with the others though it needs no curve. `load_run` takes that path
-on a machine without the run's
-market data.
+goes with the others though it needs no curve. It is a run-time path: a
+run whose market data cannot be opened has no curve. `load_run` does not
+take it, because loading reads the metrics the run reported and computes
+none.
 
 ## Key decisions
 
@@ -360,8 +371,6 @@ core metric functions (`total_pnl`, `n_round_trips`, `hit_rate`, `n_opens`,
 
 ## Future work
 
-- The derived persistence exports (round trips, marks, equity, failures)
-  and the manifest completeness flag: the second half of the outputs round.
 - A non-zero risk-free rate, which must choose the short-end tenor for the
   per-session hurdle and retain the intentional coupling to the curve
   `SurfaceFrom` uses.

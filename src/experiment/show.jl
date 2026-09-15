@@ -33,6 +33,12 @@ function Base.show(io::IO, ::MIME"text/plain", r::ExperimentResult)
         println(io, "  curve       ", n_marked(c), " marked sessions, ",
                     n_unmarked(c), " unmarked")
     end
+    # Zero is an answer: the run asked and nothing went unanswered. It is
+    # not the same as a result that never carried the question, which is
+    # why the line is always printed.
+    println(io, "  failures    ", length(r.failures), " retained",
+                isempty(r.failures) ? "" :
+                "  (" * join(sort(unique(string(f.stage, ":", f.reason) for f in r.failures)), ", ") * ")")
     println(io)
     println(io, "Metrics:")
     width = isempty(keys(r.metrics)) ? 0 : maximum(length(string(k)) for k in keys(r.metrics))

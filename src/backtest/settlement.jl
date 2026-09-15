@@ -324,9 +324,11 @@ The lifecycle step as a function of the cut and the book, the twin of
 [`fill_legs`](@ref): the lots of `book` falling due in `(prev, t]`, each
 paired with the price [`settlement_price`](@ref) gives it. `settled` is
 a `Vector{Tuple{Lot,Float64}}`, ready for `record_expiry!`; `unsettled`
-holds one [`UnpriceableLeg`](@ref) per lot that could not be priced.
-Mutates nothing, and walks `open_lots` in opening-fill order so a replay
-reproduces.
+is the same shape for the ones that failed, each lot paired with the
+[`UnpriceableLeg`](@ref) it raised. The lot rides along because the
+caller has to say *which* lot went unanswered, and two lots of one
+contract falling due together are two questions. Mutates nothing, and
+walks `open_lots` in opening-fill order so a replay reproduces.
 
 The rule is per lot, not per run: `contract_spec(underlying).settlement`
 picks it, so a book holding two styles settles each one correctly. A lot
@@ -355,11 +357,14 @@ This is the one place the named failure is caught, and the one place it
 is reported: a `@warn` per unsettled lot, carrying the contract, its
 expiry and the reason. Reporting here rather than at the call site is
 design rule 7's own reason -- a caller could forget, and a silent gap is
-exactly what the rule exists to prevent.
+exactly what the rule exists to prevent. The warning is not the whole
+account, though: `run_backtest` carries every entry out as a
+[`RunFailure`](@ref) on its result, because a log line does not survive
+the run and a ledger replay cannot recover a thing that did not happen.
 """
 function settlements(cut::TimeCut, book::Book, prev::DateTime, t::DateTime)
     settled   = Tuple{Lot,Float64}[]
-    unsettled = UnpriceableLeg[]
+    unsettled = Tuple{Lot,UnpriceableLeg}[]
     for lot in open_lots(book)
         prev < lot.contract.expiry <= t || continue
         # Outside the `try`: an unsupported style is not a valuation
@@ -371,7 +376,7 @@ function settlements(cut::TimeCut, book::Book, prev::DateTime, t::DateTime)
             e isa UnpriceableLeg || rethrow()
             @warn("lot left open: no honest settlement price",
                   contract = lot.contract, expiry = lot.contract.expiry, reason = e.reason)
-            push!(unsettled, e)
+            push!(unsettled, (lot, e))
         end
     end
     return (settled = settled, unsettled = unsettled)

@@ -139,7 +139,7 @@ end
 @testset "marked_curve: one point per session close, cash plus the marked book" begin
     L, _ = _lg_case_strangle_order()
     data = _mk_data()
-    c = marked_curve(L, data, _MK_UND, _MK_FROM, _MK_TO)
+    c = marked_curve(L, data, _MK_UND, _MK_FROM, _MK_TO).curve
     @test c.timestamps == _MK_CLOSES
     @test n_marked(c) == 4 && n_unmarked(c) == 0
     # At the opening marks the whole position is worth what it cost, so the
@@ -153,7 +153,7 @@ end
 
 @testset "marked_curve: a flat book needs no market data and is the realised total" begin
     L, _ = _lg_case_strangle_closed()      # closed at _LG_T_CLOSE = 2024-01-18T20:00
-    c = marked_curve(L, _mk_data(), _MK_UND, _MK_FROM, _MK_TO)
+    c = marked_curve(L, _mk_data(), _MK_UND, _MK_FROM, _MK_TO).curve
     @test n_unmarked(c) == 0
     trades = trade_pnl(L)
     # Once flat, the marked profit is the ledger's realised total and stops
@@ -166,7 +166,7 @@ end
 @testset "marked_curve: an unmarkable lot costs the session, never a partial sum" begin
     L, _ = _lg_case_strangle_order()
     data = _mk_data(; skip=[(18, _LG_CALL490)])
-    c = (@test_logs (:warn,) match_mode=:any marked_curve(L, data, _MK_UND, _MK_FROM, _MK_TO))
+    c = (@test_logs (:warn,) match_mode=:any marked_curve(L, data, _MK_UND, _MK_FROM, _MK_TO).curve)
     @test n_unmarked(c) == 1
     @test c.unmarked_at == [_MK_CLOSES[3]]
     @test c.unmarked_reason == [:no_mark]
@@ -182,7 +182,7 @@ end
     L, _ = _lg_case_strangle_order()
     spots = filter(p -> Date(p.timestamp) != Date(2024, 1, 17), _mk_spots())
     data = MarketData(InMemory(_mk_quotes()), InMemory(spots))
-    c = (@test_logs (:warn,) match_mode=:any marked_curve(L, data, _MK_UND, _MK_FROM, _MK_TO))
+    c = (@test_logs (:warn,) match_mode=:any marked_curve(L, data, _MK_UND, _MK_FROM, _MK_TO).curve)
     @test n_unmarked(c) == 1
     @test c.unmarked_reason == [:unexpected_gap]
     @test c.unmarked_at == [DateTime(2024, 1, 17, 21, 0)]   # the nominal 16:00 ET close
@@ -190,7 +190,7 @@ end
 end
 
 @testset "marked_curve: an empty ledger is a flat zero curve, not an empty one" begin
-    c = marked_curve(Ledger(), _mk_data(), _MK_UND, _MK_FROM, _MK_TO)
+    c = marked_curve(Ledger(), _mk_data(), _MK_UND, _MK_FROM, _MK_TO).curve
     @test c.timestamps == _MK_CLOSES
     @test all(iszero, c.profit)
     @test n_unmarked(c) == 0
@@ -213,8 +213,8 @@ end
     @test trade_pnl(slow)  ≈ [45.0]
     @test total_pnl(trade_pnl(quick)) == total_pnl(trade_pnl(slow))
     data = _mk_data()
-    cq = marked_curve(quick, data, _MK_UND, _MK_FROM, _MK_TO)
-    cs = marked_curve(slow,  data, _MK_UND, _MK_FROM, _MK_TO)
+    cq = marked_curve(quick, data, _MK_UND, _MK_FROM, _MK_TO).curve
+    cs = marked_curve(slow,  data, _MK_UND, _MK_FROM, _MK_TO).curve
     # Flat at every session close: four equal levels, no dispersion at all.
     @test cq.profit ≈ [45.0, 45.0, 45.0, 45.0]
     @test session_changes(cq) ≈ [0.0, 0.0, 0.0]
