@@ -270,20 +270,50 @@ end
         TimeCut(f.data, t), book, _st_et(_ST_D18, 10, 0), t)
     @test isempty(out.settled)
     @test length(out.unsettled) == 1
-    @test only(out.unsettled).reason == :unexpected_gap
-    @test only(out.unsettled).contract == f.a
+    @test only(out.unsettled)[2].reason == :unexpected_gap
+    @test only(out.unsettled)[1].contract == f.a
+    @test only(out.unsettled)[2].contract == f.a
 end
 
 @testset "run_backtest: an unsettleable lot stays open, warned about once" begin
     f = _st_gap_fixture()
     p = _ST_OpenAt([f.ticks[1] => f.a])
-    L = @test_logs (:warn, "lot left open: no honest settlement price") run_backtest(
+    out = @test_logs (:warn, "lot left open: no honest settlement price") run_backtest(
         p, f.data, f.ticks[1], _st_et(_ST_D22, 20, 0), _ST_CLOCK)
+    L = out.ledger
     # Three ticks and a window-end pass follow the expiry; the warning fired
     # once, because the interval examines a lot exactly once, ever (D5).
     @test !any(e isa Expiry for e in L.events)
     @test [l.contract for l in open_lots(L.book)] == [f.a]
     @test L.book == book_effective(L, _st_et(_ST_D22, 20, 0))
+    # The engine is the *producer* of what persistence later keeps. A warning
+    # dies with the run; this is the fact that leaves it, stamped at the tick
+    # whose lifecycle pass asked -- the Friday, not the Thursday expiry.
+    r = only(out.failures)
+    @test r.stage === :settlement && r.reason === :unexpected_gap
+    @test r.at == f.ticks[4]
+    @test occursin("470.0C", r.subject) && occursin("lot@", r.subject)
+end
+
+@testset "run_backtest: the window-end pass retains its own unsettled lot" begin
+    # The other lifecycle pass. The expiry falls after the last policy tick,
+    # so nothing but the endpoint pass ever examines this lot -- and that
+    # pass's `.unsettled` was the half that used to be warned about and then
+    # dropped on the floor.
+    f = _st_gap_fixture()
+    to = _st_et(_ST_D18, 20, 0)                  # past the 16:00 ET expiry
+    p = _ST_OpenAt([f.ticks[1] => f.a])
+    out = @test_logs (:warn, "lot left open: no honest settlement price") run_backtest(
+        p, f.data, f.ticks[1], to, _ST_CLOCK)
+    @test !any(e isa Expiry for e in out.ledger.events)
+    @test [l.contract for l in open_lots(out.ledger.book)] == [f.a]
+    r = only(out.failures)
+    @test r.stage === :settlement && r.reason === :unexpected_gap
+    # Stamped at the window end, which is not any tick of the run: that is
+    # what says which pass asked the question.
+    @test r.at == to
+    @test !any(t -> t == r.at, f.ticks)
+    @test occursin("470.0C", r.subject) && occursin("lot@", r.subject)
 end
 
 @testset "run_backtest: an unsettleable lot is still in the book the policy sees" begin
@@ -299,7 +329,7 @@ end
     # give a policy calls the lot at that tick live.
     p = _ST_Recording(_ST_OpenAt([f.ticks[1] => f.a]))
     L = @test_logs (:warn, "lot left open: no honest settlement price") run_backtest(
-        p, f.data, f.ticks[1], _st_et(_ST_D22, 20, 0), _ST_CLOCK)
+        p, f.data, f.ticks[1], _st_et(_ST_D22, 20, 0), _ST_CLOCK).ledger
     seen = Dict(p.seen)
     @test length(p.seen) == 5
     for t in (f.ticks[4], f.ticks[5])          # the two ticks after the expiry
@@ -332,7 +362,7 @@ end
     # the warned-about lot is in the book this very decision is handed.
     p = _ST_Recording(_ST_OpenAt([f.ticks[1] => f.a]))
     L = @test_logs (:warn, "lot left open: no honest settlement price") run_backtest(
-        p, f.data, f.ticks[1], _st_et(_ST_D22, 20, 0), _ST_CLOCK)
+        p, f.data, f.ticks[1], _st_et(_ST_D22, 20, 0), _ST_CLOCK).ledger
     seen = Dict(p.seen)
     @test length(p.seen) == 6
     at_expiry = seen[f.a.expiry]
@@ -352,7 +382,7 @@ end
     f = _st_fixture()
     to = _st_et(_ST_D22, 10, 0)
     p = _ST_OpenAt([f.ticks[1] => f.a])
-    L = run_backtest(p, f.data, f.ticks[1], to, _ST_CLOCK)
+    L = run_backtest(p, f.data, f.ticks[1], to, _ST_CLOCK).ledger
     @test [typeof(e) for e in L.events] == [Fill, Fee, Expiry]
     x = only(e for e in L.events if e isa Expiry)
     @test x.contract == f.a && x.quantity == 1 && x.outcome == CashSettled
@@ -375,7 +405,7 @@ end
     # ET that day, inside the window but after every tick.
     to = _st_et(_ST_D19, 20, 0)
     p = _ST_OpenAt([f.ticks[1] => f.a])
-    L = run_backtest(p, f.data, f.ticks[1], to, _ST_CLOCK)
+    L = run_backtest(p, f.data, f.ticks[1], to, _ST_CLOCK).ledger
     x = only(e for e in L.events if e isa Expiry)
     @test effective_at(x) == f.a.expiry
     @test recorded_at(x) == to
@@ -387,7 +417,7 @@ end
     f = _st_fixture()
     to = _st_et(_ST_D22, 10, 0)
     p = _ST_Recording(_ST_OpenAt([f.ticks[1] => f.a, f.ticks[5] => f.b]))
-    L = run_backtest(p, f.data, f.ticks[1], to, _ST_CLOCK)
+    L = run_backtest(p, f.data, f.ticks[1], to, _ST_CLOCK).ledger
     seen = Dict(p.seen)
     @test length(p.seen) == 5
     # The expiry is effective Friday 16:00 ET and booked at the Monday tick;
@@ -404,7 +434,7 @@ end
     f = _st_fixture()
     to = _st_et(_ST_D22, 10, 0)
     p = _ST_OpenAt([f.ticks[1] => f.a, f.ticks[5] => f.b])
-    L = run_backtest(p, f.data, f.ticks[1], to, _ST_CLOCK)
+    L = run_backtest(p, f.data, f.ticks[1], to, _ST_CLOCK).ledger
     @test book_as_known(L, last_sequence(L)) == book_effective(L, to)
     # Saturday: the expiry is already true, and not yet known.
     x = only(e for e in L.events if e isa Expiry)
@@ -434,7 +464,7 @@ end
     f = _st_fixture()
     to = _st_et(_ST_D22, 10, 0)
     L = run_backtest(_ST_OpenThenHalfClose(f.ticks[1], f.ticks[2], f.a), f.data,
-                     f.ticks[1], to, _ST_CLOCK)
+                     f.ticks[1], to, _ST_CLOCK).ledger
     @test [typeof(e) for e in L.events] == [Fill, Fee, Fill, Match, Fee, Expiry]
     x = only(e for e in L.events if e isa Expiry)
     @test x.quantity == 1                         # the remainder, whole, and only once
@@ -450,7 +480,7 @@ end
 @testset "settlements: mutates nothing and is examined once" begin
     f = _st_fixture()
     to = _st_et(_ST_D22, 10, 0)
-    L = run_backtest(_ST_OpenAt([f.ticks[1] => f.b]), f.data, f.ticks[1], to, _ST_CLOCK)
+    L = run_backtest(_ST_OpenAt([f.ticks[1] => f.b]), f.data, f.ticks[1], to, _ST_CLOCK).ledger
     book = L.book
     before = deepcopy(book)
     cut = TimeCut(f.data, to)
@@ -486,8 +516,9 @@ end
         gap_args...)
     second_gap = @test_logs (:warn, "lot left open: no honest settlement price") settlements(
         gap_args...)
-    @test [e.reason for e in first_gap.unsettled] == [:unexpected_gap]
-    @test [e.reason for e in second_gap.unsettled] == [e.reason for e in first_gap.unsettled]
+    @test [e.reason for (_, e) in first_gap.unsettled] == [:unexpected_gap]
+    @test [e.reason for (_, e) in second_gap.unsettled] ==
+          [e.reason for (_, e) in first_gap.unsettled]
     @test isempty(first_gap.settled) && isempty(second_gap.settled)
     @test gap_book == gap_before
     @test isempty(settlements(TimeCut(g.data, to), held, g.a.expiry, to).settled)
@@ -523,7 +554,7 @@ end
              ("last tick",     f.ticks[1], f.a.expiry)]      # t == to
     for (name, from, to) in cases
         @testset "$name" begin
-            err = try run_backtest(open_at_expiry, f.data, from, to, _ST_CLOCK); nothing catch e; e end
+            err = try run_backtest(open_at_expiry, f.data, from, to, _ST_CLOCK).ledger; nothing catch e; e end
             @test err isa UnpriceableLeg
             @test err.reason == :expired_contract
             @test err.contract == f.a
@@ -541,7 +572,7 @@ end
     @test [l.contract for l in open_lots(_st_one_lot_book(f.a, f.a.expiry))] == [f.a]
     # One tick earlier the same order fills and the lot settles normally:
     # bought at 5.10 (-51000, fee 100), settled at 10.00 intrinsic (+100000).
-    L = run_backtest(_ST_OpenAt([f.ticks[2] => f.a]), f.data, f.ticks[1], monday, _ST_CLOCK)
+    L = run_backtest(_ST_OpenAt([f.ticks[2] => f.a]), f.data, f.ticks[1], monday, _ST_CLOCK).ledger
     @test [typeof(e) for e in L.events] == [Fill, Fee, Expiry]
     @test L.book.cash == 100000 - 51000 - 100
     @test isempty(open_lots(L.book))
@@ -576,7 +607,7 @@ end
 @testset "run_backtest: an intraday expiry booked later settles pre-expiry" begin
     f = _st_intraday_fixture()
     monday = _st_et(_ST_D22, 10, 0)
-    L = run_backtest(_ST_OpenAt([f.ticks[2] => f.c]), f.data, f.ticks[1], monday, _ST_CLOCK)
+    L = run_backtest(_ST_OpenAt([f.ticks[2] => f.c]), f.data, f.ticks[1], monday, _ST_CLOCK).ledger
     @test [typeof(e) for e in L.events] == [Fill, Fee, Expiry]
     x = only(e for e in L.events if e isa Expiry)
     @test x.settlement_price == 478.0            # the 10:00 print, not the 16:00 one
@@ -629,7 +660,7 @@ end
     out = @test_logs (:warn, "lot left open: no honest settlement price") settlements(
         cut, book, _st_et(_ST_D18, 10, 0), monday)
     @test isempty(out.settled)
-    @test only(out.unsettled).reason == :pre_open_expiry
+    @test only(out.unsettled)[2].reason == :pre_open_expiry
 end
 
 @testset "settlement_price: an expiry at exactly 09:30 ET is a one-instant window" begin

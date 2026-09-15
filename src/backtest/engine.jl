@@ -69,6 +69,51 @@ Base.showerror(io::IO, e::UnpriceableLeg) =
 Base.showerror(io::IO, e::JoinViolation) =
     print(io, "JoinViolation: ", e.field, " on ", e.id, ": ", e.reason)
 
+# ---- what a finished run could not answer -----------------------------
+
+"""
+    RunFailure
+
+One unanswerable question a **completed** run retained: `at` is the
+instant it was asked, `stage` which pass asked it (`:settlement` for the
+lifecycle, `:mark` for the marked curve), `subject` names what could not
+be answered, and `reason` is the [`UnpriceableLeg`](@ref) name.
+
+Design rule 7 carried out of the run instead of dying in a log line. A
+lot left open because no honest settlement price existed, and a session
+close the curve could not mark, are both facts about the run, and neither
+is a ledger event: nothing happened, so no replay of the journal can
+recover them. The run that observed them is the only thing that can carry
+them, which is why they ride on the result rather than being re-derived.
+
+`subject` carries enough lineage to tell two questions apart: a lot names
+its contract and its opening fill, a session that never printed names the
+underlying whose session it was. It is a label, never a value -- a
+failure never becomes a number anywhere.
+"""
+struct RunFailure
+    at      :: DateTime
+    stage   :: Symbol
+    subject :: String
+    reason  :: Symbol
+end
+
+# The whole vocabulary of `stage`, in the canonical order failures sort by.
+# Two passes ask questions and no third one does, so the column is closed:
+# a stored failure naming any other stage belongs to no pass this code runs
+# and is a defect, not a row to keep. It lives beside `RunFailure` because
+# the producers define it; persistence checks stored rows against it.
+const RUN_FAILURE_STAGES = (:mark, :settlement)
+
+# The subject of a failure about one contract, and about one lot of it.
+# Two lots of the same contract ask two questions at one instant; the
+# opening fill id is what distinguishes their answers.
+_failure_subject(c::ContractKey)::String = string(
+    ticker(c.underlying), " ", Dates.format(c.expiry, "yyyy-mm-ddTHH:MM:SS"), " ",
+    c.strike, c.option_type == Call ? "C" : "P")
+_failure_subject(lot::Lot)::String =
+    _failure_subject(lot.contract) * " lot@" * string(lot.open_fill_id)
+
 # ---- the venue applied to an order -----------------------------------
 
 """
@@ -249,7 +294,7 @@ end
 """
     run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTime,
                  clock::Clock; fill_rule = :cross_spread,
-                 cost_model = :ibkr_pro_us_options) -> Ledger
+                 cost_model = :ibkr_pro_us_options) -> (ledger, failures)
 
 Walk the ticks of `clock` in `[from, to]` (or the agent's `tick_times`
 override when it returns one). Per tick, in order: settle the lots that
@@ -278,7 +323,14 @@ it, so the two replays differ only by that lag. Lots still open after
 the window-end pass stay open, and nothing is force-settled; a lot with
 no honest settlement price stays open too and `settlements` warns.
 Returns the ledger after every append has passed the per-record join
-check.
+check, paired with the [`RunFailure`](@ref)s the run retained -- one per
+lot either pass left open for want of an honest settlement price. Both
+passes contribute, the window-end one included. They are returned rather
+than warned about and dropped because nothing else can recover them:
+no event was written, so a replay of the journal cannot find them, and
+inventing one for a settlement that did not happen would put a fiction in
+the journal of facts. The two results together are the shape `settlements`
+and `fill_legs` already use -- a named pair, not a new type.
 
 The two venue choices are keywords here, with the same defaults
 `Experiment` takes, so a direct caller can drive the loop without
@@ -289,8 +341,9 @@ a value that changes results is either in the run id or a constant.
 """
 function run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTime,
                       clock::Clock; fill_rule::Symbol = :cross_spread,
-                      cost_model::Symbol = :ibkr_pro_us_options)::Ledger
+                      cost_model::Symbol = :ibkr_pro_us_options)
     L = Ledger()
+    failures = RunFailure[]
     # Sparse policies (once a day on minute data) override `tick_times` so
     # the engine never enumerates the clock's grid; keep the `if`.
     ticks = tick_times(agent, data, from, to)
@@ -304,10 +357,12 @@ function run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTi
         #    the book the policy is handed, and one that could not be priced
         #    stays open and visible. `settlements` warns about those; a lot
         #    falling due in (prev, t] is examined exactly once, ever.
-        foreach(settlements(cut, L.book, prev, t).settled) do (lot, p)
+        due = settlements(cut, L.book, prev, t)
+        foreach(due.settled) do (lot, p)
             record_expiry!(L, lot; settlement_price = p,
                            effective_at = lot.contract.expiry, recorded_at = t)
         end
+        _retain_unsettled!(failures, due.unsettled)
         prev = t
         # 2. Decide on the book the ledger owns.
         policy = current_policy(agent, t, cut, L.book)
@@ -322,18 +377,32 @@ function run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTi
     end
     # 4. Window end: lifecycle once more at the evaluation endpoint, which
     #    may be later than the last policy tick. Lots still open stay open.
-    foreach(settlements(TimeCut(data, to), L.book, prev, to).settled) do (lot, p)
+    final = settlements(TimeCut(data, to), L.book, prev, to)
+    foreach(final.settled) do (lot, p)
         record_expiry!(L, lot; settlement_price = p,
                        effective_at = lot.contract.expiry, recorded_at = to)
     end
-    return L
+    _retain_unsettled!(failures, final.unsettled)
+    return (ledger = L, failures = failures)
+end
+
+# A lot left open because no honest settlement price existed, kept as a
+# fact of the run. Stamped at the instant the question was asked, which is
+# the tick that examined the lot -- a lot is examined exactly once, ever.
+function _retain_unsettled!(failures::Vector{RunFailure},
+                            unsettled::AbstractVector{<:Tuple{Lot,UnpriceableLeg}})
+    for (lot, e) in unsettled
+        push!(failures, RunFailure(e.t, :settlement, _failure_subject(lot), e.reason))
+    end
+    return failures
 end
 
 """
-    run_backtest(policy::Policy, data::MarketData, from, to, clock; kw...) -> Ledger
+    run_backtest(policy::Policy, data::MarketData, from, to, clock; kw...) -> (ledger, failures)
 
 Convenience overload for the fixed-policy case: wraps `policy` in a
-`StaticAgent` and runs the agent-driven loop with the same keywords.
+`StaticAgent` and runs the agent-driven loop with the same keywords, and
+returns the same `(ledger, failures)` pair.
 """
 run_backtest(policy::Policy, data::MarketData, from::DateTime, to::DateTime, clock::Clock; kw...) =
     run_backtest(StaticAgent(policy), data, from, to, clock; kw...)

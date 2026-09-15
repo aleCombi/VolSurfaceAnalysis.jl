@@ -118,9 +118,19 @@ fact, read per lot from `contract_spec`.
   `:cross_spread`: a buy takes the ask, a sale the bid, rounded onto the
   tick away from the trader (rule R5 below); a missing required side is
   `missing`. `:broker_execution` is not a rule of ours and is not in the
-  table: it names a price the broker reported. This slice still records
+  table: it names a price the broker reported. The engine still records
   one observation per leg under it, permits missing quote sides, and does
   not consult that observation; an absent observation waits for the live adapter.
+`:cross_spread` is **conservative rather than accurate**, and that is the
+point of it. IBKR fills an all-option combo at one *net* price on the
+exchange's complex order book, often inside the legs' own spreads, and
+allocates leg prices from that; crossing every leg pays more than the real
+venue would. A net-price rule taking a stated fraction of the combined
+spread is the later model, as are partial fills in whole units. Margin
+checks and order rejections are not modelled at all -- there is no capital
+base for one to bind against, so a margin rule here would be a number
+invented to constrain another invented number.
+
 - **Cost** (`commission(model, prices, quantities)`, non-negative cents
   per leg, negated into `Fee` amounts). `:none`, and
   `:ibkr_pro_us_options`: IBKR Pro's fixed-rate US options schedule at
@@ -280,11 +290,20 @@ with open lots.
 **An unsettleable lot stays open, loudly.** `settlement_price` throws
 the named failure like every other named failure here; `settlements` is
 the one boundary that catches it, warns once with the contract, its
-expiry and the reason, and returns the lot in `unsettled`. A bad day
-must not kill a ten-year run, but it must never pass silently either,
-and reporting at the boundary rather than at the call site is what makes
-that structural. `settlements` mutates no state; it is not
-side-effect-free, and the distinction is deliberate.
+expiry and the reason, and returns the lot paired with the failure in
+`unsettled`. A bad day must not kill a ten-year run, but it must never
+pass silently either, and reporting at the boundary rather than at the
+call site is what makes that structural. `settlements` mutates no state;
+it is not side-effect-free, and the distinction is deliberate.
+
+**And the run keeps it.** A warning does not survive the run, so
+`run_backtest` carries every entry out as a `RunFailure` on its result --
+from **both** lifecycle passes, the window-end one included. It cannot be
+recovered any other way: no event was written, because nothing happened,
+and inventing an `Expiry` for a settlement that did not occur would put a
+fiction in the journal of facts. The lot rides along with the failure
+because the account has to say *which* lot went unanswered, and two lots
+of one contract falling due together are two questions.
 
 **An unserved settlement style stops the run.** `UnsupportedSettlement`
 is deliberately *not* caught and warned that way. `UnpriceableLeg` names
@@ -298,22 +317,24 @@ config, so a reader who has met one has met the other.
 
 Early assignment and physical delivery are not modelled: SPY
 cash-settles at intrinsic here instead of delivering shares. Marking a
-lot still open past the window end belongs to the equity curve, not to
-the lifecycle.
+lot still open past the window end belongs to the marked curve
+([`metrics`](metrics.md)), not to the lifecycle.
 
 ## Public surface
 
 ```julia
 run_backtest(agent::Agent,  data, from, to, clock; fill_rule = :cross_spread,
-             cost_model = :ibkr_pro_us_options) -> Ledger
-run_backtest(policy::Policy, data, from, to, clock; kw...)      -> Ledger   # StaticAgent wrapper
+             cost_model = :ibkr_pro_us_options)
+    -> (ledger::Ledger, failures::Vector{RunFailure})
+run_backtest(policy::Policy, data, from, to, clock; kw...)                  # StaticAgent wrapper
+    -> (ledger::Ledger, failures::Vector{RunFailure})
 
 resolve_quote(cut::TimeCut, contract::ContractKey, t) -> OptionQuote
 fill_legs(cut, order::Order, t; fill_rule, cost_model, tick_cents = TICK_CENTS)
     -> (prices, fees, observations, fill_rule)                  # record_order!'s per-leg keywords
 settlement_price(rule::Symbol, cut::TimeCut, contract::ContractKey, t) -> Float64
 settlements(cut, book::Book, prev, t)
-    -> (settled::Vector{Tuple{Lot,Float64}}, unsettled::Vector{UnpriceableLeg})
+    -> (settled::Vector{Tuple{Lot,Float64}}, unsettled::Vector{Tuple{Lot,UnpriceableLeg}})
 session_closes(m, u::Underlying, from, to)
     -> (closes::Vector{DateTime}, gaps::Vector{DateTime})
 check_join(L::Ledger; tick_cents = TICK_CENTS) -> Nothing
@@ -322,6 +343,8 @@ check_join(L::Ledger, rec::OrderRecord; tick_cents = TICK_CENTS) -> Nothing
 fill_price(rule::Symbol, bid, ask, side::Side, tick_cents::Int = TICK_CENTS) -> Union{Float64,Missing}
 commission(model::Symbol, prices, quantities) -> Vector{Int}
 const TICK_CENTS = 1
+struct RunFailure                            # at, stage, subject, reason
+const RUN_FAILURE_STAGES = (:mark, :settlement)   # the whole vocabulary of `stage`
 struct UnsupportedSettlement <: Exception    # underlying, style
 ```
 
@@ -390,10 +413,10 @@ before the order.
 | Decision | Why |
 |---|---|
 | **The engine computes, the ledger records** | `fill_legs` is a pure function of the cut and the order; `record_order!` mints every id and the group inside one transaction and constructs the record before committing events. The engine keeps no parallel journal; a live loop replaces `fill_legs` with the broker's reports without touching the writer. |
-| **Every leg priced before anything is written** | Proposal decision 10: a structure fills whole or not at all, as a guaranteed combo does at IBKR. A leg that cannot be priced is an error before the batch, so no partial structure ever reaches the ledger. |
+| **Every leg priced before anything is written** | A structure fills whole or not at all, as a guaranteed combo does at IBKR. A leg that cannot be priced is an error before the batch, so no partial structure ever reaches the ledger. |
 | **Venue as two symbol tables and a tick, no type hierarchy** | Two plain symbols are what config and identity carry, and the tick is a constant; `Fill.fill_rule` already stores the key. A hierarchy -- or a `VenueSpec` struct -- would name the same things twice. |
 | **R5: fill prices on the tick, rounded away from the trader** | The ledger refuses cash that is not whole cents; synthesized and modelled quotes are not on the tick; exchanges only trade on it. Rounding against the trader keeps the rule as conservative as crossing the spread already is. The observation keeps the raw quote; the fill carries the tick price. |
-| **Observations recorded per leg, fills carry none** | Research records what pricing saw. This slice retains an observation row with optional quote sides for broker executions but ignores it during validation; truly observation-less live records arrive with the adapter. The join is validated, never assumed. |
+| **Observations recorded per leg, fills carry none** | Research records what pricing saw. The journal retains an observation row with optional quote sides for broker executions but ignores it during validation; truly observation-less live records arrive with the adapter. The join is validated, never assumed. |
 | **Sessions come from the spot tree; the calendar only contradicts it** | A date is a session when the underlying printed in the reference window, so an early close needs no table: where the tree holds regular-session prints alone, the last print in the window is the 13:00 one. A calendar as the source would have to carry every half-day and every ad-hoc closure correctly forever; as the check it only has to answer whether a printless date was closed, and design rule 7 makes a wrong answer loud. The cost is that the correctness of an early close is the data's to keep -- an extended-hours print inside the window would settle the contract instead, undetectably -- which is why the requirement, and what the production tree measurably gives, are written down where the kind is defined. |
 | **The settlement instant is always the contract's expiry** | When the reference price comes from an earlier session, the departure from reality is *which print stands in for the official close*, never *when the obligation ceased to exist*. The engine always passes the contract's expiry; the ledger's `_check_expiry` permits settlement at or after it, which is what makes an expiry booked at a later tick legal. The equality is this engine's choice, not the ledger's rule. |
 | **The lifecycle computes, the ledger records** | `settlements` is a function of the cut and the book, `fill_legs`' twin; the writer is the ledger's `record_expiry!`. The engine gains no expiry queue, no cached calendar and no `try`/`catch` in the loop -- `prev` is a loop variable, not state. |
@@ -405,6 +428,7 @@ before the order.
 | **`settlement_price` rejects a cut short of the expiry** | The function's name promises a settlement price; a cut that cannot see the session's close has only a provisional print to offer, and design rule 7 says such a question gets a name. Documenting the domain instead would leave an exported function handing a direct caller a confident wrong answer. |
 | **A pre-open expiry names the contract, not the data** | A close-settled rule handed a contract that expires before its session opens has an empty window by construction, and calling that a data gap blames observations that could never exist. It is the AM-settled contract, whose rule (`:session_open`, the opening print) is not written yet; walking back to the previous session instead would settle it against the wrong session entirely. |
 | **The warning lives in `settlements`, not at the call site** | If reporting were the caller's job, the window-end pass could forget it, and a silent gap is exactly the failure design rule 7 exists to prevent. |
+| **The loop returns `(ledger, failures)`, not a new type** | An unsettled lot is a runtime observation with no event behind it, so it cannot be re-derived from what the loop wrote; it has to leave with the result. A named pair is what `settlements`, `session_closes` and `fill_legs` already return -- a struct here would name one ledger and one vector twice. |
 | **`known_to` captured once per tick** | Sequence, not recorded time, bounds what a decision saw; the second order of a tick did not see the first's fills. |
 | **Engine driven by `Agent`, not `Policy`** | Refits, swaps and learning live in the agent layer; one loop serves a fixed policy and a learning agent alike. The bare-`Policy` overload is ergonomics. |
 | **No-lookahead at the type level, through derived data** | `current_policy` and `decide` take `TimeCut`; every read a derived provider makes on the policy's behalf goes through the cut. |
@@ -422,9 +446,10 @@ overload.
 **Does NOT own:** the time cut (a `market_data` type); policy logic
 and policy evolution; data acquisition; opening and closing the data
 (`run_experiment`); the writer, the events, the book and the cash rules
-([`ledger`](ledger.md)) -- `record_expiry!` included; marks and the
-equity curve (slice 5), which is also where a lot still open past the
-window end is marked; metrics and persistence.
+([`ledger`](ledger.md)) -- `record_expiry!` included; marking, which is
+[`metrics`](metrics.md)' and is also where a lot still open past the
+window end is valued; and storing the failures it observes, which is
+[`persistence`](persistence.md)'.
 
 ## Conventions consulted
 

@@ -104,7 +104,7 @@ function mark_price(cut::TimeCut, contract::ContractKey, t::DateTime)::Float64
 end
 
 """
-    marked_curve(L::Ledger, data, u::Underlying, from::DateTime, to::DateTime) -> MarkedCurve
+    marked_curve(L::Ledger, data, u::Underlying, from::DateTime, to::DateTime) -> (curve, failures)
 
 The [`MarkedCurve`](@ref) of `L` over `[from, to]`: at the close of every
 session of `u` inside the window ([`session_closes`](@ref)), the ledger's
@@ -122,13 +122,28 @@ that lot's reason and no partial sum is reported. A calendar-open date
 whose window holds no print joins it as `:unexpected_gap`, stamped at the
 session's nominal 16:00 ET close -- a label on a failure, never a value.
 
+**A broken session is still examined to the end.** The builder does not
+stop at the first unpriceable lot: it keeps going and retains a
+[`RunFailure`](@ref) naming each lot it could not price, while the
+running total is discarded -- examining the rest is for the account, not
+for a partial portfolio value. So the second return is every question
+this window left unanswered: one entry per failed lot, naming the lot and
+its reason, and one per printless session, naming the underlying whose
+session it was. The curve still carries exactly **one** unmarked entry
+per broken session however many of its lots failed, so the two agree
+instant for instant without the session count moving.
+
+Unexpected errors still propagate. Only [`UnpriceableLeg`](@ref) is
+caught, as before; this is no general exception catcher, and an aborted
+run does not become a successful record with empty outputs.
+
 Reads through a cut at each point, so no-lookahead is structural here as
 in the tick loop, and warns once with the count if any session went
 unmarked (design rule 7: the boundary that finds a gap is the boundary
 that reports it).
 """
 function marked_curve(L::Ledger, data, u::Underlying,
-                      from::DateTime, to::DateTime)::MarkedCurve
+                      from::DateTime, to::DateTime)
     grid = session_closes(data, u, from, to)
     points = Tuple{DateTime,Bool}[(t, false) for t in grid.closes]
     append!(points, Tuple{DateTime,Bool}[(t, true) for t in grid.gaps])
@@ -146,13 +161,17 @@ function marked_curve(L::Ledger, data, u::Underlying,
 
     timestamps, profit = DateTime[], Float64[]
     unmarked_at, unmarked_reason = DateTime[], Symbol[]
+    failures = RunFailure[]
     for (t, is_gap) in points
         while next <= length(due) && effective_at(due[next]) <= t
             apply!(book, due[next])
             next += 1
         end
         if is_gap
+            # No print in the session's window: the underlying and the
+            # session are the whole of what went unanswered here.
             push!(unmarked_at, t); push!(unmarked_reason, :unexpected_gap)
+            push!(failures, RunFailure(t, :mark, ticker(u), :unexpected_gap))
             continue
         end
         cut = TimeCut(data, t)
@@ -164,8 +183,12 @@ function marked_curve(L::Ledger, data, u::Underlying,
                               contract_spec(lot.contract.underlying).multiplier * lot.remaining
             catch e
                 e isa UnpriceableLeg || rethrow()
-                reason = e.reason
-                break
+                # The session is already unmarkable; keep looking so the
+                # account names every lot, not only the first. `reason` is
+                # the first one, which is the session's, and `open_value`
+                # is now a partial sum that nothing may read.
+                reason === nothing && (reason = e.reason)
+                push!(failures, RunFailure(t, :mark, _failure_subject(lot), e.reason))
             end
         end
         if reason === nothing
@@ -177,5 +200,6 @@ function marked_curve(L::Ledger, data, u::Underlying,
     isempty(unmarked_at) || @warn(
         "marked curve: sessions left unmarked", underlying = u,
         n_unmarked = length(unmarked_at), reasons = sort(unique(unmarked_reason)))
-    return MarkedCurve(timestamps, profit, unmarked_at, unmarked_reason)
+    return (curve = MarkedCurve(timestamps, profit, unmarked_at, unmarked_reason),
+            failures = failures)
 end

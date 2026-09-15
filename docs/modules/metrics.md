@@ -122,6 +122,16 @@ consequences worth stating plainly:
 
 - The session appears in `unmarked_at` / `unmarked_reason` and nowhere
   else. `n_unmarked` is how many.
+- **The builder still examines the rest of the session's lots**, and
+  retains a `RunFailure` for each one it cannot price. The running total
+  is discarded: carrying on is for the account of what went unanswered,
+  never for a partial portfolio value. So a broken session is one curve
+  entry and as many failure records as it had failed lots, and the two
+  agree instant for instant. A printless session names its underlying
+  instead of a lot. `marked_curve` returns both, and the run carries them
+  (see [experiment](experiment.md)); only `UnpriceableLeg` is caught, so
+  an unexpected error still propagates rather than becoming an empty
+  output under a successful-looking run.
 - A break costs **two** observations, not one: neither the step into the
   broken session nor the step out of it is a period this run observed. A
   step spanning it would cover two periods while being scaled as one.
@@ -163,6 +173,21 @@ Capital becomes meaningful only when the risk-free hurdle is non-zero, the
 base compounds, or results are printed as percentages. The risk-free rate
 itself belongs to market data (`RateCurve`), not to a metric parameter, and
 is zero in this round.
+
+When capital does start to matter, the denominator is a choice and not an
+obvious one: funds use NAV, option backtests commonly declare a notional
+base, and the Cboe option-writing indices use fully collateralised
+notional. Broker margin is the one candidate to refuse outright -- it is
+not a universal base, so a reported ratio would depend on whose account
+the strategy was imagined in.
+
+**One caveat survives the sampling fix.** Standard deviation treats
+frequent small gains and rare large losses symmetrically, so a correctly
+computed Sharpe still flatters a short-premium book, whose return shape is
+exactly that. Fixing the sample unit fixed the *scaling*; it did nothing
+about the statistic's blindness to skew. Reading a short strangle's Sharpe
+without that in mind is the remaining way to be misled by this number, and
+`sortino` is in the table partly because it is not blind in the same way.
 
 ## Trade-level input
 
@@ -281,9 +306,10 @@ result rather than reported as `NaN`. An absent key says "not computed";
 `NaN` would say "computed, and undefined", a different and false claim. The
 omission is wholesale rather than selective because every metric takes both
 inputs, so the table does not record which one each reads: `:profit_factor`
-goes with the others though it needs no curve. `load_run` takes that path
-on a machine without the run's
-market data.
+goes with the others though it needs no curve. It is a run-time path: a
+run whose market data cannot be opened has no curve. `load_run` does not
+take it, because loading reads the metrics the run reported and computes
+none.
 
 ## Key decisions
 
@@ -311,6 +337,7 @@ public API shapes (checked 2026-09-14).
 
 | Decision | Source checked | What it says |
 |---|---|---|
+| A session-difference series annualised by sessions per year, rather than a return series | Sharpe (1994), *The Sharpe Ratio*; fund performance reporting | A Sharpe ratio is a statistic on a series with a stated period, not on a series of trades. Without a capital base there are no returns, so the analogue is the period-to-period cash difference, annualised by sessions. That is the convention rather than a simplification -- and it is why a *trade*-sampled ratio was wrong even before the annualisation constant was. |
 | `MarkedCurve` as a plain `struct` of `Vector` fields, with no supertype and no type parameters | [Julia manual, Style Guide](https://docs.julialang.org/en/v1/manual/style-guide/) | "Don't use unnecessary static parameters" -- a parameter not used in the body should not exist -- and "avoid elaborate container types". The fields here are always `Vector{DateTime}` / `Vector{Float64}` / `Vector{Symbol}`, so there is no variation to abstract over. |
 | Same, on whether a supertype is needed to participate in ecosystem interfaces | [Tables.jl, implementing the interface](https://tables.juliadata.org/stable/implementing-the-interface/) | Interface objects "are not required to subtype, but only implement the required interface methods"; its abstract types are explicitly not for dispatch. TimeSeries.jl's parametric `TimeArray <: AbstractTimeSeries` is the counter-case, and it is a *generic container library* where element and array types genuinely vary. |
 | Same, on field type concreteness | [BlueStyle, "Type annotation"](https://github.com/JuliaDiff/BlueStyle) | Use the concrete field type rather than an abstract one; optimise with parametric types later rather than designing for variation that has not appeared. |
@@ -360,8 +387,6 @@ core metric functions (`total_pnl`, `n_round_trips`, `hit_rate`, `n_opens`,
 
 ## Future work
 
-- The derived persistence exports (round trips, marks, equity, failures)
-  and the manifest completeness flag: the second half of the outputs round.
 - A non-zero risk-free rate, which must choose the short-end tenor for the
   per-session hurdle and retain the intentional coupling to the curve
   `SurfaceFrom` uses.

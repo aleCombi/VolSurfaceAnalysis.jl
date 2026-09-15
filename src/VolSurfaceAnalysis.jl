@@ -93,19 +93,21 @@ export OptionType, Call, Put,
        fill_price, commission, TICK_CENTS,
        resolve_quote, fill_legs, settlement_price, settlements, session_closes,
        check_join, run_backtest,
-       UnpriceableLeg, JoinViolation, UnsupportedSettlement,
+       UnpriceableLeg, JoinViolation, UnsupportedSettlement, RunFailure,
        MarkedCurve, marked_curve, mark_price, session_changes,
        n_marked, n_unmarked, cents_to_usd, trade_pnl,
        total_pnl, n_round_trips, hit_rate, n_opens, n_closes,
        sharpe, sortino, max_drawdown, volatility, profit_factor,
        compute_metrics,
        Experiment, ExperimentResult, OutputSpec, run_experiment,
+       canonical_failures,
        core_hash, full_hash,
        load_experiment, load_experiment_str,
        kind_name, build_market_data, build_clock,
        build_agent, build_policy, build_curve,
        build_synthesizer, build_output_spec, build_venue,
        RunStore, with_run_store, save_run, load_run, run_dir,
-       code_provenance
+       reproduce, ReproductionReport, Divergence,
+       code_provenance, dependency_manifest, MissingManifest
 
 end

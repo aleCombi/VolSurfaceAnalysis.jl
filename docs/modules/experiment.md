@@ -35,8 +35,16 @@ the ledger: valuing an open lot needs market data, so it must happen while
 the cut is open. Open lots at the window end stay open -- nothing is
 force-settled, and expiries inside the window are booked by the engine's
 lifecycle step -- and the marked curve is what values them at each session
-close. Everything else in the result is derived from the ledger and is
-recomputed rather than stored (see [persistence](persistence.md)).
+close.
+
+**The result also carries what the run could not answer.** Two passes ask
+questions the data may not be able to settle -- the engine's lifecycle,
+for a lot falling due, and marking, for a session close -- and each keeps
+a `RunFailure` naming the instant, the subject and the reason. Neither is
+a ledger event, because nothing happened, so no replay can recover one;
+the run that observed them is the only thing that can carry them out. A
+result is that whole record, and [`load_run`](persistence.md) reads it
+back as written rather than recomputing any part of it.
 
 ## The abstraction
 
@@ -69,6 +77,7 @@ struct ExperimentResult
     ledger     :: Ledger          # events and the order journal
     curve      :: Union{MarkedCurve,Nothing}   # nothing when market data was absent
     metrics    :: NamedTuple
+    failures   :: Vector{RunFailure}   # what the run could not answer
 end
 
 run_experiment(exp::Experiment) -> ExperimentResult
@@ -114,25 +123,28 @@ the current tick is blocked.
 |---|---|
 | **`run_experiment`, not `run`** | `Base.run` is exported and dispatches on `Cmd`; shadowing it for a domain verb is exactly the convention warning every Julia style guide gives. `run_experiment` also reads as a peer of `run_backtest`. |
 | **Result carries the full `Experiment`, not just `name`** | Rerun is the primary use case for provenance. `run_experiment(result.experiment)` is the obvious primitive; a bare `name` would force a sidecar registry to look up the rest. The cost is one cheap struct reference. |
-| **The result carries the ledger, not a fill vector** | The ledger is the run: events with declared intent and recorded lineage, plus what every decision saw. The series and the metrics are derived from it and can be recomputed; nothing in the result is a second copy that could disagree with it. |
+| **The result carries the ledger, not a fill vector** | The ledger is the run: events with declared intent and recorded lineage, plus what every decision saw. Nothing in the result is a second copy of the events that could disagree with them. |
+| **Retained failures are part of the result** | A lot the lifecycle could not settle and a session the curve could not mark are facts about the run that no event records, because nothing happened. Warning about them and dropping them loses them the moment the run ends, and inventing ledger events for them would put fictions in the journal of facts. They ride on the result, in one canonical order (instant, stage, subject, reason) fixed here rather than by whichever pass observed one first -- which is what lets a stored failure table and a fresh one be compared row by row. |
 | **Open lots at the window end stay open** | Nothing is force-settled at `exp.to`. A lot still open contributes nothing to the *realised* trade series; what it is worth is the marked curve's question, answered at **every** session close rather than only at the endpoint, so an open position moves the curve throughout its life instead of appearing once at the end. Expiries inside the window are lifecycle events, booked in the tick loop. |
 | **The venue's two choices are fields, not keywords** | `fill_rule` and `cost_model` change results, so they must be visible to the run id; they are `Experiment` fields, in `core_hash`, and `run_experiment` still takes no keyword. The other two values that used to ride as engine keywords are not choices: the tick is the constant `TICK_CENTS`, and settlement style is a contract fact routed per lot off `contract_spec`. Two symbols, not a `VenueSpec` -- a struct would name the same two things twice. |
-| **A fixed convention can still be in `core_hash`** | The parquet specs project the bar-stamp convention as the constant `"bar_end"`, though nothing can vary it. It decides which minute every decision reads, so two runs made under the two conventions are not the same experiment and must not share an id; a projected constant says so once, without inventing a setting that would make the incorrect clock reachable. It is not an output, so it does not belong in `OutputSpec`. |
+| **A fixed convention can still be in `core_hash`** | The parquet specs project the bar-stamp convention as the constant `"bar_end"`, though nothing can vary it. It decides which minute every decision reads, so two runs made under the two conventions are not the same experiment and must not share an id; a projected constant says so once, without inventing a setting that would make the incorrect clock reachable. It is not an output, so it does not belong in `OutputSpec`. **The rule, in full: a constant enters the hash only when it separates two populations of stored runs.** `bar_end` does -- runs exist that were made under the other convention. The settlement price source does not: no run was ever made under another one, and `commit_sha` records the code version, so `:session_close` stays hardcoded and unhashed. Its eventual replacement is an official-close *data kind* with a provider spec, which is already inside identity as a `[data.*]` entry rather than a venue symbol. |
 | **The resolved contract spec is in `core_hash`, the table is not** | `_CONTRACT_TABLE`'s facts reach cash through `contract_spec`, so a correction there must be a new run id. Only the spec for the experiment's one underlying is projected: projecting the table would fork every id on an unrelated entry. |
 | **The clock underlying and a declared policy underlying must agree** | One experiment, one underlying is the real invariant here, and it is asserted rather than assumed: `_experiment_underlying` errors when `declared_underlyings(agent)` is non-empty and does not contain the clock selector. The loader, identity and the runner all come through it, because `Experiment` is a public constructor and a config is not the only way to build one -- identity projects the clock underlying's contract facts, so a directly-built experiment whose policy traded another would be hashed against the wrong multiplier. The id must not exist rather than be wrong. A clock is a tick grid; its selector answers *when* to step, not *whose price*: fills resolve per leg against the leg's own underlying. A policy that chooses its underlying per tick declares nothing and is not checked. |
 | **Specs in, readers scoped to the run** | `Experiment.data` holds pure spec values (hashable, persistable); `run_experiment` opens them with `with_data` and closes them on every exit path. Rebuilding the `Experiment` itself needs no data on disk -- a spec is an inert value and constructing one opens nothing. |
-| **Loading degrades by piece** | `load_run` recomputes every derived result rather than reading a stored table back, so a loaded result is always truthful to its inputs. The ledger and the always-on core metrics are functions of the ledger and always come back; the marked curve is not, so loading **opens the run's data**. When opening fails the curve is `nothing`, every optional metric is omitted, and a warning names the cause. A failure *inside* the curve build is a real defect and propagates. |
+| **Loading returns the record; reproducing it is a separate operation** | `load_run` reads the stored ledger, curve, failures and metrics and **opens no market data**: a loaded result is the witness of what that run observed, which is what a reproduction check needs in order to have something to disagree with. Recomputing on load destroyed it -- two fresh computations can agree perfectly and both differ from the recorded run. Whether today's code and data still produce the record is `reproduce`'s question, asked explicitly (see [persistence](persistence.md)). |
 | **Always-on metrics not in the output spec** | They are computed unconditionally and cost nothing extra. Listing them in `outputs.metrics` would force every experiment to repeat a boilerplate list and would imply they were opt-in, which they are not. |
 | **`metrics::Vector{Symbol}`, not `Vector{Function}`** | Symbols survive serialization to disk (now exercised by the TOML config loader), read cleanly in config dumps, and let `compute_metrics` carry the per-symbol default kwargs in one place ([`compute_metrics`](metrics.md)). Function references would skip the table at the cost of looking less like a config artifact. |
 | **Per-metric kwargs on `OutputSpec.metric_params`** | Non-default conventions (e.g. Sharpe at a different `risk_free`) ride in `OutputSpec.metric_params` (`Dict{Symbol,NamedTuple}`) and flow through `compute_metrics`'s `kwargs`. They are outputs, so they are part of `full_hash` but not `core_hash` -- a parameter change is a new run over the same backtest. |
+| **Metric parameters enter identity resolved, not as spelled** | `to_dict(::OutputSpec)` projects, for each *requested* metric, the parameters it will actually run under: the [`metrics`](metrics.md) table's defaults with the experiment's override merged over them. Naming a parameter at its default and omitting it are the same computation and so the same `full_hash`; a different value still forks. An override for a metric the experiment does not compute reaches no result and is not projected at all. A requested metric the table does not know is hashed with its override as given -- naming an unknown metric is `compute_metrics`' failure at run time, not identity's. |
 | **Identity from the resolved experiment, not config bytes** | `full_hash` / `core_hash` are computed from `to_dict(exp)` over the *resolved* experiment (`identity.jl`), so identity is insensitive to how the config was spelled and separates outputs from the backtest. The [`persistence`](persistence.md) layer records them; it does not compute them. |
 | **`run_experiment` errors loudly on a mis-specified run** | No clock tick in the window, or a clock whose selector is not an `Underlying` (an experiment ticks on an underlying's grid), indicates the experiment is mis-specified. Silent zeros would invent a "result" that doesn't exist. A leg the venue cannot price is the engine's named failure. |
 
 ## Responsibility boundaries
 
 **Owns:** the `Experiment` / `OutputSpec` structs, the
-`ExperimentResult` wrapper, the `run_experiment` entry point, and run
-identity (`core_hash` / `full_hash` via `identity.jl`).
+`ExperimentResult` wrapper, the `run_experiment` entry point, the
+canonical order of a run's retained failures, and run identity
+(`core_hash` / `full_hash` via `identity.jl`).
 
 **Does NOT own:**
 
@@ -143,6 +155,9 @@ identity (`core_hash` / `full_hash` via `identity.jl`).
   [`agents`](agents.md) module.
 - Metric implementations and their dispatch table. That is the
   [`metrics`](metrics.md) module.
+- Observing the failures it carries. The lifecycle's come from
+  [`backtest`](backtest.md) and marking's from [`metrics`](metrics.md);
+  this module concatenates and orders them, and invents none.
 - Persistence and knowledge-base writes. That is the
   [`persistence`](persistence.md) module (`save_run` / `load_run`).
 - Artifact rendering. Script-level (`scripts/lib/artifacts.jl`) so the

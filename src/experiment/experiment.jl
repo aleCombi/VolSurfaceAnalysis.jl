@@ -110,28 +110,37 @@ Experiment(; name::AbstractString, agent::Agent, data::MarketData, clock::Clock,
     ExperimentResult
 
 Output of [`run_experiment`](@ref): the ledger (events and the order
-journal), the marked profit curve, the computed metrics, and the
-originating `Experiment` itself so the run can be reproduced via
-`run_experiment(result.experiment)`.
+journal), the marked profit curve, the computed metrics, the questions
+the run could not answer, and the originating `Experiment` itself so the
+run can be rerun via `run_experiment(result.experiment)`.
 
 # Fields
 - `experiment::Experiment`
 - `ledger::Ledger`
 - `curve::Union{MarkedCurve,Nothing}`
 - `metrics::NamedTuple`
+- `failures::Vector{RunFailure}`
 
-The ledger is authoritative; everything else here is derived from it and
-is rebuilt rather than stored (see [`load_run`](@ref)). `curve` is the one
-derived result that is not a function of the ledger alone -- marking an
-open lot needs market data -- so it is `nothing` when that data was not
-available, and the path metrics are then absent from `metrics` rather than
-reported as `NaN`.
+The ledger is the authority for what happened. `curve` is the one result
+that is not a function of the ledger alone -- marking an open lot needs
+market data -- so it is `nothing` when that data was not available, and
+the path metrics are then absent from `metrics` rather than reported as
+`NaN`.
+
+`failures` is what did **not** happen: every lot the lifecycle left open
+for want of an honest settlement price, and every session close the curve
+could not mark. No event records a non-event, so nothing here can be
+recovered from the ledger by replay; the run that observed them is the
+only thing that can carry them, and this is where it does. A result is
+this whole record, and [`load_run`](@ref) reads it back as it was rather
+than recomputing any part of it.
 """
 struct ExperimentResult
     experiment :: Experiment
     ledger     :: Ledger
     curve      :: Union{MarkedCurve,Nothing}
     metrics    :: NamedTuple
+    failures   :: Vector{RunFailure}
 end
 
 # The underlying an experiment ticks and trades on, and the assertion that
@@ -177,19 +186,40 @@ marked curve is what values them at every session close. Errors loudly if
 there is no clock tick in the window, if the clock's selector is not an
 `Underlying` (an experiment ticks on an underlying's grid), or if any
 requested metric symbol is unknown.
+
+The run's retained failures come from both producers -- the engine's two
+lifecycle passes and the curve builder -- and are sorted here into one
+canonical order, by instant then stage then subject. The order is a
+property of the run rather than of who observed what first, which is what
+lets a stored failure table and a freshly produced one be compared row by
+row.
 """
 function run_experiment(exp::Experiment)::ExperimentResult
     u = _experiment_underlying(exp)
     with_data(exp.data) do d
-        ledger = run_backtest(exp.agent, d, exp.from, exp.to, exp.clock;
-                              fill_rule = exp.fill_rule, cost_model = exp.cost_model)
+        backtest = run_backtest(exp.agent, d, exp.from, exp.to, exp.clock;
+                                fill_rule = exp.fill_rule, cost_model = exp.cost_model)
+        ledger = backtest.ledger
         last_block = asof(d, kind(exp.clock), u, exp.to)
         (isempty(last_block) || first(last_block).timestamp < exp.from) && error(
             "run_experiment: no clock ticks in [$(exp.from), $(exp.to)] " *
             "for experiment $(exp.name)")
-        curve = marked_curve(ledger, d, u, exp.from, exp.to)
-        metrics = compute_metrics(ledger, curve, exp.outputs.metrics;
+        marks = marked_curve(ledger, d, u, exp.from, exp.to)
+        metrics = compute_metrics(ledger, marks.curve, exp.outputs.metrics;
                                   kwargs=exp.outputs.metric_params)
-        ExperimentResult(exp, ledger, curve, metrics)
+        failures = canonical_failures(vcat(backtest.failures, marks.failures))
+        ExperimentResult(exp, ledger, marks.curve, metrics, failures)
     end
 end
+
+"""
+    canonical_failures(fs) -> Vector{RunFailure}
+
+`fs` in the one order a run's retained failures are written and read in:
+by instant, then stage, then subject, then reason. Two producers observe
+them (the lifecycle and the marking pass) and neither owns the ordering,
+so it is fixed here -- a stored table and a fresh one then line up row by
+row, and a reproduction check compares answers rather than arrival order.
+"""
+canonical_failures(fs::AbstractVector{RunFailure})::Vector{RunFailure} =
+    sort(collect(RunFailure, fs); by = f -> (f.at, f.stage, f.subject, f.reason))
