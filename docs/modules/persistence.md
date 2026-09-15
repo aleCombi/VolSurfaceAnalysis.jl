@@ -174,10 +174,14 @@ It accepts every rearrangement that keeps the row count -- a mark failure
 retagged as a settlement failure at an unmarked instant that keeps
 another, or a settlement row deleted and a mark row duplicated -- and both
 of those change what the run is recorded to have asked. One count per
-stage is what makes the stages non-interchangeable, and the closed `stage`
-vocabulary is what keeps a row from escaping every count by naming a stage
-no pass emits. The writer refuses such a failure too, before it reaches
-the folder.
+stage is a **stage-count consistency** guard: a row cannot leave one stage
+without its count noticing, and the closed `stage` vocabulary keeps a row
+from escaping every count by naming a stage no pass emits. It is not a
+guard on each row's identity -- two rows swapping stages in opposite
+directions, with the curve still agreeing, preserve both counts and load.
+The writer refuses an unknown stage too, and it does so in the preflight
+beside the join check, before any file is created or overwritten, so a
+refused save leaves an existing folder exactly as it was.
 
 NULL curve counts mean the run recorded no curve, and `curve.parquet` must
 then be absent; zero means a recorded curve with no entries of that kind,
@@ -427,7 +431,7 @@ equals the saved one exactly. `group` is a SQL keyword: the column is
 | `n_marked` | BIGINT | session closes the run marked; NULL when it carries no curve |
 | `n_unmarked` | BIGINT | session closes it could not mark; NULL when it carries no curve |
 | `n_metrics` | BIGINT | metrics the run reported; never NULL |
-| `n_mark_failures` | BIGINT | sessions the marking pass left unanswered; never NULL |
+| `n_mark_failures` | BIGINT | failure **rows** from the marking pass, one per lot it could not price, so several may share one session; never NULL |
 | `n_settlement_failures` | BIGINT | lots the lifecycle left unanswered; never NULL |
 | `commit_sha` | VARCHAR | git commit of the code that produced the run |
 | `dirty` | BOOLEAN | working tree had uncommitted changes |

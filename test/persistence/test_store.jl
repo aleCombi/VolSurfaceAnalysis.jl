@@ -1185,13 +1185,32 @@ end
         end
         GC.gc()
 
-        # The writer refuses one too, before it can be written down.
+        # The writer refuses one too -- and BEFORE it touches the folder. The
+        # same experiment is first saved cleanly, then re-saved with a bad
+        # stage: the refusal must leave every file byte-identical, not a
+        # fresh manifest over a stale failures table.
         with_run_store(joinpath(tmp, "kb_write")) do store
+            # The curve has an unmarked instant, so a consistent record carries
+            # the mark failure that explains it.
+            good = _build_smoke_result(; curve = curve,
+                failures = [RunFailure(broken, :mark, "SPY", :no_mark)])
+            id = save_run(store, good, _SMOKE_CONFIG)
+            files = filter(f -> isfile(joinpath(run_dir(store, id), f)),
+                           readdir(run_dir(store, id)))
+            before = Dict(f => read(joinpath(run_dir(store, id), f)) for f in files)
+
             bad = _build_smoke_result(; curve = curve,
                 failures = [RunFailure(broken, :rollover, "SPY", :no_mark)])
+            @test full_hash(bad.experiment) == id      # it targets the same folder
             err = try save_run(store, bad, _SMOKE_CONFIG); nothing catch e; e end
             @test err isa ArgumentError
             @test occursin("rollover", err.msg) && occursin(":mark", err.msg)
+            println("  refused before writing: ", err.msg)
+
+            after = Dict(f => read(joinpath(run_dir(store, id), f)) for f in files)
+            @test Set(readdir(run_dir(store, id))) == Set(readdir(run_dir(store, id)))
+            @test after == before                     # nothing in the folder moved
+            @test load_run(store, id).failures == good.failures   # and it still loads as saved
         end
         GC.gc()
     end

@@ -210,6 +210,24 @@ _insert_sql(cols::AbstractVector{<:Pair}) =
 
 # --- save_run ------------------------------------------------------------
 
+# A failure outside the closed stage vocabulary is a producer bug, and it is
+# refused BEFORE any file is touched. Refusing it inside `_write_failures`
+# was too late: by then every other file had been overwritten, and an
+# existing folder for the same id kept its old `failures.parquet` under a
+# manifest that no longer described it -- a mixed record that passed every
+# load check and silently lost the failure. So this runs beside
+# `check_join`, in the preflight, where a refusal leaves the folder as it was.
+function _check_failure_stages(failures::AbstractVector{RunFailure})
+    for f in failures
+        f.stage in RUN_FAILURE_STAGES || throw(ArgumentError(
+            "save_run: failure at $(f.at) names the stage :$(f.stage), but a " *
+            "run's failures come from the stages " *
+            "$(join((":" * String(s) for s in RUN_FAILURE_STAGES), ", ")); " *
+            "no pass asks a question under :$(f.stage)"))
+    end
+    return nothing
+end
+
 """
     save_run(store::RunStore, result::ExperimentResult,
              config_toml::AbstractString;
@@ -279,6 +297,7 @@ function save_run(store::RunStore, result::ExperimentResult,
         "save_run: config_toml name \"$(config_exp.name)\" does not match " *
         "result.experiment name \"$(result.experiment.name)\""))
     check_join(result.ledger)
+    _check_failure_stages(result.failures)      # before mkpath: a refusal touches nothing
     dir = run_dir(store, id)
     mkpath(dir)
 
@@ -598,13 +617,7 @@ function _write_failures(store::RunStore, dir::AbstractString, id::AbstractStrin
     # The manifest counts the failures stage by stage, so a stage no pass
     # emits would be written with no count covering it -- and a row nothing
     # counts is exactly the membership hole the counts exist to close.
-    for f in failures
-        f.stage in RUN_FAILURE_STAGES || throw(ArgumentError(
-            "save_run: failure at $(f.at) names the stage :$(f.stage), but a " *
-            "run's failures come from the stages " *
-            "$(join((":" * String(s) for s in RUN_FAILURE_STAGES), ", ")); " *
-            "no pass asks a question under :$(f.stage)"))
-    end
+    _check_failure_stages(failures)              # preflighted in save_run; cheap to repeat
     inserts = String[_insert_sql([
         "run_id"  => _str_sql(id),
         "instant" => _dt_sql(f.at),
