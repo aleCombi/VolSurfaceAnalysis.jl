@@ -172,19 +172,33 @@ failed.** What the review deferred is in the backlog below.
 
 ## In flight
 
-- **Ledger rebuild (proposal).** The fill-vector ledger splits the
+Nothing. The ledger rebuild finished on 2026-09-15; the next work is the
+backlog below, where **Second concrete policy** and **Official closing
+prices instead of the session-close print** are the two items that most
+directly advance [vision.md](vision.md).
+
+## The ledger rebuild, finished 2026-09-15
+
+The record of the rebuild, slice by slice, kept because the measured
+numbers and the decisions behind them are what a later reader needs and
+the working notes that carried them have been retired. Every design
+decision named here now lives in the module docs.
+
+- **Ledger rebuild.** The fill-vector ledger split the
   lifecycle over three layers (engine fills, `pnl_series` matches,
   `run_experiment` settles) with no shared record, plus a FIFO
   float-residue defect, per-share units labelled USD, and per-leg
-  sampling that inflates the annualised ratios. The plan is an event
-  journal booked inside the run: `Order` with intent out of `decide`, a
+  sampling that inflated the annualised ratios. What replaced it: an event
+  journal booked inside the run -- `Order` with intent out of `decide`, a
   `Book` view in, `Fill` / `Match` / `Expiry` / `Fee` events with a
-  bitemporal header, an order journal outside the ledger holding the
-  quotes decisions saw, contract facts / simulated venue / named
-  simplifications as three identity-bearing config values, ratios on a
-  daily equity curve. Revised after four reviews; see
-  [docs/proposals/ledger.md](proposals/ledger.md), whose section 3
-  decisions are being settled slice by slice. **Slice 1 landed
+  bitemporal header, an order journal holding the quotes decisions saw,
+  contract facts and the simulated venue inside identity, and ratios on a
+  curve sampled at session closes rather than at trades. The plan was
+  revised after four reviews and settled slice by slice; twelve
+  result-changing decisions came out of it, and every one of them is now
+  in [ledger.md](modules/ledger.md), [backtest.md](modules/backtest.md),
+  [metrics.md](modules/metrics.md), [experiment.md](modules/experiment.md)
+  or [persistence.md](modules/persistence.md). **Slice 1 landed
   2026-09-11**: the pure
   `ledger` module ([docs/modules/ledger.md](modules/ledger.md)) -- the
   order and event vocabulary, the contract table, the cash rules, the
@@ -325,9 +339,7 @@ failed.** What the review deferred is in the backlog below.
   and stays in the book handed to every later decision, and
   `lot.contract.expiry <= t` is what tells a policy it holds one,
   inclusive because the settlement interval is.
-  **PR 3 landed 2026-09-14**
-  ([docs/proposals/ledger-identity.md](proposals/ledger-identity.md)):
-  config and identity, the run-id break. Four values changed results and
+  **PR 3 landed 2026-09-14**: config and identity, the run-id break. Four values changed results and
   appeared in no run id. Two of them are choices and are now config:
   `fill_rule` and `cost_model` are `Experiment` fields, read from an
   optional `[venue]` table whose two keys both default to today's values,
@@ -367,9 +379,8 @@ failed.** What the review deferred is in the backlog below.
   ten-year strangle rerun (same 4478 `Expiry` events over 1699 instants,
   same 2240 orders, same metrics, new run id) is the regression that
   closes the round.
-  **Bar-end stamps landed 2026-09-14**
-  ([docs/proposals/bar-stamp.md](proposals/bar-stamp.md)): the clock
-  correction, and a deliberate break in comparability. A vendor minute
+  **Bar-end stamps landed 2026-09-14**: the clock correction, and a
+  deliberate break in comparability. A vendor minute
   bar is stamped at its open, but its close, high and low -- and the
   bid/ask `SpreadFromOHLCV` builds from them -- are knowable only when
   the minute ends, so a decision at `t` was reading the `[t, t+1min)`
@@ -426,9 +437,8 @@ failed.** What the review deferred is in the backlog below.
   Sharpe. Thirty-nine fewer orders is not a grid change -- the entry
   instant has a chain on 2492 of the 3652 days either way, differing on
   one -- but the contents of the minute the policy now reads.
-  **PR 4 (first half) landed 2026-09-14**
-  ([docs/proposals/ledger-outputs-curve.md](proposals/ledger-outputs-curve.md)):
-  the marked curve and the metrics that read it. Every metric read a
+  **PR 4 (first half) landed 2026-09-14**: the marked curve and the
+  metrics that read it. Every metric read a
   series of closed trades, so Sharpe, Sortino and volatility annualised
   by the square root of 252 while their observations were *trades*: a
   strategy closing about 252 structures a year looked plausible by
@@ -490,11 +500,10 @@ failed.** What the review deferred is in the backlog below.
   a range read across the gaps between sessions does, and aborts with
   `ConflictingRecords`. The regular-session input contract is claimed
   inside those windows and nowhere else, and the grid now keeps to them.
-  **The finishing round is in flight**
-  ([docs/proposals/persistence-split.md](proposals/persistence-split.md)),
-  three commits in one branch: the metric-parameter identity fix, the
-  persistence split, then a docs sweep that retires every proposal. It
-  supersedes what PR 4's second half had planned: `round_trips`, `marks`
+  **The finishing round landed 2026-09-15**, three commits in one branch:
+  the metric-parameter identity fix, the persistence split, then a docs
+  sweep that retired every proposal. It
+  superseded what PR 4's second half had planned: `round_trips`, `marks`
   and `equity` export tables and the manifest completeness flag are
   dropped, with reasons, and the load path stops recomputing instead of
   keeping to exports only.
@@ -568,6 +577,32 @@ failed.** What the review deferred is in the backlog below.
   session, 2018-10-25T20:00:00, retains **two** `:no_mark` failures, one
   per open lot of the strangle. The old builder broke at the first lot and
   reported one reason; both legs were unpriceable all along.
+  **The round's own witness.** The ten-year strangle was saved under
+  schema 6 as `run_id=f402707b152aab0c` at `commit_sha`
+  `c856696` with a clean tree, and `reproduce` on it reported
+  `:reproduced` with **zero divergences** -- 13,204 events, 2,201 order
+  records, 4,402 order legs with their observations, 2,516 curve points, 2
+  failures and 10 metrics, every one compared field by field against a
+  live rerun. That is the first time a stored run in this repository has
+  been checked against its own rerun rather than merely reloaded.
+  **Commit 3 landed 2026-09-15**: the docs sweep, no code. Every file in
+  `docs/proposals/` is deleted, this round's brief included, after moving
+  what survived into the module docs: the venue's unmodelled parts and why
+  `:cross_spread` is conservative, the assignment / exercise deferral and
+  its trigger, the Sharpe-flatters-short-premium caveat and the
+  capital-base survey, the Sharpe (1994) citation, and the rule that a
+  constant enters the hash only when it separates two populations of
+  stored runs. Two things were deliberately *not* absorbed. Four
+  cross-module house rules the retired orchestration note carried are
+  parked in the backlog as a proposal rather than written into
+  `design.md`, because design rule 3 says a rule change is surfaced and
+  not absorbed. And two source comments still point at the retired notes
+  by name -- `src/ledger/cash.jl` ("the rules (proposal, section 2)",
+  which is now [ledger.md](modules/ledger.md)'s cash rules) and
+  `test/regressions/test_review_findings.jl` ("under proposal decision 8",
+  which is now "an open lot at the window end is valued by the marked
+  curve, never force-settled"). The sweep commit touches no code, so they
+  are the one loose end it leaves.
 
 ## Backlog
 
@@ -583,11 +618,18 @@ intended direction, but not currently in flight.
   early-close exposure the production spot tree currently avoids by
   measurement rather than by contract -- an official close is stamped by its session
   rather than inferred from a window, so an extended-hours print could
-  not be mistaken for one. Candidate source: Polygon's daily aggregates,
-  which `massive/polygon` may already deliver; whether they carry the
-  official close, what kind or provider shape they take, and what that
-  costs in identity, is the design note. Not investigated. Parked
-  2026-09-13 from the PR #13 review finding.
+  not be mistaken for one. Candidate source: Polygon's daily aggregates.
+  The vendor asymmetry is the reason to look there first -- minute
+  aggregates deliberately relax the SIP sale-condition rules so
+  extended-hours trades update them, while daily bars follow the
+  end-of-day guidelines and do not, which is the opposite of the property
+  that makes the current rule fragile. The collector needs a
+  `us_stocks_sip/day_aggs_v1` pipeline before a kind can read one; then
+  the kind and its provider spec follow, already inside identity as a
+  `[data.*]` entry, and `:session_close` reads it instead of walking the
+  minute tree. That changes results and ids change with them. Parked
+  2026-09-13 from the PR #13 review finding; the vendor detail recorded
+  2026-09-15 from the retired identity note.
 - **Leaning out the architectural docs.** Pass over `docs/modules/*`
   (and the top-level docs) to bring them in line with design rule 6 --
   invariants and boundaries kept, drift-prone implementation detail
@@ -621,6 +663,23 @@ intended direction, but not currently in flight.
   it today; whether it is one bad delivery or a class of them, and whether
   the collection step should reject it at write time, is uninvestigated.
   Found 2026-09-14 while building the session grid.
+- **Four cross-module house rules, proposed but not adopted.** The
+  retired orchestration note carried four rules that govern every module
+  and are written down nowhere else. Design rule 3 says a rule change is
+  proposed, not absorbed, so they are parked here rather than added to
+  [design.md](design.md): (1) tests live beside the source they test, one
+  file per source file in the mirrored folder, and every failure test
+  checks that the failure fires, that it leaves the refused state exactly
+  as it was, and that it prints its own name; (2) describe the boundary,
+  never claim impossibility -- Julia has no private fields, so "cannot
+  happen" and "by construction" claim an absolute the code cannot deliver,
+  and three reviews in a row caught this codebase doing it; (3) before
+  proposing a struct, ask whether a symbol, a function or an existing type
+  does the job -- a type hierarchy is what a table graduates to when each
+  entry needs its own behaviour, not where it starts; (4) working notes
+  are retired by the change that lands their work, not carried forward for
+  a later sweep. The module docs already *illustrate* all four. Adopting
+  them is a one-line decision each; surfaced 2026-09-15.
 - **Capability-restricted views.** A structural raw/model boundary (a
   policy view that cannot address `OptionBar`) was declined in
   data-kinds v3 in favour of a doc rule; revisit if a policy ever

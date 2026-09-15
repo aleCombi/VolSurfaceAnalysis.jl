@@ -118,9 +118,19 @@ fact, read per lot from `contract_spec`.
   `:cross_spread`: a buy takes the ask, a sale the bid, rounded onto the
   tick away from the trader (rule R5 below); a missing required side is
   `missing`. `:broker_execution` is not a rule of ours and is not in the
-  table: it names a price the broker reported. This slice still records
+  table: it names a price the broker reported. The engine still records
   one observation per leg under it, permits missing quote sides, and does
   not consult that observation; an absent observation waits for the live adapter.
+`:cross_spread` is **conservative rather than accurate**, and that is the
+point of it. IBKR fills an all-option combo at one *net* price on the
+exchange's complex order book, often inside the legs' own spreads, and
+allocates leg prices from that; crossing every leg pays more than the real
+venue would. A net-price rule taking a stated fraction of the combined
+spread is the later model, as are partial fills in whole units. Margin
+checks and order rejections are not modelled at all -- there is no capital
+base for one to bind against, so a margin rule here would be a number
+invented to constrain another invented number.
+
 - **Cost** (`commission(model, prices, quantities)`, non-negative cents
   per leg, negated into `Fee` amounts). `:none`, and
   `:ibkr_pro_us_options`: IBKR Pro's fixed-rate US options schedule at
@@ -402,10 +412,10 @@ before the order.
 | Decision | Why |
 |---|---|
 | **The engine computes, the ledger records** | `fill_legs` is a pure function of the cut and the order; `record_order!` mints every id and the group inside one transaction and constructs the record before committing events. The engine keeps no parallel journal; a live loop replaces `fill_legs` with the broker's reports without touching the writer. |
-| **Every leg priced before anything is written** | Proposal decision 10: a structure fills whole or not at all, as a guaranteed combo does at IBKR. A leg that cannot be priced is an error before the batch, so no partial structure ever reaches the ledger. |
+| **Every leg priced before anything is written** | A structure fills whole or not at all, as a guaranteed combo does at IBKR. A leg that cannot be priced is an error before the batch, so no partial structure ever reaches the ledger. |
 | **Venue as two symbol tables and a tick, no type hierarchy** | Two plain symbols are what config and identity carry, and the tick is a constant; `Fill.fill_rule` already stores the key. A hierarchy -- or a `VenueSpec` struct -- would name the same things twice. |
 | **R5: fill prices on the tick, rounded away from the trader** | The ledger refuses cash that is not whole cents; synthesized and modelled quotes are not on the tick; exchanges only trade on it. Rounding against the trader keeps the rule as conservative as crossing the spread already is. The observation keeps the raw quote; the fill carries the tick price. |
-| **Observations recorded per leg, fills carry none** | Research records what pricing saw. This slice retains an observation row with optional quote sides for broker executions but ignores it during validation; truly observation-less live records arrive with the adapter. The join is validated, never assumed. |
+| **Observations recorded per leg, fills carry none** | Research records what pricing saw. The journal retains an observation row with optional quote sides for broker executions but ignores it during validation; truly observation-less live records arrive with the adapter. The join is validated, never assumed. |
 | **Sessions come from the spot tree; the calendar only contradicts it** | A date is a session when the underlying printed in the reference window, so an early close needs no table: where the tree holds regular-session prints alone, the last print in the window is the 13:00 one. A calendar as the source would have to carry every half-day and every ad-hoc closure correctly forever; as the check it only has to answer whether a printless date was closed, and design rule 7 makes a wrong answer loud. The cost is that the correctness of an early close is the data's to keep -- an extended-hours print inside the window would settle the contract instead, undetectably -- which is why the requirement, and what the production tree measurably gives, are written down where the kind is defined. |
 | **The settlement instant is always the contract's expiry** | When the reference price comes from an earlier session, the departure from reality is *which print stands in for the official close*, never *when the obligation ceased to exist*. The engine always passes the contract's expiry; the ledger's `_check_expiry` permits settlement at or after it, which is what makes an expiry booked at a later tick legal. The equality is this engine's choice, not the ledger's rule. |
 | **The lifecycle computes, the ledger records** | `settlements` is a function of the cut and the book, `fill_legs`' twin; the writer is the ledger's `record_expiry!`. The engine gains no expiry queue, no cached calendar and no `try`/`catch` in the loop -- `prev` is a loop variable, not state. |

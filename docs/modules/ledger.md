@@ -38,7 +38,7 @@ order journal holds plain numbers and timestamps for the same reason.
   one observation per leg: the quote's bid, ask and timestamp and the
   spot's price and timestamp the engine resolved. The journal is outside
   the journal of economic facts in substance: replays and cash fold the
-  events only. This slice retains one `LegObservation` per leg under
+  events only. The journal retains one `LegObservation` per leg under
   `:broker_execution`, though its quote sides may be `missing` and the
   observation is not consulted; absent observations wait for the live adapter.
 - `Ledger` -- the container, including its incrementally folded `book`;
@@ -247,8 +247,18 @@ price and a fee (the engine and its venue: the ledger records what a
 decision saw, the engine resolves it); checking that a research fill's
 price is the rule applied to its observation (`check_join`, in the
 engine, since the rule lives there); when and at what price a lot
-settles (the settlement rule, in the engine); marks, the equity curve and
+settles (the settlement rule, in the engine); marks, the marked curve and
 valuation failures (outside the journal); persistence.
+
+**Not events, and what would make them so.** Assignment and exercise are
+deferred under the lifecycle's named no-early-assignment assumption. They
+would be new kinds carrying the same header, and they become due once a
+dividend source exists, because early assignment is a real risk near
+expiry and around ex-dividend dates. Broker cash movements -- deposits,
+sweeps, interest -- arrive with the broker adapter and not before. A
+valuation that could not be made is not an event either, and never
+becomes one: nothing happened, so it leaves the run as a `RunFailure`
+beside the journal (see [backtest](backtest.md)).
 
 ## Key decisions
 
@@ -264,7 +274,7 @@ valuation failures (outside the journal); persistence.
 | **Integer quantities, per-share prices, cash in whole cents** | Removes the FIFO float residue and the per-share-labelled-USD units of the fill-vector ledger. One rounding point at the contract, then integer arithmetic: the book, both replays and the round trips agree exactly, and book equality is exact rather than a tolerance. |
 | **Validation of the whole batch at the write, FIFO included** | A structure is either booked whole or not at all; a leg that fails validation is an error before anything is written; a hand-built or loaded batch cannot encode a different lot-matching rule than the one stated here. |
 | **`ContractKey` hashes by content** | The book keys lots on `(group, contract)`; the default `objectid` hash is build-dependent, as `Underlying` documents. |
-| **The order journal lives inside the `Ledger` container, as plain values** | One object carries a run's facts and what each decision saw, so nothing is kept in sync between two containers; the records hold numbers and timestamps, never the data module's types. Replays fold `events` only. This slice uses placeholder observations with optional quote sides for broker executions; observation-less live records are deferred. |
+| **The order journal lives inside the `Ledger` container, as plain values** | One object carries a run's facts and what each decision saw, so nothing is kept in sync between two containers; the records hold numbers and timestamps, never the data module's types. Replays fold `events` only. Placeholder observations with optional quote sides stand in for broker executions; observation-less live records are deferred. |
 | **A structure is one transaction; the group is minted inside it** | Every leg is planned and validated and the record is constructed before one `commit!`; afterward only one vector grows and counters advance. A validation failure leaves the ledger, its counters, its orders and the book exactly as they were. |
 
 ## Conventions consulted
@@ -277,7 +287,7 @@ valuation failures (outside the journal); persistence.
 | An execution report carries ids, quantity, price and time, not the quote the client saw | FIX [ExecutionReport (35=8)](https://www.onixs.biz/fix-dictionary/4.4/msgtype_8_8.html): `ExecID`, `LastQty`, `LastPx`, `TransactTime`, no quote fields | `Fill` is execution only; the order journal holds the quote |
 | Prices per share, cash per contract times 100; style, settlement and delivery are listed per product | OCC contract specifications | `ContractSpec` table in code, per underlying |
 | Exercise by exception at expiry; PM settlement against the official close | OCC Rule 805; Cboe procedures | `Expiry` outcome; the lifecycle model names where it departs |
-| Realised and unrealised are separate lines | IBKR activity statement, [Realized and Unrealized Performance Summary](https://www.ibkrguides.com/reportingreference/reportguide/realized_unrealizedperformancesummary_default.htm): realised by FIFO at the close, open positions marked to market | `round_trips` now; the equity curve later |
+| Realised and unrealised are separate lines | IBKR activity statement, [Realized and Unrealized Performance Summary](https://www.ibkrguides.com/reportingreference/reportguide/realized_unrealizedperformancesummary_default.htm): realised by FIFO at the close, open positions marked to market | `round_trips` for the realised line; the marked curve ([metrics](metrics.md)) for the marked one |
 | Composition plus accessor methods, not inherited fields | Julia manual, Interfaces | shared `EventHeader`; `header`, `event_id`, `effective_at`, `recorded_at`, `sequence`, `group` |
 | Avoid abstract-element containers; small closed unions are the idiom | Julia manual, Performance Tips | `Vector{LedgerEvent}` over a closed union |
 | Content-based `hash` and `==` for value types used as dictionary keys | Julia manual, `Base.hash` docstring; `data.md` on `Underlying` | `ContractKey` |

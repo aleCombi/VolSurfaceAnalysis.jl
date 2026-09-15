@@ -174,6 +174,21 @@ base compounds, or results are printed as percentages. The risk-free rate
 itself belongs to market data (`RateCurve`), not to a metric parameter, and
 is zero in this round.
 
+When capital does start to matter, the denominator is a choice and not an
+obvious one: funds use NAV, option backtests commonly declare a notional
+base, and the Cboe option-writing indices use fully collateralised
+notional. Broker margin is the one candidate to refuse outright -- it is
+not a universal base, so a reported ratio would depend on whose account
+the strategy was imagined in.
+
+**One caveat survives the sampling fix.** Standard deviation treats
+frequent small gains and rare large losses symmetrically, so a correctly
+computed Sharpe still flatters a short-premium book, whose return shape is
+exactly that. Fixing the sample unit fixed the *scaling*; it did nothing
+about the statistic's blindness to skew. Reading a short strangle's Sharpe
+without that in mind is the remaining way to be misled by this number, and
+`sortino` is in the table partly because it is not blind in the same way.
+
 ## Trade-level input
 
 ```julia
@@ -322,6 +337,7 @@ public API shapes (checked 2026-09-14).
 
 | Decision | Source checked | What it says |
 |---|---|---|
+| A session-difference series annualised by sessions per year, rather than a return series | Sharpe (1994), *The Sharpe Ratio*; fund performance reporting | A Sharpe ratio is a statistic on a series with a stated period, not on a series of trades. Without a capital base there are no returns, so the analogue is the period-to-period cash difference, annualised by sessions. That is the convention rather than a simplification -- and it is why a *trade*-sampled ratio was wrong even before the annualisation constant was. |
 | `MarkedCurve` as a plain `struct` of `Vector` fields, with no supertype and no type parameters | [Julia manual, Style Guide](https://docs.julialang.org/en/v1/manual/style-guide/) | "Don't use unnecessary static parameters" -- a parameter not used in the body should not exist -- and "avoid elaborate container types". The fields here are always `Vector{DateTime}` / `Vector{Float64}` / `Vector{Symbol}`, so there is no variation to abstract over. |
 | Same, on whether a supertype is needed to participate in ecosystem interfaces | [Tables.jl, implementing the interface](https://tables.juliadata.org/stable/implementing-the-interface/) | Interface objects "are not required to subtype, but only implement the required interface methods"; its abstract types are explicitly not for dispatch. TimeSeries.jl's parametric `TimeArray <: AbstractTimeSeries` is the counter-case, and it is a *generic container library* where element and array types genuinely vary. |
 | Same, on field type concreteness | [BlueStyle, "Type annotation"](https://github.com/JuliaDiff/BlueStyle) | Use the concrete field type rather than an abstract one; optimise with parametric types later rather than designing for variation that has not appeared. |
