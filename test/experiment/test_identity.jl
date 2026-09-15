@@ -456,3 +456,84 @@ end
     @test !haskey(d, "outputs")
     @test haskey(VolSurfaceAnalysis._full_dict(base), "outputs")
 end
+
+@testset "identity: metric params project as effective, not as spelled" begin
+    # The projection is what the metric will actually run under. Naming a
+    # parameter at its table default and omitting it are the same
+    # experiment, so they are one run id; the override map as spelled is
+    # not, because two spellings of one computation are not two results.
+    # `[outputs]` goes last: the shared body ends in a table, so a new
+    # top-level table can only follow it.
+    mk(outputs) = load_experiment_str(_id_toml() * "\n" * outputs)
+
+    omitted = mk("[outputs]\nmetrics = [\"sharpe\"]")
+    explicit = mk("""
+    [outputs]
+    metrics = ["sharpe"]
+    [outputs.metric_params.sharpe]
+    periods_per_year = 252
+    risk_free = 0.0
+    """)
+    partial = mk("""
+    [outputs]
+    metrics = ["sharpe"]
+    [outputs.metric_params.sharpe]
+    periods_per_year = 252
+    """)
+    @test full_hash(omitted) == full_hash(explicit)
+    @test full_hash(omitted) == full_hash(partial)
+
+    # A genuinely different value is a different output and still forks,
+    # while the backtest underneath is untouched.
+    moved = mk("""
+    [outputs]
+    metrics = ["sharpe"]
+    [outputs.metric_params.sharpe]
+    periods_per_year = 12
+    """)
+    @test full_hash(moved) != full_hash(omitted)
+    @test core_hash(moved) == core_hash(omitted)
+
+    # Overriding one key leaves the rest of that metric's defaults in the
+    # projection, so a partial override cannot be read as "only this key".
+    mp = VolSurfaceAnalysis.to_dict(moved.outputs)["metric_params"]
+    @test mp["sharpe"] == Dict("periods_per_year" => 12, "risk_free" => 0.0)
+
+    # One entry per metric the run will compute, emitted resolved -- a
+    # metric with no parameters at all is present and empty. An override
+    # for a metric this experiment does not compute reaches no result, so
+    # it is not in the identity.
+    plain = mk("[outputs]\nmetrics = [\"max_drawdown\"]")
+    @test VolSurfaceAnalysis.to_dict(plain.outputs)["metric_params"] ==
+          Dict("max_drawdown" => Dict())
+    unused = mk("""
+    [outputs]
+    metrics = ["max_drawdown"]
+    [outputs.metric_params.sharpe]
+    periods_per_year = 12
+    """)
+    @test full_hash(unused) == full_hash(plain)
+
+    # An unknown requested metric still hashes: naming it is
+    # `compute_metrics`' failure at run time, not identity's.
+    bogus = Experiment(name="x", agent=omitted.agent, data=omitted.data,
+                       clock=omitted.clock, from=omitted.from, to=omitted.to,
+                       outputs=OutputSpec(metrics=[:nonsense_metric],
+                                          metric_params=Dict(:nonsense_metric => (a=1,))))
+    @test length(full_hash(bogus)) == 16
+    @test VolSurfaceAnalysis.to_dict(bogus.outputs)["metric_params"] ==
+          Dict("nonsense_metric" => Dict("a" => 1))
+end
+
+@testset "identity: every table default is reachable through the projection" begin
+    # One entry per registered metric, carrying that metric's table
+    # defaults, so a default added to the table without thought about
+    # identity shows up here rather than silently forking ids the next time
+    # a config spells it out.
+    e = load_experiment_str(_id_toml())          # outputs omitted -> all metrics
+    mp = VolSurfaceAnalysis.to_dict(e.outputs)["metric_params"]
+    for (sym, entry) in VolSurfaceAnalysis._METRIC_TABLE
+        @test mp[string(sym)] ==
+              Dict{String,Any}(string(k) => v for (k, v) in pairs(entry.defaults))
+    end
+end

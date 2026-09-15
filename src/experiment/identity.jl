@@ -165,11 +165,38 @@ to_dict(c::ContractSpec) = Dict{String,Any}(
     "delivery"   => to_dict(c.delivery),
 )
 
-function to_dict(o::OutputSpec)
+# Metric parameters project as the **effective** parameters each requested
+# metric would run under -- its `_METRIC_TABLE` defaults with the
+# experiment's override merged over them -- not as the override map as
+# spelled. Projecting the map verbatim forked two configs that run the
+# identical metric: one naming `periods_per_year = 252` and one omitting it
+# both call `sharpe` with 252, and an identity projection emits what
+# determines the result, not how it was written. This is the same rule the
+# `[venue]` table and every other defaulted field already follow.
+#
+# Only requested metrics are projected, and every one of them is, including
+# a metric whose effective parameters are empty. An override for a metric
+# the experiment does not compute reaches no result, so it is not part of
+# what the experiment is; the entries that remain are one per computation
+# the run will perform, emitted resolved rather than as written, which is
+# how `[venue]` and `lookback_ticks` already project. A requested metric
+# the table does not know has no defaults to merge: its override projects
+# as given, and `compute_metrics` names the unknown symbol when the run
+# asks for it, rather than identity refusing to hash a config that is
+# merely wrong about one metric.
+function _effective_metric_params(o::OutputSpec)::Dict{String,Any}
     mp = Dict{String,Any}()
-    for (k, v) in o.metric_params
-        mp[string(k)] = Dict{String,Any}(string(pk) => pv for (pk, pv) in pairs(v))
+    for m in o.metrics
+        entry = get(_METRIC_TABLE, m, nothing)
+        eff = merge(entry === nothing ? NamedTuple() : entry.defaults,
+                    get(o.metric_params, m, NamedTuple()))
+        mp[string(m)] = Dict{String,Any}(string(pk) => pv for (pk, pv) in pairs(eff))
     end
+    return mp
+end
+
+function to_dict(o::OutputSpec)
+    mp = _effective_metric_params(o)
     return Dict{String,Any}(
         "metrics"       => sort!(String[string(m) for m in o.metrics]),
         "metric_params" => mp,

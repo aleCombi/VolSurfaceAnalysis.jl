@@ -481,9 +481,33 @@ failed.** What the review deferred is in the backlog below.
   a range read across the gaps between sessions does, and aborts with
   `ConflictingRecords`. The regular-session input contract is claimed
   inside those windows and nowhere else, and the grid now keeps to them.
-  Next: PR 4's second half -- the derived persistence exports, the
-  `failures` table, the manifest completeness flag, and retaining
-  `settlements(...).unsettled` from the engine.
+  **The finishing round is in flight**
+  ([docs/proposals/persistence-split.md](proposals/persistence-split.md)),
+  three commits in one branch: the metric-parameter identity fix, the
+  persistence split, then a docs sweep that retires every proposal. It
+  supersedes what PR 4's second half had planned: `round_trips`, `marks`
+  and `equity` export tables and the manifest completeness flag are
+  dropped, with reasons, and the load path stops recomputing instead of
+  keeping to exports only.
+  **Commit 1 landed 2026-09-15**: metric-parameter identity.
+  `to_dict(::OutputSpec)` serialised `metric_params` as spelled, so a
+  config naming a parameter at its `_METRIC_TABLE` default forked
+  `full_hash` from one that omitted it, though both run the identical
+  metric -- the one place the "omitted-vs-explicit defaults do not move an
+  id" invariant was untrue. The projection now emits, per *requested*
+  metric, the parameters that metric will actually run under: the table
+  defaults with the experiment's override merged over them, which is how
+  `[venue]` and `lookback_ticks` already project. An override for a metric
+  the experiment does not compute reaches no result and is not projected
+  at all; an unknown requested metric still hashes, because naming it is
+  `compute_metrics`' failure at run time and not identity's. Every
+  `full_hash` moves and no `core_hash` does. Nothing live is stored, so
+  there is nothing to migrate and `RUN_SCHEMA_VERSION` stays 5. **Gate:
+  3735 passed, 0 failed, 0 errored, 0 broken.** The ten-year strangle is
+  unchanged where it must be -- 13,204 events, 2,201 orders, USD 29,942.23
+  cash, `sharpe` 1.0389, 2,515 of 2,516 sessions marked -- and keeps
+  `core_hash` `2bde5de695f9c90a` while its `full_hash` moves from
+  `6990a511c201c1aa` to `f402707b152aab0c`.
 
 ## Backlog
 
