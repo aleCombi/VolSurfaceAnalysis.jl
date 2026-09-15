@@ -30,10 +30,16 @@
 # columns and NULLs elsewhere, one row per order and one per order leg
 # with its observation. `load_run` rebuilds it through the ledger's own
 # validated write path and the fill-to-order join, so a stored run that
-# breaks an invariant fails to load by name rather than loading wrong. The
-# manifest's counts are checked against what was rebuilt, and the curve's
-# unmarked entries against the failures, so a truncated table or a mixed
-# save is caught even when every individual constructor is satisfied.
+# breaks an invariant fails to load by name rather than loading wrong. Each
+# stored leg's own identity is checked against the order that claims it and
+# every leg row is accounted for, so a changed `order_leg_id`, a shifted
+# `leg_idx` or a leg belonging to no order is named rather than sorted
+# away. The manifest's counts are checked against what was rebuilt -- every
+# output table has one, so recorded absence and truncation stay different
+# facts (design rule 7) -- and the curve's unmarked entries against the
+# failures, instant *and* reason, so a truncated table, a mixed save or
+# contradictory evidence is caught even when every individual constructor
+# is satisfied.
 #
 # Run identity is `full_hash(result.experiment)` -- the canonical hash of
 # the resolved experiment (see experiment/identity.jl), not the raw TOML
@@ -45,12 +51,14 @@
 
 using DuckDB
 using DuckDB: DBInterface
+using SHA: sha256
+using TOML
 
 # Manifest schema version, outside the run hash. `load_run` refuses a run
 # written under another version rather than rebuilding a result its files
 # cannot describe; the message says to rerun the config, because no
 # migration can recover a curve or a failure table that was never written.
-const RUN_SCHEMA_VERSION = 6
+const RUN_SCHEMA_VERSION = 7
 
 """
     RunStore
@@ -220,8 +228,8 @@ Writes, as two inputs and five outputs:
 
 - `config.toml`, `Manifest.toml` -- the bytes passed in, verbatim.
 - `manifest.parquet` -- one row indexing the run: both hashes, the name,
-  the window, six counts, the code provenance, the write time and the
-  schema version.
+  the window, one count per output table, the code provenance, the write
+  time and the schema version.
 - `metrics.parquet`, `events.parquet`, `orders.parquet`,
   `order_legs.parquet`, `failures.parquet` -- the run's outputs.
 - `curve.parquet` -- the marked curve, **only when the result carries
@@ -296,6 +304,8 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         n_closes BIGINT,
         n_marked BIGINT,
         n_unmarked BIGINT,
+        n_metrics BIGINT,
+        n_failures BIGINT,
         commit_sha VARCHAR,
         dirty BOOLEAN,
         written_at TIMESTAMP,
@@ -303,6 +313,10 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
     )"""
     # `n_marked` / `n_unmarked` are NULL when the run carries no curve at
     # all, which is a different fact from a curve that marked nothing.
+    # `n_metrics` / `n_failures` are never NULL: both tables are always
+    # written, so zero means "asked, and nothing to record" while a missing
+    # count would mean the index cannot say -- and an index that cannot say
+    # is exactly what lets a truncated table read as an empty one.
     cols = [
         "run_id"         => _str_sql(id),
         "core_hash"      => _str_sql(core_hash(exp)),
@@ -315,6 +329,8 @@ function _write_manifest(store::RunStore, dir::AbstractString, id::AbstractStrin
         "n_closes"       => string(n_closes(result.ledger)),
         "n_marked"       => c === nothing ? "NULL" : string(n_marked(c)),
         "n_unmarked"     => c === nothing ? "NULL" : string(n_unmarked(c)),
+        "n_metrics"      => string(length(result.metrics)),
+        "n_failures"     => string(length(result.failures)),
         "commit_sha"     => _str_sql(commit_sha),
         "dirty"          => dirty ? "TRUE" : "FALSE",
         "written_at"     => _dt_sql(Dates.now(UTC)),
@@ -592,14 +608,19 @@ included), and `check_join` runs last. A load that fails a check throws
 that check's named failure; it never drops the join.
 
 Beyond the per-record checks it checks the record against itself: each of
-the manifest's six counts against what was rebuilt, naming the column and
-both values on a mismatch; and the curve's unmarked entries against the
-failures, which must agree instant for instant. NULL curve counts mean
-the run carried no curve and `curve.parquet` must be absent; zero counts
-mean a recorded curve with no entries of that kind, and the file must be
-there. Counts are consistency checks -- they expose a truncated table or
-a mixed save that every individual constructor would accept -- not proof
-that any price or metric is right; a plausible but stale price loads.
+the manifest's counts against what was rebuilt, naming the column and both
+values on a mismatch; every stored leg against the order that claims it,
+so a changed `order_leg_id`, a shifted `leg_idx` or a leg no order owns is
+named rather than sorted away; and the curve's unmarked entries against
+the failures, which must agree instant *and* reason. Every output table
+has a count, so a truncated table and a table that recorded nothing stay
+different facts (design rule 7): an empty `metrics.parquet` is a defect
+unless the run reported no metrics. NULL curve counts mean the run carried
+no curve and `curve.parquet` must be absent; zero counts mean a recorded
+curve with no entries of that kind, and the file must be there. Counts are
+consistency checks -- they expose a truncated table or a mixed save that
+every individual constructor would accept -- not proof that any price or
+metric is right; a plausible but stale price loads.
 
 Throws `ArgumentError` if the run folder or any required file is missing,
 or if the manifest's `schema_version` is absent or differs from
@@ -634,7 +655,7 @@ function load_run(store::RunStore, run_id::AbstractString)::ExperimentResult
     failures = _load_failures(store, dir)
     metrics  = _load_metrics(store, dir)
 
-    _check_counts(run_id, manifest, ledger, curve)
+    _check_counts(run_id, manifest, ledger, curve, metrics, failures)
     _check_curve_failure_agreement(run_id, curve, failures)
 
     return ExperimentResult(exp, ledger, curve, metrics, failures)
@@ -650,11 +671,25 @@ function _count_mismatch(run_id, column, stored, actual)
     return nothing
 end
 
-function _check_counts(run_id, manifest, L::Ledger, curve::Union{MarkedCurve,Nothing})
+function _check_counts(run_id, manifest, L::Ledger, curve::Union{MarkedCurve,Nothing},
+                       metrics::NamedTuple, failures::AbstractVector{RunFailure})
     _count_mismatch(run_id, "n_events", manifest.n_events, length(L))
     _count_mismatch(run_id, "n_orders", manifest.n_orders, length(L.orders))
     _count_mismatch(run_id, "n_opens", manifest.n_opens, n_opens(L))
     _count_mismatch(run_id, "n_closes", manifest.n_closes, n_closes(L))
+    # Membership evidence for the two tables no structural relationship
+    # covers. Without them an empty `metrics.parquet` reads as a run that
+    # reported no metrics, and a deleted settlement failure -- or one of two
+    # mark failures at a session that keeps the other -- reads as a question
+    # nobody asked.
+    for (col, stored, actual) in (("n_metrics", manifest.n_metrics, length(metrics)),
+                                  ("n_failures", manifest.n_failures, length(failures)))
+        stored === nothing && throw(ArgumentError(
+            "load_run: run $run_id manifest records no $col; without it a " *
+            "truncated table reads as one that recorded nothing -- rerun " *
+            "the config to regenerate the run"))
+        _count_mismatch(run_id, col, stored, actual)
+    end
     if curve === nothing
         manifest.n_marked === nothing && manifest.n_unmarked === nothing || throw(ArgumentError(
             "load_run: run $run_id manifest records a curve " *
@@ -670,20 +705,37 @@ function _check_counts(run_id, manifest, L::Ledger, curve::Union{MarkedCurve,Not
     return nothing
 end
 
-# The curve says a session could not be marked; the failures say which
-# questions that session left unanswered. One implies the other: a session
-# is unmarked exactly when at least one of its lots could not be priced,
-# and a mark failure is recorded exactly at a session the curve left
-# unmarked. A truncation of either table breaks the agreement.
+# The curve says a session could not be marked and why; the failures say
+# which questions that session left unanswered and with what named reason.
+# One implies the other: a session is unmarked exactly when at least one of
+# its lots could not be priced, and a mark failure is recorded exactly at a
+# session the curve left unmarked. The reason the curve carries is one of
+# the reasons its lots gave, so it must occur among them -- matching
+# instants alone would accept a curve reporting `:no_mark` at a session
+# whose every failure says `:unexpected_gap`, which is two tables
+# describing two different runs. A truncation, or a rewritten reason on
+# either side, breaks the agreement.
 function _check_curve_failure_agreement(run_id, curve::Union{MarkedCurve,Nothing},
                                         failures::AbstractVector{RunFailure})
-    marked_failure_instants = Set(f.at for f in failures if f.stage === :mark)
-    unmarked = curve === nothing ? Set{DateTime}() : Set(curve.unmarked_at)
-    missing_rows = sort!(collect(setdiff(unmarked, marked_failure_instants)))
+    reasons_at = Dict{DateTime,Vector{Symbol}}()
+    for f in failures
+        f.stage === :mark || continue
+        push!(get!(() -> Symbol[], reasons_at, f.at), f.reason)
+    end
+    unmarked = curve === nothing ? DateTime[] : curve.unmarked_at
+    curve_reasons = curve === nothing ? Symbol[] : curve.unmarked_reason
+    missing_rows = sort!(collect(setdiff(Set(unmarked), keys(reasons_at))))
     isempty(missing_rows) || throw(ArgumentError(
         "load_run: run $run_id has unmarked curve instants with no failure " *
         "recorded against them: $(missing_rows)"))
-    extra_rows = sort!(collect(setdiff(marked_failure_instants, unmarked)))
+    for (t, r) in zip(unmarked, curve_reasons)
+        r in reasons_at[t] || throw(ArgumentError(
+            "load_run: run $run_id leaves $t unmarked for reason :$r, but " *
+            "the mark failures recorded at that instant give only " *
+            "$(sort(unique(reasons_at[t]))); the curve and the failures " *
+            "describe different runs"))
+    end
+    extra_rows = sort!(collect(setdiff(keys(reasons_at), Set(unmarked))))
     isempty(extra_rows) || throw(ArgumentError(
         "load_run: run $run_id records mark failures at instants the curve " *
         "does not report unmarked: $(extra_rows)"))
@@ -717,6 +769,8 @@ function _load_manifest(store::RunStore, dir::AbstractString)
             n_closes   = num(:n_closes),
             n_marked   = num(:n_marked),
             n_unmarked = num(:n_unmarked),
+            n_metrics  = num(:n_metrics),
+            n_failures = num(:n_failures),
             commit_sha = has(:commit_sha) ? String(r.commit_sha) : "",
             dirty      = has(:dirty) ? Bool(r.dirty) : true)
 end
@@ -765,12 +819,31 @@ function _load_ledger(store::RunStore, dir::AbstractString)::Ledger
     # column: the first record of a group (by order id) minted it, since
     # a group can only be named once minted, and only by a later order.
     minted = Set{Int}()
+    consumed = 0
     for r in order_rows
         oid = Int(r.order_id)
         g = Int(r.group_id)
         own_group = g in minted ? g : nothing
         push!(minted, g)
         lrows = get(legs_by_order, oid, Any[])
+        consumed += length(lrows)
+        # `leg_idx` and `order_leg_id` are stored facts, not sort keys. The
+        # legs of an order are 1..n in order, and leg k's id is the order's
+        # `first_leg_id + k - 1` -- the same arithmetic the writer used and
+        # the ledger mints by. Checking them here is what stops a rewritten
+        # id, or indices shifted without changing their order, from being
+        # sorted back into a ledger that looks untouched.
+        first_leg = Int(r.first_leg_id)
+        for (k, l) in enumerate(lrows)
+            Int(l.leg_idx) == k || throw(ArgumentError(
+                "load_run: order_legs.parquet gives order $oid a leg_idx of " *
+                "$(l.leg_idx) where leg $k was expected; an order's legs are " *
+                "1..n in order"))
+            Int(l.order_leg_id) == first_leg + k - 1 || throw(ArgumentError(
+                "load_run: order_legs.parquet gives order $oid leg $k the " *
+                "order_leg_id $(l.order_leg_id), but the order's first_leg_id " *
+                "$first_leg makes it $(first_leg + k - 1)"))
+        end
         legs = Leg[Leg(_contract_from(l), _side_from(l.side), Int(l.quantity), _intent_from(l.intent))
                    for l in lrows]
         obs = LegObservation[LegObservation(DateTime(l.quote_at), _opt_from(l.bid, Float64),
@@ -778,8 +851,20 @@ function _load_ledger(store::RunStore, dir::AbstractString)::Ledger
                                             DateTime(l.spot_at)) for l in lrows]
         order = Order(Symbol(String(r.label)), legs; group = own_group,
                       operation = r.operation === missing ? nothing : Int(r.operation))
-        push!(L.orders, OrderRecord(oid, Int(r.first_leg_id), g, DateTime(r.decided_at),
+        push!(L.orders, OrderRecord(oid, first_leg, g, DateTime(r.decided_at),
                                     Int(r.known_to), order, obs))
+    end
+    # Every input row is accounted for. A leg whose order_id names no order
+    # would otherwise be dropped in silence -- the loader would build a
+    # ledger from a strict subset of the table and call it the record.
+    if consumed != length(leg_rows)
+        orphans = sort!(collect(setdiff(keys(legs_by_order),
+                                        Set(Int(r.order_id) for r in order_rows))))
+        throw(ArgumentError(
+            "load_run: order_legs.parquet holds $(length(leg_rows)) rows but " *
+            "the stored orders account for $consumed" *
+            (isempty(orphans) ? "; orders.parquet claims an order id twice" :
+             "; legs are recorded against order ids no order claims: $orphans")))
     end
     # Every counter one past the largest id seen (`commit!` moved the
     # event, sequence and execution counters already).
@@ -895,18 +980,27 @@ What [`reproduce`](@ref) found. `status` is one of:
   of empty outputs.
 
 `stored_code` and `fresh_code` are the recorded and the running
-`(commit_sha, dirty)`. Dataset versioning is deliberately not in identity
-(see the module doc), so a divergence attributes to code or dependencies
-by elimination; these two, with the run's stored `Manifest.toml`, are what
-a controlled rerun separates.
+`(commit_sha, dirty)`; `stored_deps` and `fresh_deps` are the digests of
+the two dependency documents and `deps_changed` names every package whose
+version moved between them. Dataset versioning is deliberately not in
+identity (see the module doc), so a divergence attributes to code or
+dependencies by elimination -- which needs **both** environments named,
+not only both commits. Identical commits with different dependencies are a
+real and ordinary case here: `backtest/settlement.jl` consults the NYSE
+calendar `BusinessDays` ships, so the code alone does not pin the calendar
+a run read. Differing dependencies are provenance, not divergence: they do
+not change the status, they say what a controlled rerun has to separate.
 """
 struct ReproductionReport
-    run_id      :: String
-    status      :: Symbol
-    detail      :: String
-    stored_code :: Tuple{String,Bool}
-    fresh_code  :: Tuple{String,Bool}
-    divergences :: Vector{Divergence}
+    run_id       :: String
+    status       :: Symbol
+    detail       :: String
+    stored_code  :: Tuple{String,Bool}
+    fresh_code   :: Tuple{String,Bool}
+    stored_deps  :: String
+    fresh_deps   :: String
+    deps_changed :: Vector{String}
+    divergences  :: Vector{Divergence}
 end
 
 function Base.show(io::IO, ::MIME"text/plain", r::ReproductionReport)
@@ -916,9 +1010,66 @@ function Base.show(io::IO, ::MIME"text/plain", r::ReproductionReport)
             r.stored_code[2] ? " (dirty)" : "",
             ", running code ", isempty(r.fresh_code[1]) ? "(unknown)" : r.fresh_code[1],
             r.fresh_code[2] ? " (dirty)" : "")
+    println(io, "  stored deps ", r.stored_deps, ", running deps ", r.fresh_deps,
+            isempty(r.deps_changed) ? " (same document)" : " (differ)")
+    for c in r.deps_changed
+        println(io, "  ~ ", c)
+    end
     for d in r.divergences
         println(io, "  - ", d)
     end
+end
+
+# --- dependency provenance ----------------------------------------------
+# The two environments, as Pkg records them. `reproduce` reads the stored
+# `Manifest.toml` and the running one for provenance only: it still
+# instantiates nothing and switches no checkout. A digest identifies each
+# document the way a commit sha identifies a checkout; the version map is
+# what lets a difference be named package by package instead of as two
+# opaque hashes.
+
+_deps_digest(toml::AbstractString)::String =
+    isempty(toml) ? "(unknown)" : bytes2hex(sha256(codeunits(String(toml))))[1:16]
+
+# Package name => resolved version, plus the Julia version the environment
+# was resolved for. Manifest format 2.0 nests packages under `deps`;
+# format 1.0 puts them at the top level. A stdlib entry carries no version
+# and contributes nothing to name.
+function _deps_versions(toml::AbstractString)::Dict{String,String}
+    out = Dict{String,String}()
+    isempty(toml) && return out
+    parsed = try
+        TOML.parse(String(toml))
+    catch
+        return out
+    end
+    jv = get(parsed, "julia_version", nothing)
+    jv isa AbstractString && (out["julia"] = String(jv))
+    entries = get(parsed, "deps", parsed)
+    entries isa AbstractDict || return out
+    for (name, es) in entries
+        es isa AbstractVector || continue
+        for e in es
+            e isa AbstractDict || continue
+            v = get(e, "version", nothing)
+            v isa AbstractString && (out[String(name)] = String(v))
+        end
+    end
+    return out
+end
+
+# One line per package that moved, `absent` naming either side that does
+# not have it at all. Two documents that differ but name no version at all
+# (unparseable, or empty) still say so rather than reading as identical.
+function _deps_changes(stored::AbstractString, fresh::AbstractString)::Vector{String}
+    s, f = _deps_versions(stored), _deps_versions(fresh)
+    changed = ["$n $(get(s, n, "absent")) -> $(get(f, n, "absent"))"
+               for n in sort!(collect(union(keys(s), keys(f))))
+               if get(s, n, nothing) != get(f, n, nothing)]
+    if isempty(changed) && _deps_digest(stored) != _deps_digest(fresh)
+        return ["the two dependency documents differ but neither names a version"]
+    end
+    return changed
 end
 
 # Exact for everything that is an identity, a name or an instant; the
@@ -1032,10 +1183,17 @@ records and their observations, curve instants and profits, failure
 subjects and reasons, and metric names and values. A row present on one
 side only is a divergence like any other.
 
-It uses the running code and environment and reports their provenance
-beside the recorded one; it does not switch checkouts or instantiate
-packages inside the caller's process. The run's own `Manifest.toml` is
-what makes a separate rerun under the recorded environment possible.
+It uses the running code and environment and reports **both** provenances
+beside the recorded ones: the two commits, and the two dependency
+documents by digest with every package whose version moved named. Two
+identical commits with different dependencies are otherwise
+indistinguishable in a report, and they are not the same run -- the
+settlement rule reads the calendar a dependency ships. Differing
+dependencies never change the status; they say what a controlled rerun has
+to separate. Reading the two documents is all it does with them: it does
+not switch checkouts or instantiate packages inside the caller's process.
+The run's own `Manifest.toml` is what makes a separate rerun under the
+recorded environment possible.
 
 **It never writes.** No result is saved over the witness, and no stored
 byte is touched; refreshing a run's provenance after a successful
@@ -1054,11 +1212,26 @@ function reproduce(store::RunStore, run_id::AbstractString)::ReproductionReport
     # Load first: a folder that is not there, or a schema this store does
     # not read, is a load failure with its own message, not a report.
     stored_result = load_run(store, run_id)
-    stored_manifest = _load_manifest(store, run_dir(store, run_id))
+    dir = run_dir(store, run_id)
+    stored_manifest = _load_manifest(store, dir)
     stored_code = (stored_manifest.commit_sha, stored_manifest.dirty)
     fresh_code = code_provenance()
+    # Both environments, on every path: a report that names two commits and
+    # one environment cannot tell an unchanged rerun from one whose calendar
+    # moved. `load_run` has already named an absent stored document; a
+    # running environment with no manifest is unknown, not empty.
+    stored_deps_toml = read(joinpath(dir, "Manifest.toml"), String)
+    fresh_deps_toml = try
+        dependency_manifest()
+    catch e
+        e isa MissingManifest ? "" : rethrow()
+    end
+    stored_deps = _deps_digest(stored_deps_toml)
+    fresh_deps = _deps_digest(fresh_deps_toml)
+    deps_changed = _deps_changes(stored_deps_toml, fresh_deps_toml)
     report(status, detail, ds = Divergence[]) =
-        ReproductionReport(String(run_id), status, detail, stored_code, fresh_code, ds)
+        ReproductionReport(String(run_id), status, detail, stored_code, fresh_code,
+                           stored_deps, fresh_deps, deps_changed, ds)
 
     exp = stored_result.experiment
     id_now = full_hash(exp)

@@ -166,7 +166,8 @@ end
 @testset "marked_curve: an unmarkable lot costs the session, never a partial sum" begin
     L, _ = _lg_case_strangle_order()
     data = _mk_data(; skip=[(18, _LG_CALL490)])
-    c = (@test_logs (:warn,) match_mode=:any marked_curve(L, data, _MK_UND, _MK_FROM, _MK_TO).curve)
+    out = (@test_logs (:warn,) match_mode=:any marked_curve(L, data, _MK_UND, _MK_FROM, _MK_TO))
+    c = out.curve
     @test n_unmarked(c) == 1
     @test c.unmarked_at == [_MK_CLOSES[3]]
     @test c.unmarked_reason == [:no_mark]
@@ -176,17 +177,50 @@ end
     @test !(_mk_expected(1.25, 0.0) in c.profit)
     # And the change across it is dropped rather than scaled over two days.
     @test session_changes(c) ≈ [40.0]
+    # The builder is the *producer* of what persistence later keeps: the
+    # failure is retained here, naming the lot that could not be priced,
+    # or there is nothing for a store to write down.
+    f = only(out.failures)
+    @test f.stage === :mark && f.at == _MK_CLOSES[3] && f.reason === :no_mark
+    @test occursin("490.0C", f.subject) && occursin("lot@", f.subject)
+    @test f.reason in c.unmarked_reason          # what load_run checks on the way back
+end
+
+@testset "marked_curve: two unpriceable lots are two failures and one lost session" begin
+    # The old builder stopped at the first lot it could not price, so a
+    # session with two blind legs reported one reason and lost the other
+    # question entirely. Both are retained now, and the session is still
+    # counted once -- which is exactly the shape the store's curve/failure
+    # agreement is checked against.
+    L, _ = _lg_case_strangle_order()
+    data = _mk_data(; skip=[(18, _LG_CALL490), (18, _LG_PUT470)])
+    out = (@test_logs (:warn,) match_mode=:any marked_curve(L, data, _MK_UND, _MK_FROM, _MK_TO))
+    @test n_unmarked(out.curve) == 1
+    @test out.curve.unmarked_at == [_MK_CLOSES[3]]
+    @test length(out.failures) == 2
+    @test all(f -> f.stage === :mark && f.at == _MK_CLOSES[3], out.failures)
+    @test all(f -> f.reason === :no_mark, out.failures)
+    # Two lots of one session are two distinguishable questions.
+    subjects = sort([f.subject for f in out.failures])
+    @test length(unique(subjects)) == 2
+    @test any(s -> occursin("470.0P", s), subjects) && any(s -> occursin("490.0C", s), subjects)
 end
 
 @testset "marked_curve: a printless session the calendar calls open is a counted gap" begin
     L, _ = _lg_case_strangle_order()
     spots = filter(p -> Date(p.timestamp) != Date(2024, 1, 17), _mk_spots())
     data = MarketData(InMemory(_mk_quotes()), InMemory(spots))
-    c = (@test_logs (:warn,) match_mode=:any marked_curve(L, data, _MK_UND, _MK_FROM, _MK_TO).curve)
+    out = (@test_logs (:warn,) match_mode=:any marked_curve(L, data, _MK_UND, _MK_FROM, _MK_TO))
+    c = out.curve
     @test n_unmarked(c) == 1
     @test c.unmarked_reason == [:unexpected_gap]
     @test c.unmarked_at == [DateTime(2024, 1, 17, 21, 0)]   # the nominal 16:00 ET close
     @test c.timestamps == [_MK_CLOSES[1], _MK_CLOSES[3], _MK_CLOSES[4]]
+    # A session that never printed names the underlying, not a lot, and the
+    # reason it retains is the one the curve carries.
+    f = only(out.failures)
+    @test f.stage === :mark && f.at == DateTime(2024, 1, 17, 21, 0)
+    @test f.reason === :unexpected_gap && f.subject == "SPY"
 end
 
 @testset "marked_curve: an empty ledger is a flat zero curve, not an empty one" begin

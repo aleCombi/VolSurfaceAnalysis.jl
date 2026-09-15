@@ -124,22 +124,39 @@ carries enough lineage to tell two questions apart -- a lot names its
 contract and its opening fill, a printless session names its underlying.
 
 A broken session is counted **once** on the curve however many of its lots
-failed, and each failed lot is its own row here. The two must agree
-instant for instant, and `load_run` checks that they do.
+failed, and each failed lot is its own row here. The two must agree on
+instants **and** on reasons: the reason the curve carries for a session is
+one of the reasons its lots gave, so it has to occur among the mark
+failures recorded at that instant. `load_run` checks both. Instants alone
+would accept a curve reporting `:no_mark` at a session whose every failure
+says `:unexpected_gap` -- two tables describing two different runs.
 
 ### Counts, and NULL versus zero
 
-The manifest keeps six counts and `load_run` **checks every one** against
-what it rebuilt, naming the column and both values on a mismatch. They are
-cheap and they catch the one defect the per-record constructors cannot
-see: a truncated table, or a mixed save that every individual check
-accepts. They are consistency checks, not proof that any price or metric
-is right.
+The manifest keeps **one count per output table** and `load_run` **checks
+every one** against what it rebuilt, naming the column and both values on a
+mismatch. They are cheap and they catch the one defect the per-record
+constructors cannot see: a truncated table, or a mixed save that every
+individual check accepts. They are consistency checks, not proof that any
+price or metric is right.
+
+The coverage has to be complete, because a count is the only membership
+evidence a table with no structural relationship has. The ledger counts
+are checked against the rebuilt ledger and the curve counts against the
+stored curve; `n_metrics` and `n_failures` are what keep an empty
+`metrics.parquet` from reading as a run that reported no metrics, and a
+deleted settlement failure -- which no curve entry answers for -- from
+reading as a question nobody asked. Deleting one of two mark failures at a
+session that keeps the other passes every structural check there is; only
+the count knows. A truncated record is not an empty one (design rule 7).
 
 NULL curve counts mean the run recorded no curve, and `curve.parquet` must
 then be absent; zero means a recorded curve with no entries of that kind,
 and the file must be present. An absent curve and a present-but-empty one
 stay different facts on disk, in the file list and in SQL alike.
+`n_metrics` and `n_failures` are never NULL: both tables are always
+written, so zero means "asked, and nothing to record", and a manifest that
+cannot say is itself the defect.
 
 ### `reproduce`: the other operation
 
@@ -164,13 +181,22 @@ config that no longer hashes to the folder it sits in: that is a named
 identity mismatch carrying the regenerated projection for diagnosis, not a
 quiet lookup of whatever run the new id points at.
 
-It uses the running code and environment and reports their provenance
-beside the recorded one. It does not switch checkouts or instantiate
-packages inside the caller's process -- the run's own `Manifest.toml` is
-what makes a separate rerun under the recorded environment possible. **It
-never writes**: no fresh result is saved over the witness, and refreshing
-a run's provenance after a successful reproduction is a separate utility,
-never a side effect of this one.
+It uses the running code and environment and reports **both** provenances
+beside the recorded ones: the two commits, and the two dependency
+documents by digest with every package whose version moved named. A report
+that carried only the commits could not tell an unchanged rerun from one
+whose calendar moved -- `backtest/settlement.jl` reads the NYSE calendar
+`BusinessDays` ships, so identical commits over two environments are not
+the same run. Differing dependencies are provenance, not divergence: they
+never change the status, they say what a controlled rerun has to separate,
+which is the whole of attribution-by-elimination under the trusted-data
+decision. Reading the two documents is all it does with them: it does not
+switch checkouts or instantiate packages inside the caller's process, and
+the run's own `Manifest.toml` is what makes a separate rerun under the
+recorded environment possible. **It never writes**: no fresh result is
+saved over the witness, and refreshing a run's provenance after a
+successful reproduction is a separate utility, never a side effect of
+this one.
 
 ### The write and load paths validate, they never trust
 
@@ -185,6 +211,16 @@ that fails a check throws that check's named failure (`SequenceGap`,
 `DuplicateExecution`, `MatchMismatch`, `DanglingReference`,
 `JoinViolation`, ...); it never drops the join and never loads a
 ledger that disagrees with itself.
+
+A stored leg's own identity is checked against the order that claims it:
+an order's legs are 1..n in `leg_idx`, and leg k's `order_leg_id` is the
+order's `first_leg_id + k - 1` -- the arithmetic the writer used and the
+ledger mints by. Both columns are stored facts, not sort keys, so a
+rewritten id or indices shifted without changing their order is named
+rather than sorted back into a ledger that looks untouched. Every leg row
+is accounted for, too: a leg recorded against an order id no order claims
+is a defect, not a row to drop, because dropping it would rebuild the
+ledger from a subset of the table and return it as the record.
 
 Whether the policy named an order's group or the ledger minted it is
 not a column: the first record of a group (by order id) minted it,
@@ -280,10 +316,14 @@ projection). Version 3 was the ledger: `positions.parquet` gave way to
 `pnl_series.parquet` and the manifest's `window_end_spot` left with the
 `PnLSeries` type they exported and `n_marked` joined `n_unmarked`.
 Version 6 is the persistence split: `Manifest.toml`, `curve.parquet` and
-`failures.parquet` arrive and the load path stops recomputing. It refuses
-5 like every other older version, and there is no migration -- no earlier
-schema holds a curve or a failure table to migrate *from*, and a run's
-witness cannot be invented after the fact. Version 4 is the identity break --
+`failures.parquet` arrive and the load path stops recomputing. Version 7
+completes the index over them: `n_metrics` and `n_failures` join the
+manifest, so every output table has membership evidence and a truncated
+one stops reading as an empty one. It refuses 5 and 6 like every other
+older version, and there is no migration -- no earlier schema holds a
+curve or a failure table to migrate *from*, a schema-6 manifest never
+wrote down the two counts, and a run's witness cannot be invented after
+the fact. Version 4 is the identity break --
 the venue's two choices and the resolved contract facts joined
 `core_hash`, so every stored run id moved. It is also what separates the
 schema-3 tree from today's code: those runs were written before the
@@ -298,8 +338,9 @@ script: the store held one run each time.
 **Owns:** storage layout, parquet schemas for the output tables, the
 `artifacts/` subdir, the DuckDB connection used for writing, the load
 path's rebuilding of the ledger through the ledger's own checks, the
-record's internal consistency (the manifest counts and curve/failure
-agreement), and the comparison `reproduce` performs.
+record's internal consistency (the manifest counts, the stored legs'
+identity against the orders that claim them, and curve/failure agreement
+on instants and reasons), and the comparison `reproduce` performs.
 
 **Does NOT own:**
 
@@ -316,9 +357,11 @@ agreement), and the comparison `reproduce` performs.
   run's, built by [`metrics`](metrics.md) and [`backtest`](backtest.md)
   while the data was open; `reproduce` re-runs the experiment through
   `run_experiment` and does not reimplement any part of it.
-- Restoring a dependency environment. It stores `Manifest.toml` and does
-  not read it: `Pkg.instantiate` against the recorded checkout is the
-  operation, performed outside the caller's process.
+- Restoring a dependency environment. It stores `Manifest.toml` verbatim
+  and reads it for one thing only -- naming the recorded environment, and
+  the packages whose versions moved, in a reproduction report.
+  `Pkg.instantiate` against the recorded checkout is the restore
+  operation, and it is performed outside the caller's process.
 - Artifact rendering. The store records what was written; rendering is
   script-level (`scripts/lib/artifacts.jl`), so the core stays Plots-free.
 - Atomicity guarantees beyond best-effort. A crash mid-`save_run` can
@@ -346,14 +389,18 @@ equals the saved one exactly. `group` is a SQL keyword: the column is
 | `n_closes` | BIGINT | `Close` fills in the ledger |
 | `n_marked` | BIGINT | session closes the run marked; NULL when it carries no curve |
 | `n_unmarked` | BIGINT | session closes it could not mark; NULL when it carries no curve |
+| `n_metrics` | BIGINT | metrics the run reported; never NULL |
+| `n_failures` | BIGINT | questions the run left unanswered; never NULL |
 | `commit_sha` | VARCHAR | git commit of the code that produced the run |
 | `dirty` | BOOLEAN | working tree had uncommitted changes |
 | `written_at` | TIMESTAMP | UTC time of the save |
-| `schema_version` | INTEGER | manifest schema version (`RUN_SCHEMA_VERSION`, currently 6); outside the hash |
+| `schema_version` | INTEGER | manifest schema version (`RUN_SCHEMA_VERSION`, currently 7); outside the hash |
 
 `n_marked` / `n_unmarked` are NULL rather than 0 when the saved result had
 no curve: "no curve at all" and "a curve that marked nothing" are different
-facts and must not read the same in SQL.
+facts and must not read the same in SQL. `n_metrics` / `n_failures` have
+no such case -- both tables are always written -- so a NULL there is a
+defective index and `load_run` says so.
 
 ### `metrics.parquet`
 
@@ -482,7 +529,8 @@ against. `bid` and `ask` keep the source's nullability.
 | **Named columns at every insert** | A positional `VALUES (...)` list makes a miscount write a value into the neighbouring column of the right type, and nothing in the type system catches it. Naming the columns removes the event table's per-kind NULL padding too, since DuckDB nulls what an insert does not name. The bytes written are identical, so it is not a schema change. |
 | **Write and load validate the join; load rebuilds through `commit!`** | `save_run` checks before creating a folder. A load must fail on a dangling fill, duplicate execution id, field mismatch or invalid simulated price, never drop the join. Reusing `commit!` means append invariants are not copied. |
 | **`load_run` returns `ExperimentResult`, not a separate `StoredRun`** | Same type as `run_experiment` means same recipes / `show` / downstream consumers, and it is what lets `reproduce` compare the two sides with one set of accessors. Specs are pure values, so the rebuilt experiment only touches the data when it is actually run. |
-| **The reproduction report is two flat records, not a hierarchy** | A `ReproductionReport` holding `Divergence` rows says everything the report has to say: an outcome, why when there is no outcome to compare, both provenances, and each difference by output, row and field. No abstract type, no per-output subtype -- a table of differences is data. |
+| **The reproduction report is two flat records, not a hierarchy** | A `ReproductionReport` holding `Divergence` rows says everything the report has to say: an outcome, why when there is no outcome to compare, both code provenances, both dependency environments with the packages that moved, and each difference by output, row and field. No abstract type, no per-output subtype -- a table of differences is data, and a list of changed versions is strings. |
+| **A reproduction report names both environments, not only both commits** | Dataset versioning is deliberately out of identity, so a divergence attributes to code or dependencies *by elimination* -- which fails outright if the report cannot tell two environments apart. Identical commits with different dependencies are ordinary here: the settlement rule consults the calendar a dependency ships. The digests identify each document the way a sha identifies a checkout, and the version map is what lets a difference be named package by package instead of as two opaque hashes. Differing dependencies are provenance, never divergence: the status still reports whether the outputs agreed. |
 | **Long-form `metrics.parquet`** | Optional metrics come and go per run; a wide schema would force columns to NULL across runs and break naive `UNION ALL` reads. Long form is stable and trivially pivotable. |
 | **NaN / Inf preserved, not nulled** | A NaN sharpe (e.g. one trade, zero variance) is meaningful information about that run; collapsing it to NULL would lose the distinction from "metric not requested." |
 | **Caller passes the TOML bytes** | The TOML is the source of truth for what was run; pushing the bytes through `save_run` keeps the persistence layer ignorant of how the `Experiment` was built and avoids stashing config strings on `Experiment` itself. |
@@ -492,7 +540,7 @@ against. `bid` and `ask` keep the source's nullability.
 ## Future work
 
 - Opt-in, data-gated integration tests that `reproduce` every stored
-  schema-6 run, skipping cleanly where the source data is absent.
+  schema-7 run, skipping cleanly where the source data is absent.
 - `scripts/revalidate_runs.jl`: refresh a run's `commit_sha` / `dirty`
   after a *successful* reproduction. Read-only stays the rule for
   `reproduce` itself -- a refresh must never be a side effect of
@@ -516,4 +564,5 @@ against. `bid` and `ask` keep the source's nullability.
 | Decision | Source checked | Finding |
 |---|---|---|
 | `Manifest.toml` stored verbatim as the run's dependency record, beside the project rather than as a bespoke environment dump | [Pkg's Project and Manifest documentation](https://pkgdocs.julialang.org/v1/toml-files/) (checked 2026-09-15) | Pkg describes the manifest as the *resolved* dependency record used alongside the project: the exact versions an environment loaded. It is an environment record, not an archive of local path dependencies or dirty source trees -- so copying it records what ran, and `Pkg.instantiate` against it plus the recorded checkout restores that environment. A missing one is therefore a real gap, named rather than written as an empty document. |
+| Reading a stored `Manifest.toml` for provenance: which key holds the resolved versions | [Pkg's Project and Manifest documentation](https://pkgdocs.julialang.org/v1/toml-files/) (checked 2026-09-15) | `manifest_format` 2.0 nests the resolved packages under a `deps` table (`[[deps.<Name>]]` blocks, each with `version` for a registered package and none for a stdlib); format 1.0 puts the same blocks at the top level, and both carry `julia_version`. So a report reads `deps` when it is there and the top level otherwise, and a package with no version contributes nothing to name. This is provenance only -- restoring an environment is still `Pkg.instantiate` outside the process. |
 | `reproduce` as a plain verb, no `!`, living in persistence beside save and load | [Julia style guide](https://docs.julialang.org/en/v1/manual/style-guide/) (checked 2026-09-15) | `!` is reserved for functions that modify their arguments. `reproduce` reads the store, reruns, and writes nothing, so the bang would be a false promise in the other direction. Its tests sit in the matching `test/persistence/` file, following the mirrored-tree layout the rest of the suite uses. |

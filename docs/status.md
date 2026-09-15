@@ -50,9 +50,11 @@ Progress toward vision:
    experiment's declared `Clock`, prices every leg of every order
    through the simulated venue (`docs/modules/backtest.md`:
    `:cross_spread` on the tick, IBKR Pro's US options commissions as
-   `Fee` events) before anything is written, and returns a `Ledger`;
-   per-record `check_join` validates the fill-to-order join at each
-   append. Lifecycle runs first at every tick and once more at the
+   `Fee` events) before anything is written, and returns the named pair
+   `(ledger, failures)` -- the journal, and the `RunFailure`s the run
+   retained for lots no honest settlement price could close, from both
+   lifecycle passes; per-record `check_join` validates the fill-to-order
+   join at each append. Lifecycle runs first at every tick and once more at the
    evaluation endpoint: `settlements` says which lots fell due and at
    what price, the ledger's own `record_expiry!` books each one, and the
    settlement rule reads sessions off the spot tree, consulting the NYSE
@@ -71,10 +73,14 @@ Progress toward vision:
    optional metrics (`sharpe`, `sortino`, `max_drawdown`, `volatility`,
    `profit_factor`) are selected by symbol through `compute_metrics`, and
    the `_METRIC_TABLE` in `src/metrics/dispatch.jl` maps each symbol to
-   its function, **which of the two inputs it consumes**, and its default
-   kwargs. Per-experiment overrides flow through
-   `OutputSpec.metric_params`. Capital is fixed at 1 and is not an
-   argument: at a zero risk-free rate it cancels from every ratio.
+   its function and its default kwargs. **Every metric takes both
+   inputs** and reads whichever is its sample unit, so the table records
+   no per-metric input; the consequence is that the dispatcher cannot
+   tell a curve-reading metric from a trade-reading one, and with no
+   curve it omits the optional set wholesale rather than part of it.
+   Per-experiment overrides flow through `OutputSpec.metric_params`.
+   Capital is fixed at 1 and is not an argument: at a zero risk-free rate
+   it cancels from every ratio.
 6. **Experiment orchestration** -- end-to-end runnable.
    `Experiment` wires `(Agent, MarketData specs, Clock, [from, to],
    OutputSpec)` into a single rerunnable record; `run_experiment(exp)`
@@ -114,9 +120,13 @@ Progress toward vision:
    perfectly and both differ from the recorded run. `reproduce(store,
    run_id)` is the other operation: it reruns against live data and
    reports success, divergence by output/row/field, or inability, and it
-   never writes over the witness. The manifest `schema_version`, now 6,
-   refuses every earlier schema; none of them holds a curve or a failure
-   table to migrate from.
+   never writes over the witness, and it names both code provenances and
+   both dependency environments, since a divergence attributes to code or
+   dependencies by elimination. The manifest is the index over the record
+   and carries **one count per output table**, all checked on load: a
+   truncated table is not an empty one. The manifest `schema_version`, now
+   7, refuses every earlier schema; none of them holds a curve, a failure
+   table, or the counts that protect them, to migrate from.
    Every value that changes a result is either in `core_hash` -- the data
    specs, clock, agent, window, the venue's `fill_rule` / `cost_model`,
    the contract facts resolved for the experiment's underlying, and the
@@ -562,9 +572,9 @@ decision named here now lives in the module docs.
   deleted as decided rather than parked again** -- the Massive trees are
   trusted as stable, the `dataset` slot's root path is the accepted
   contract, and a divergence therefore attributes to code or dependencies
-  by elimination. `RUN_SCHEMA_VERSION` is 6 and refuses every earlier
-  schema, including 5: none of them holds a curve or a failure table to
-  migrate from. Deliberately not added, with reasons in
+  by elimination. `RUN_SCHEMA_VERSION` became 6 at this commit and refuses
+  every earlier schema, including 5: none of them holds a curve or a
+  failure table to migrate from. Deliberately not added, with reasons in
   `persistence.md`: `round_trips.parquet` (no cross-run consumer yet) and
   the manifest completeness flag (it would not assert what it appears to,
   since the curve samples whole session closes and the window endpoint
@@ -584,7 +594,10 @@ decision named here now lives in the module docs.
   records, 4,402 order legs with their observations, 2,516 curve points, 2
   failures and 10 metrics, every one compared field by field against a
   live rerun. That is the first time a stored run in this repository has
-  been checked against its own rerun rather than merely reloaded.
+  been checked against its own rerun rather than merely reloaded. (The
+  review commit below moved the schema to 7, so that saved folder was
+  refused by version and re-saved from the same config; the run id, every
+  figure and the zero-divergence result are unchanged.)
   **Commit 3 landed 2026-09-15**: the docs sweep, no code. Every file in
   `docs/proposals/` is deleted, this round's brief included, after moving
   what survived into the module docs: the venue's unmodelled parts and why
@@ -603,6 +616,55 @@ decision named here now lives in the module docs.
   which is now "an open lot at the window end is valued by the marked
   curve, never force-settled"). The sweep commit touches no code, so they
   are the one loose end it leaves.
+  **The review commit landed 2026-09-15**, closing a review of the finished
+  branch: four merge blockers, two status defects and one test suggestion.
+  Three blockers were places the load path accepted a record it could not
+  vouch for. *Leg identity*: `order_leg_id` and `leg_idx` were read as sort
+  keys and never checked, and a leg whose `order_id` named no order was
+  dropped in silence, so a rewritten id, indices shifted without changing
+  their order, or an orphan row all still loaded as an untouched ledger.
+  Both columns are now checked against the order that claims them, and
+  every input row is accounted for. *Membership*: nothing protected the
+  metric or failure tables, so an empty `metrics.parquet` read as a run
+  that reported no metrics, and deleting the settlement failures -- or one
+  of the two 2018-10-25 mark failures while keeping the other -- passed
+  every structural check there was. `n_metrics` and `n_failures` join the
+  manifest, giving every output table membership evidence, and
+  `RUN_SCHEMA_VERSION` moves to **7**: a schema-6 manifest never wrote the
+  two counts down, so there is nothing to migrate and its runs are refused
+  by version like every earlier one. *Agreement*: curve and failures were
+  compared on instants only, so a curve reporting `:no_mark` loaded against
+  failures that all said `:unexpected_gap`; each curve reason must now
+  occur among the mark failures of its own session. The fourth blocker was
+  the reproduction report, which carried only Git provenance although
+  attribution is by elimination: it now names both dependency documents by
+  digest and every package whose version moved between them -- the
+  settlement rule reads the calendar `BusinessDays` ships, so two identical
+  commits over two environments are not the same run. Differing
+  dependencies are provenance, not divergence, and never move the status.
+  Each blocker has a tamper test that names the refusal; the producer side
+  of the failure tables is asserted directly now too, at both lifecycle
+  passes (the tick pass and the window-end pass, told apart by the instant
+  the question was stamped with) and for two unpriceable lots in one
+  session. The two status defects: `run_backtest` returns `(ledger,
+  failures)` and not a `Ledger`, and `_METRIC_TABLE` records no per-metric
+  input because every metric takes both -- both descriptions corrected
+  above. The four parked house rules were **binding** in the retired
+  orchestration note, not "proposed but not adopted", and the backlog entry
+  had also dropped *named failures, never bare errors*; it now states their
+  prior standing as it was and lists five rules.
+  **Gate: 3978 passed, 0 failed, 0 errored, 0 broken** (2m04s), up from
+  3,911. The witness was re-exercised end to end: the schema-6 folder was
+  refused by name, re-saved from the same config at schema 7 -- same
+  `run_id=f402707b152aab0c`, 13,204 events, 2,201 orders, USD 29,942.23
+  cash, `sharpe` 1.0389, 2,515 of 2,516 sessions marked, 2 retained
+  failures -- and `reproduce` on it reported `:reproduced` with **zero
+  divergences** in 91 s, both environments identical. On copies in `/tmp`,
+  deleting one of the two mark failures, contradicting the curve's reason,
+  rewriting an `order_leg_id`, adding an orphan leg row and emptying
+  `metrics.parquet` were each refused by name, and swapping the recorded
+  `Manifest.toml` reproduced with zero divergences while reporting
+  `BusinessDays 0.0.1 -> 0.9.25`.
 
 ## Backlog
 
@@ -649,7 +711,7 @@ intended direction, but not currently in flight.
 - **Reproducibility harness for stored runs.** The comparison itself
   landed as `reproduce(store, run_id)`; what remains is the harness around
   it. Opt-in, data-gated integration tests that reproduce every stored
-  schema-6 run and skip cleanly where the source data is absent (a
+  schema-7 run and skip cleanly where the source data is absent (a
   data-less machine must *skip*, while an invoked reproduction on one
   reports inability rather than success); `scripts/revalidate_runs.jl`, a
   utility that refreshes a run's `commit_sha` / `dirty` after a successful
@@ -663,23 +725,29 @@ intended direction, but not currently in flight.
   it today; whether it is one bad delivery or a class of them, and whether
   the collection step should reject it at write time, is uninvestigated.
   Found 2026-09-14 while building the session grid.
-- **Four cross-module house rules, proposed but not adopted.** The
-  retired orchestration note carried four rules that govern every module
-  and are written down nowhere else. Design rule 3 says a rule change is
-  proposed, not absorbed, so they are parked here rather than added to
-  [design.md](design.md): (1) tests live beside the source they test, one
-  file per source file in the mirrored folder, and every failure test
-  checks that the failure fires, that it leaves the refused state exactly
-  as it was, and that it prints its own name; (2) describe the boundary,
+- **Five cross-module house rules, binding in the retired note, not yet
+  in `design.md`.** The orchestration note recorded them under its
+  *Decisions taken (binding)* headings, and they governed the whole ledger
+  rebuild; what is unsettled is only whether they become standing design
+  rules for every future round, since design rule 3 says a rule change is
+  proposed and not absorbed. They are parked here, with their prior
+  standing stated as it was: (1) tests live beside the source they test,
+  one file per source file in the mirrored folder; (2) **named failures,
+  never bare errors** -- every refusal has its own name, and every failure
+  test checks that it fires, that it leaves the refused state exactly as
+  it was, and that it prints its own name; (3) describe the boundary,
   never claim impossibility -- Julia has no private fields, so "cannot
   happen" and "by construction" claim an absolute the code cannot deliver,
-  and three reviews in a row caught this codebase doing it; (3) before
+  and three reviews in a row caught this codebase doing it; (4) before
   proposing a struct, ask whether a symbol, a function or an existing type
   does the job -- a type hierarchy is what a table graduates to when each
-  entry needs its own behaviour, not where it starts; (4) working notes
+  entry needs its own behaviour, not where it starts; (5) working notes
   are retired by the change that lands their work, not carried forward for
-  a later sweep. The module docs already *illustrate* all four. Adopting
-  them is a one-line decision each; surfaced 2026-09-15.
+  a later sweep. The module docs already *illustrate* all five, and the
+  code follows them. Promoting them into [design.md](design.md) is a
+  one-line decision each; surfaced 2026-09-15, restated 2026-09-15 after
+  a review found the parking note had downgraded them to "proposed but
+  not adopted" and dropped the named-failures requirement outright.
 - **Capability-restricted views.** A structural raw/model boundary (a
   policy view that cannot address `OptionBar`) was declined in
   data-kinds v3 in favour of a doc rule; revisit if a policy ever

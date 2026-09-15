@@ -228,7 +228,12 @@ end
             @test r.n_closes == n_closes(res.ledger) == 2
             @test r.n_marked == n_marked(res.curve) == 3
             @test r.n_unmarked == n_unmarked(res.curve) == 0
-            @test r.schema_version == 6
+            # Every output table has a count: the two the ledger and the
+            # curve do not cover are what keep a truncated metrics or
+            # failures table different from one that recorded nothing.
+            @test r.n_metrics == length(res.metrics) == 7
+            @test r.n_failures == length(res.failures) == 0
+            @test r.schema_version == 7
             @test !(:n_positions in propertynames(r))
             @test !(:window_end_spot in propertynames(r))
         end
@@ -579,14 +584,14 @@ end
     end
 end
 
-@testset "manifest schema_version: written as 6, and load_run refuses other versions" begin
+@testset "manifest schema_version: written as 7, and load_run refuses other versions" begin
     mktempdir() do tmp
         res = _build_smoke_result()
         with_run_store(joinpath(tmp, "kb")) do store
             id = save_run(store, res, _SMOKE_CONFIG)
             path = replace(joinpath(run_dir(store, id), "manifest.parquet"), "\\" => "/")
             r = first(collect(DBInterface.execute(store.con, "SELECT schema_version FROM '$path'")))
-            @test r.schema_version == VolSurfaceAnalysis.RUN_SCHEMA_VERSION == 6
+            @test r.schema_version == VolSurfaceAnalysis.RUN_SCHEMA_VERSION == 7
             @test load_run(store, id) isa ExperimentResult
 
             # a manifest written before the column existed
@@ -621,6 +626,17 @@ end
             err = try load_run(store, id); nothing catch e; e end
             @test err isa ArgumentError
             @test occursin("schema_version 5", err.msg) && occursin("rerun the config", err.msg)
+
+            # And schema 6, the version just before this one: its manifest
+            # index carries no metric or failure count, so a schema-6 run
+            # cannot tell a truncated output table from an empty one. That
+            # is a fact about the record, not about the reader, and no
+            # migration can add evidence a save never wrote down.
+            DBInterface.execute(store.con, "CREATE OR REPLACE TABLE m AS SELECT * EXCLUDE (schema_version, n_metrics, n_failures), 6::INTEGER AS schema_version FROM '$path'")
+            DBInterface.execute(store.con, "COPY m TO '$path' (FORMAT PARQUET)")
+            err = try load_run(store, id); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("schema_version 6", err.msg) && occursin("rerun the config", err.msg)
         end
         GC.gc()
     end
@@ -905,7 +921,8 @@ end
     mktempdir() do tmp
         res = _build_smoke_result()
         for (col, bad) in (("n_events", 9), ("n_orders", 3), ("n_opens", 1),
-                           ("n_closes", 5), ("n_marked", 2), ("n_unmarked", 7))
+                           ("n_closes", 5), ("n_marked", 2), ("n_unmarked", 7),
+                           ("n_metrics", 4), ("n_failures", 2))
             with_run_store(joinpath(tmp, "kb_" * col)) do store
                 id = save_run(store, res, _SMOKE_CONFIG)
                 path = _st_pq(joinpath(run_dir(store, id), "manifest.parquet"))
@@ -978,6 +995,157 @@ end
             err = try load_run(store, id); nothing catch e; e end
             @test err isa ArgumentError
             @test occursin("does not report unmarked", err.msg)
+        end
+        GC.gc()
+    end
+end
+
+@testset "load_run: a curve reason must occur among its own mark failures" begin
+    mktempdir() do tmp
+        broken = DateTime(2024, 1, 17, 21, 0)
+        curve = MarkedCurve([DateTime(2024, 1, 16, 21, 0)], [0.0], [broken], [:no_mark])
+        res = _build_smoke_result(; curve = curve, failures = [_st_mark_failure(broken)])
+        with_run_store(joinpath(tmp, "kb")) do store
+            id = save_run(store, res, _SMOKE_CONFIG)
+            # The instants still line up exactly; only the reasons now
+            # contradict each other. A curve that says :no_mark while every
+            # failure at that session says :unexpected_gap is two tables
+            # describing two different runs, and matching timestamps alone
+            # would accept it.
+            path = _st_pq(joinpath(run_dir(store, id), "failures.parquet"))
+            DBInterface.execute(store.con,
+                "CREATE OR REPLACE TABLE f AS SELECT * EXCLUDE (reason), " *
+                "'unexpected_gap' AS reason FROM '$path'")
+            DBInterface.execute(store.con, "COPY f TO '$path' (FORMAT PARQUET)")
+            err = try load_run(store, id); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("no_mark", err.msg) && occursin("unexpected_gap", err.msg)
+            @test occursin("2024-01-17", err.msg)
+        end
+        GC.gc()
+    end
+end
+
+@testset "load_run: metric and failure membership is protected by its own count" begin
+    mktempdir() do tmp
+        broken = DateTime(2024, 1, 17, 21, 0)
+        # One settlement failure with no curve entry to answer for it, and
+        # two mark failures at one broken session -- the two shapes the
+        # instant-for-instant agreement cannot see.
+        fs = [RunFailure(DateTime(2024, 1, 16, 14, 0), :settlement,
+                         "SPY 2024-01-16T21:00:00 470.0P lot@2", :unexpected_gap),
+              _st_mark_failure(broken, "SPY 2024-01-19T21:00:00 480.0P lot@1"),
+              _st_mark_failure(broken, "SPY 2024-01-19T21:00:00 490.0C lot@3")]
+        curve = MarkedCurve([DateTime(2024, 1, 16, 21, 0)], [0.0], [broken], [:no_mark])
+        res = _build_smoke_result(; curve = curve, failures = fs)
+        @test length(res.metrics) == 7 && length(res.failures) == 3
+
+        # An empty but perfectly schema-valid metrics.parquet is not a run
+        # that reported no metrics (design rule 7).
+        with_run_store(joinpath(tmp, "kb_metrics")) do store
+            id = save_run(store, res, _SMOKE_CONFIG)
+            path = _st_pq(joinpath(run_dir(store, id), "metrics.parquet"))
+            DBInterface.execute(store.con,
+                "CREATE OR REPLACE TABLE m AS SELECT * FROM '$path' LIMIT 0")
+            DBInterface.execute(store.con, "COPY m TO '$path' (FORMAT PARQUET)")
+            err = try load_run(store, id); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("n_metrics", err.msg) && occursin("hold 0", err.msg)
+        end
+        GC.gc()
+
+        # The settlement failures have no curve entry to miss them: delete
+        # them and every structural relationship still holds.
+        with_run_store(joinpath(tmp, "kb_settlement")) do store
+            id = save_run(store, res, _SMOKE_CONFIG)
+            path = _st_pq(joinpath(run_dir(store, id), "failures.parquet"))
+            DBInterface.execute(store.con,
+                "CREATE OR REPLACE TABLE f AS SELECT * FROM '$path' " *
+                "WHERE stage <> 'settlement'")
+            DBInterface.execute(store.con, "COPY f TO '$path' (FORMAT PARQUET)")
+            err = try load_run(store, id); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("n_failures", err.msg) && occursin("hold 2", err.msg)
+        end
+        GC.gc()
+
+        # ... and one of the two mark failures of one session, keeping the
+        # other: the instants agree, the reasons agree, and only the count
+        # knows a question was dropped.
+        with_run_store(joinpath(tmp, "kb_mark")) do store
+            id = save_run(store, res, _SMOKE_CONFIG)
+            path = _st_pq(joinpath(run_dir(store, id), "failures.parquet"))
+            DBInterface.execute(store.con,
+                "CREATE OR REPLACE TABLE f AS SELECT * FROM '$path' " *
+                "WHERE subject NOT LIKE '%480.0P%'")
+            DBInterface.execute(store.con, "COPY f TO '$path' (FORMAT PARQUET)")
+            err = try load_run(store, id); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("n_failures", err.msg) && occursin("hold 2", err.msg)
+        end
+        GC.gc()
+    end
+end
+
+@testset "load_run: a stored leg's identity is checked, and every row accounted for" begin
+    mktempdir() do tmp
+        res = _build_smoke_result()          # two orders, two legs each
+        legs_of(store, id) = _st_pq(joinpath(run_dir(store, id), "order_legs.parquet"))
+
+        # A rewritten order_leg_id. `leg_idx` sorts the rows and the loader
+        # used to mint the ids from first_leg_id, so the stored column could
+        # say anything at all and the ledger still loaded as if untouched.
+        with_run_store(joinpath(tmp, "kb_id")) do store
+            id = save_run(store, res, _SMOKE_CONFIG)
+            path = legs_of(store, id)
+            DBInterface.execute(store.con,
+                "CREATE OR REPLACE TABLE l AS SELECT * EXCLUDE (order_leg_id), " *
+                "CASE WHEN order_id = 1 AND leg_idx = 2 THEN 77 ELSE order_leg_id END" *
+                "::BIGINT AS order_leg_id FROM '$path'")
+            DBInterface.execute(store.con, "COPY l TO '$path' (FORMAT PARQUET)")
+            err = try load_run(store, id); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("order_leg_id", err.msg) && occursin("77", err.msg)
+        end
+        GC.gc()
+
+        # Indices shifted without changing their order: 1,2 becomes 2,3, so
+        # the ORDER BY sees the same rows in the same order and only the
+        # stored index says otherwise.
+        with_run_store(joinpath(tmp, "kb_idx")) do store
+            id = save_run(store, res, _SMOKE_CONFIG)
+            path = legs_of(store, id)
+            DBInterface.execute(store.con,
+                "CREATE OR REPLACE TABLE l AS SELECT * EXCLUDE (leg_idx), " *
+                "CASE WHEN order_id = 1 THEN leg_idx + 1 ELSE leg_idx END" *
+                "::BIGINT AS leg_idx FROM '$path'")
+            DBInterface.execute(store.con, "COPY l TO '$path' (FORMAT PARQUET)")
+            err = try load_run(store, id); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("leg_idx", err.msg)
+        end
+        GC.gc()
+
+        # A leg recorded against an order id no order claims. The loader
+        # indexed the legs by order id and read only the ids it knew, so an
+        # extra row was dropped in silence and the subset loaded as the record.
+        with_run_store(joinpath(tmp, "kb_orphan")) do store
+            id = save_run(store, res, _SMOKE_CONFIG)
+            path = legs_of(store, id)
+            DBInterface.execute(store.con,
+                "CREATE OR REPLACE TABLE l AS SELECT * FROM '$path' UNION ALL BY NAME " *
+                "(SELECT * EXCLUDE (order_id), 99::BIGINT AS order_id FROM '$path' LIMIT 1)")
+            DBInterface.execute(store.con, "COPY l TO '$path' (FORMAT PARQUET)")
+            err = try load_run(store, id); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("no order claims", err.msg) && occursin("99", err.msg)
+        end
+        GC.gc()
+
+        # The untampered run still loads: these checks refuse defects, not legs.
+        with_run_store(joinpath(tmp, "kb_ok")) do store
+            id = save_run(store, res, _SMOKE_CONFIG)
+            @test load_run(store, id) isa ExperimentResult
         end
         GC.gc()
     end
@@ -1098,13 +1266,20 @@ end
         res  = _st_session_result(cfg)
         with_run_store(joinpath(tmp, "kb")) do store
             id = save_run(store, res, cfg)
-            # An extra metric in the record, and an extra failure row whose
-            # instant the curve also has to be told about.
+            # A metric the record has and the rerun does not. The manifest is
+            # the index over the record, so a row added to a table is added
+            # to its count too -- otherwise this is a truncation defect and
+            # `load_run` refuses it before `reproduce` can compare anything.
             mpath = _st_pq(joinpath(run_dir(store, id), "metrics.parquet"))
             DBInterface.execute(store.con,
                 "CREATE OR REPLACE TABLE m AS SELECT * FROM '$mpath' UNION ALL " *
                 "SELECT '$id', 'invented', 1.0::DOUBLE")
             DBInterface.execute(store.con, "COPY m TO '$mpath' (FORMAT PARQUET)")
+            npath = _st_pq(joinpath(run_dir(store, id), "manifest.parquet"))
+            DBInterface.execute(store.con,
+                "CREATE OR REPLACE TABLE n AS SELECT * EXCLUDE (n_metrics), " *
+                "(n_metrics + 1)::BIGINT AS n_metrics FROM '$npath'")
+            DBInterface.execute(store.con, "COPY n TO '$npath' (FORMAT PARQUET)")
 
             rep = reproduce(store, id)
             @test rep.status === :diverged
@@ -1239,4 +1414,48 @@ end
     @test d.output === :events && d.field === :price
     @test occursin("sequence " * string(sequence(fills[1])), d.row)
     @test d.stored != d.fresh
+end
+
+@testset "reproduce: both dependency environments are named, package by package" begin
+    mktempdir() do tmp
+        tree = _st_session_tree(tmp)
+        cfg  = _st_session_config(tree)
+        res  = _st_session_result(cfg)
+        with_run_store(joinpath(tmp, "kb")) do store
+            id = save_run(store, res, cfg; commit_sha="abc123", dirty=false)
+            dep = joinpath(run_dir(store, id), "Manifest.toml")
+
+            rep = reproduce(store, id)
+            @test rep.status === :reproduced
+            @test rep.stored_deps == rep.fresh_deps != "(unknown)"
+            @test isempty(rep.deps_changed)
+            @test occursin(rep.stored_deps, sprint(show, MIME"text/plain"(), rep))
+
+            # Same commit, different environment. `backtest/settlement.jl`
+            # reads the NYSE calendar `BusinessDays` ships, so a code sha
+            # alone does not pin what a run consulted: two identical commits
+            # over two environments must not produce the same report.
+            stored_toml = read(dep, String)
+            swapped = replace(stored_toml,
+                r"(\[\[deps\.BusinessDays\]\][\s\S]*?version = \")([^\"]+)" => s"\g<1>0.0.1")
+            @test swapped != stored_toml
+            write(dep, swapped)
+
+            rep2 = reproduce(store, id)
+            # The outputs still agree -- differing dependencies are
+            # provenance, not divergence -- but the report says so by name.
+            @test rep2.status === :reproduced
+            @test isempty(rep2.divergences)
+            @test rep2.stored_deps != rep2.fresh_deps
+            @test rep2.fresh_deps == rep.fresh_deps
+            changed = only(rep2.deps_changed)
+            @test occursin("BusinessDays", changed) && occursin("0.0.1", changed)
+            printed = sprint(show, MIME"text/plain"(), rep2)
+            @test occursin("BusinessDays", printed) && occursin("differ", printed)
+
+            # And it is still read-only: the document it read is unchanged.
+            @test read(dep, String) == swapped
+        end
+        GC.gc()
+    end
 end

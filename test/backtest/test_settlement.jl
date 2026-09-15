@@ -278,13 +278,42 @@ end
 @testset "run_backtest: an unsettleable lot stays open, warned about once" begin
     f = _st_gap_fixture()
     p = _ST_OpenAt([f.ticks[1] => f.a])
-    L = @test_logs (:warn, "lot left open: no honest settlement price") run_backtest(
-        p, f.data, f.ticks[1], _st_et(_ST_D22, 20, 0), _ST_CLOCK).ledger
+    out = @test_logs (:warn, "lot left open: no honest settlement price") run_backtest(
+        p, f.data, f.ticks[1], _st_et(_ST_D22, 20, 0), _ST_CLOCK)
+    L = out.ledger
     # Three ticks and a window-end pass follow the expiry; the warning fired
     # once, because the interval examines a lot exactly once, ever (D5).
     @test !any(e isa Expiry for e in L.events)
     @test [l.contract for l in open_lots(L.book)] == [f.a]
     @test L.book == book_effective(L, _st_et(_ST_D22, 20, 0))
+    # The engine is the *producer* of what persistence later keeps. A warning
+    # dies with the run; this is the fact that leaves it, stamped at the tick
+    # whose lifecycle pass asked -- the Friday, not the Thursday expiry.
+    r = only(out.failures)
+    @test r.stage === :settlement && r.reason === :unexpected_gap
+    @test r.at == f.ticks[4]
+    @test occursin("470.0C", r.subject) && occursin("lot@", r.subject)
+end
+
+@testset "run_backtest: the window-end pass retains its own unsettled lot" begin
+    # The other lifecycle pass. The expiry falls after the last policy tick,
+    # so nothing but the endpoint pass ever examines this lot -- and that
+    # pass's `.unsettled` was the half that used to be warned about and then
+    # dropped on the floor.
+    f = _st_gap_fixture()
+    to = _st_et(_ST_D18, 20, 0)                  # past the 16:00 ET expiry
+    p = _ST_OpenAt([f.ticks[1] => f.a])
+    out = @test_logs (:warn, "lot left open: no honest settlement price") run_backtest(
+        p, f.data, f.ticks[1], to, _ST_CLOCK)
+    @test !any(e isa Expiry for e in out.ledger.events)
+    @test [l.contract for l in open_lots(out.ledger.book)] == [f.a]
+    r = only(out.failures)
+    @test r.stage === :settlement && r.reason === :unexpected_gap
+    # Stamped at the window end, which is not any tick of the run: that is
+    # what says which pass asked the question.
+    @test r.at == to
+    @test !any(t -> t == r.at, f.ticks)
+    @test occursin("470.0C", r.subject) && occursin("lot@", r.subject)
 end
 
 @testset "run_backtest: an unsettleable lot is still in the book the policy sees" begin
