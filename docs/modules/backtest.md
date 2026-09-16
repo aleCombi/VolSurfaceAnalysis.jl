@@ -148,9 +148,8 @@ the listed date at 16:00 ET; nothing constrains it to that. What settles
 a contract is the *session-close print*: the underlying's last
 regular-hours print of the settlement session, which the rule reads as
 the last print of its reference window and which is the same thing only
-where the spot tree holds regular-session prints alone
-([`data`](data.md) records what the production tree
-actually holds). That is a stated departure from the
+where the spot tree holds regular-session prints alone, which the
+production tree does not. That is a stated departure from the
 facts -- the official closing auction is not in the data -- and it is
 the only one here; the payoff itself is real, intrinsic under exercise
 by exception.
@@ -177,8 +176,11 @@ since 15:59 is regular-hours-shaped. The production tree does serve
 extended hours and is *measured* not to print inside that window on the
 dates that matter, which is why the six early-close sessions of a
 ten-year SPY run settle at their 13:00 prints;
-[`data`](data.md) records the requirement, the measurement
-and the official-close data kind that would make it structural. The
+Nothing enforces it: a `SpotPrice` does not record which session a
+print came from, so no consumer can check. One genuine extended-hours
+print inside that window would silently become a settlement price. The
+official-close data kind that would make the rule structural is a
+backlog item in [status](../status.md). The
 exchange calendar answers one question only, and it is a *check*: a
 printless date the calendar calls open is a data gap, named and
 reported, never evidence that the exchange was closed (design rule 7). Ad-hoc closures the calendar may lag behind have

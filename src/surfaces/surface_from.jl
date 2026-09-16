@@ -127,8 +127,9 @@ function asof(r::SurfaceReader, m, ::Type{VolatilitySurface}, u::Underlying, ts:
 end
 
 # An over-estimate for a derived kind, deliberately: making it exact would
-# mean building every surface in the range. `timestamps` and `between`
-# report the input grid, so they can name instants where no surface
-# exists. That is a property of derived kinds, not a defect of this one.
+# mean building every surface in the range, so `timestamps` reports the
+# input grid and can name instants where no surface exists. `between`
+# walks that grid too but flattens `at`, so it yields only surfaces that
+# built: its output is exact, its traversal is not.
 timestamps(::SurfaceReader, m, ::Type{VolatilitySurface}, u::Underlying, from::DateTime, to::DateTime) =
     timestamps(m, OptionQuote, u, from, to)

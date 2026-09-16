@@ -115,9 +115,11 @@ timestamp at which a record of that kind exists, which for a derived
 kind is not where its input exists: a provider whose build fails at the
 newest input instant keeps walking. The walk is bounded, so repeated
 failure surfaces as a truncated dataset rather than as absence. For the
-same reason `timestamps` and `between` over a derived kind are
-**over-estimates** -- they report the input grid. Making them exact
-would mean building every record in the range.
+same reason `timestamps` over a derived kind is an **over-estimate** --
+it reports the input grid, so it can name instants where no derived
+record exists. Making it exact would mean building every record in the
+range. `between` traverses that same grid but yields only records that
+were built, so its output is exact and its cost is not.
 
 ## What a provider owes
 

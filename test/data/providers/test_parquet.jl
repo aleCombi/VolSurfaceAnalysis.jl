@@ -564,6 +564,11 @@ end
 
 # ---------- opt-in real-data smoke ----------
 
+if haskey(ENV, "VSA_POLYGON_ROOT") && !haskey(ENV, "VSA_MASSIVE_ROOT")
+    error("VSA_POLYGON_ROOT is set but the variable is now VSA_MASSIVE_ROOT; " *
+          "rename it, or the real-data smoke test is skipped while the suite passes")
+end
+
 if haskey(ENV, "VSA_MASSIVE_ROOT")
     @testset "parquet real data (VSA_MASSIVE_ROOT): smoke" begin
         root = ENV["VSA_MASSIVE_ROOT"]
