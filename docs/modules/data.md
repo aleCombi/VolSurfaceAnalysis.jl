@@ -125,8 +125,9 @@ Answering is the whole interface, but a provider holding a resource owes
 three things beyond it.
 
 - **Opt in to the lifecycle.** Opening and closing are the project's own
-  generics with explicit opt-ins, so a provider that forgot to opt in
-  fails a check rather than silently becoming a no-op.
+  generics with no fallback, so a provider type with no `open_data`
+  method fails a load-time check naming its kind, rather than being
+  silently treated as needing nothing.
 - **Refuse late.** Constructing a spec touches no storage; a missing
   root is refused at opening, never at construction.
 - **Throw on use after close**, rather than leaving it to the storage,
