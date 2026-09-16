@@ -1,20 +1,11 @@
-# The store carries only OHLCV per minute bar; there is no bid/ask feed. To
-# let downstream code that requires a fillable quote run against it, a
-# `QuoteSynthesizer` turns an `OptionBar` into an `OptionQuote`. The
-# `QuotesFromBars` provider CARRIES a synthesizer and applies it to every
-# bar it reads; the parquet reader does not hardcode one. When a real
-# bid/ask feed lands, a different synthesizer (or a provider that serves
-# quotes directly) takes its place without touching anything downstream.
+# `data/providers`: turning a bar into a fillable quote.
 
 """
     QuoteSynthesizer
 
 Abstract strategy type: turns an [`OptionBar`](@ref) into an
-[`OptionQuote`](@ref). A data source whose underlying record is a bar
-declares the synthesizer it uses at construction time; the synthesizer
-encodes the policy by which raw OHLCV becomes a fillable bid/ask.
-
-Concrete subtypes implement `synthesize(s, bar)::OptionQuote`.
+[`OptionQuote`](@ref). Concrete subtypes implement
+`synthesize(s, bar)::OptionQuote`.
 """
 abstract type QuoteSynthesizer end
 
@@ -40,18 +31,14 @@ extreme range and its close:
 `λ` tightens the synthesized spread around `close`:
 
 - `λ = 0.0` → `bid = low`, `ask = high` (widest, most conservative fill).
-- `λ = 0.7` → canonical default used across this project's experiments.
+- `λ = 0.7` → the value this project's configs use.
 - `λ = 1.0` → `bid = ask = close` (midpoint, zero spread).
 
-`λ` is required at the type level; there is no default. Strategies and
-configs that want the canonical 0.7 spell it out, so the fill policy is
-always visible in the experiment record.
+`λ` is required at the type level; there is no default.
 
-Missing-data policy: if `high`, `low`, or `close` is `missing`, the
-synthesized `bid` and `ask` are `missing` (and `mark = close` if present).
-Downstream the venue then refuses to price a leg whose executable side is
-missing (`UnpriceableLeg`) -- a silent zero-spread fallback would invent a
-market that did not trade.
+If `high`, `low` or `close` is `missing` the synthesized `bid` and `ask`
+are `missing` too, and `mark = close` if present. Not zero spread: a
+fallback there would invent a market that did not trade.
 
 Throws `ArgumentError` when `λ` is outside `[0, 1]`.
 """

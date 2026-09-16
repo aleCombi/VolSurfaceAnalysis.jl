@@ -1,9 +1,5 @@
-# `data/providers`: resource-free provider specs and the first derived
-# provider.
-#
-# A spec is an immutable value describing where records of one kind come
-# from. It holds no resources: config builds it, identity hashes it. The
-# specs here need nothing at run time, so they are their own readers.
+# `data/providers`: the specs that need nothing at run time, so they are
+# their own readers, plus the first derived provider.
 
 """
     InMemory{R}(rows)

@@ -1,55 +1,22 @@
 # `data/providers`: parquet specs and readers for the Massive tree.
 #
-# Storage layout (one tree per kind, the collector's Hive layout):
+# Storage layout, one tree per kind, in the collector's Hive layout:
 #   <root>/date=YYYY-MM-DD/symbol=<TICKER>/data.parquet
-# `ParquetOptionBars(root)` serves OptionBar from an options tree,
-# `ParquetSpots(root)` serves SpotPrice from a spots tree; `root` is the
-# kind-specific directory. The selector is a query argument, so one spec
-# serves every symbol= partition under its root.
+# The selector is a query argument, so one spec serves every symbol=
+# partition under its root. The partitions are time-ordered with a
+# one-day spill, which the four shapes rely on -- see the `data` module
+# doc for what that buys and what breaks without it.
 #
-# Partition convention: partition D may hold any ROW timestamp in
-# [D 00:00, D+1 02:00) UTC -- the collector writes a US session into the
-# partition of its local date, and after-midnight UTC rows spill past
-# Date(ts). Under bar-end visibility those rows are VISIBLE in
-# [D 00:01, D+1 02:01), shifted one minute at both ends; the spill is still
-# one day, and a D 23:59 row is simply visible at D+1 00:00 without
-# moving file. Every shape consults partitions Date(ts)-1 and Date(ts)
-# (bounded by the partition list) with `ts` in visibility time, which
-# covers the shifted range for the same reason it covered the raw one:
-# the visible span of partition D still ends before D+2 and still starts
-# after D-1's does. That is what makes `at == collect(between(ts, ts))`
-# an identity rather than a coincidence, and what finds a 23:59 row at
-# next-day 00:00 with no next-day partition in existence.
+# Bar-end visibility is translated here and nowhere else, at the two
+# points where this file meets the stored clock:
 #
-# The convention is TIME-ORDERED: every row in partition D-1 precedes
-# every row in partition D. That is what a local-date collector produces
-# -- one contiguous session per partition, the after-midnight spill
-# belonging to the earlier session -- and the four shapes only agree with
-# each other under it. `asof` returns at the newest candidate partition
-# holding a row <= ts while `at` and `timestamps` merge both candidates,
-# so an interleaved layout would let `asof` disagree with
-# `at(last(timestamps(...)))`; and the lazy `PartitionBars` iterator
-# concatenates D-1 then D without a cross-partition sort, so it would
-# yield out-of-order records and make `by_timestamp` throw. Under the
-# ordering both disagreements vanish by construction. A feed that
-# genuinely interleaves partitions needs a maximum over both candidates
-# in `asof` and a lazy two-way merge in `between`; no collector writes
-# one today.
+#   reading  -- `_visible(row)` on every timestamp leaving DuckDB, so
+#               records, cached timestamp lists and spot blocks are all
+#               in visibility time;
+#   querying -- `_row_ts_sql(ts)` on every SQL bound, the inverse.
 #
-# Bar-end visibility. Vendor rows carry the bar-OPEN timestamp; a record
-# read off such a row is visible only at bar end. The translation lives
-# here, at the one boundary where rows become records, and nowhere else:
-#
-#   reading  -- `_visible(row)` on every timestamp that leaves DuckDB, so
-#               records, the cached per-partition timestamp lists and the
-#               spot blocks are all in visibility time, and every
-#               searchsorted over them already answers the right clock;
-#   querying -- `_row_ts_sql(ts)` on every SQL bound, the inverse, so the
-#               exact and range predicates address the stored clock.
-#
-# Every shape above these two therefore speaks visibility time. See
-# `bar_visible_at` / `bar_row_time` in data/massive.jl for why bar end is
-# the convention rather than a setting.
+# A new query path here must go through both, or it addresses the wrong
+# clock.
 
 using DuckDB
 using DuckDB: DBInterface
@@ -108,13 +75,11 @@ function _list_partitions(root::AbstractString, u::Underlying)::Vector{Date}
     sort!(out)
 end
 
-# Partitions that can hold a record VISIBLE in [from, to] under the
-# convention. `from` and `to` are visibility times, and the bounds are
-# unchanged by the bar-end shift: partition D's rows are visible in
-# [D 00:01, D+1 02:01), so a partition later than Date(to) cannot have
-# become visible yet and one earlier than Date(from) - 1 finished being
-# visible before `from`. The extra minute at the top is what lets a
-# D 23:59 row be found at D+1 00:00 while D+1 has no partition at all.
+# Partitions that can hold a record VISIBLE in [from, to]. `from` and
+# `to` are visibility times; the one-day spill is what makes
+# Date(from) - 1 the lower bound, and the minute the bar-end shift adds
+# at the top is what finds a D 23:59 row at D+1 00:00 when D+1 has no
+# partition at all.
 function _candidate_partitions(parts::Vector{Date}, from::DateTime, to::DateTime)
     lo = searchsortedfirst(parts, Date(from) - Day(1))
     hi = searchsortedlast(parts, Date(to))

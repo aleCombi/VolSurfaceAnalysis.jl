@@ -1,11 +1,6 @@
-# `data/protocol`: lifecycle.
-#
-# A reader is the opened form of a spec: it owns what the storage needs at
-# run time (a connection, bounded caches, a partition list). Specs that
-# need nothing are their own reader. The pair is project-owned, with NO
-# fallback on Any: a spec without an explicit `open_data` method is a
-# load-time error, never a silent no-op. The run opens and closes;
-# `Experiment` holds the spec map only.
+# `data/protocol`: the open/close pair. Project-owned, with NO fallback on
+# Any -- do not add one: a provider type without an explicit `open_data`
+# is then a load-time error rather than a silent no-op.
 
 """
     open_data(spec) -> reader

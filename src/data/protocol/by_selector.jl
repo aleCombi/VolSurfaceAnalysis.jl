@@ -1,10 +1,7 @@
-# `data/protocol`: composition by selector.
-#
-# "SPY spots from parquet, SPX spots from csv" inside the one SpotPrice
-# entry. The kind is a type parameter, the parts are a tuple of
-# `selector => provider` pairs, and routing on a runtime selector yields a
-# small union of part types whose shapes all return the same record type,
-# so call sites stay inferable (pinned in test_by_selector.jl).
+# `data/protocol`: composition by selector. Routing on a runtime selector
+# yields a small union of part types whose shapes all return the same
+# record type, so call sites stay inferable -- pinned in
+# test_by_selector.jl.
 
 """
     BySelector{R}(sel => provider, ...)

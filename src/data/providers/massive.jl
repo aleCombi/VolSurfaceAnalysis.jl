@@ -29,27 +29,11 @@ _sql_path(p::AbstractString) = replace(String(p), "\\" => "/")
 _coerce_dt(x::DateTime) = x
 _coerce_dt(x) = DateTime(x)
 
-# --- the bar-stamp convention --------------------------------------------
-#
-# A vendor minute bar is stamped at its OPEN, but every value read off it
-# -- close, high, low, and any spread synthesized from them -- is knowable
-# only when the minute has finished. The canonical visibility time of a
-# record read off such a bar is therefore the row timestamp plus the bar
-# interval: the 19:29 row becomes visible at 19:30, and a decision at
-# 19:30 reads the completed 19:29-19:30 minute. Stamping the open instead
-# hands every bar-based fill and every settlement price up to one minute
-# of future information; `TimeCut` cannot catch that, because the record
-# admitted through it claims to be knowable before it is.
-#
-# Both production trees (`options_1min`, `spots_1min`) hold one-minute
-# bars, so `BAR_INTERVAL` is one minute and this is THE convention, fixed
-# here in code. It is deliberately not a spec option and not a config key:
-# one of the two settings would enable lookahead, and offering both would
-# invite an experiment to pick the incorrect clock. A source whose bars
-# are not one minute needs its own reader, and that reader states its own
-# interval -- the general "declare your visibility convention" rule from
-# `market_data.md` -- but a completed minute's availability is not a
-# choice an experiment gets to make.
+# The bar interval, and with it the bar-end stamp below. Fixed here: it is
+# not a spec option and not a config key, because the other setting would
+# enable lookahead. Do not make it configurable -- see the `data` module
+# doc. A source whose bars are not one minute needs its own reader,
+# stating its own interval.
 const BAR_INTERVAL = Minute(1)
 
 """
@@ -75,7 +59,7 @@ untranslated form would have selected one minute earlier.
 bar_row_time(visible_at::DateTime)::DateTime = visible_at - BAR_INTERVAL
 
 # Contract identity as the vendor row carries it: the collector's parsed_*
-# columns when present, else the ticker. Storage-agnostic; the market_data
+# columns when present, else the ticker. Storage-agnostic; the `data` module
 # parquet reader builds records from it.
 const ContractMeta = NamedTuple{(:expiry, :strike, :option_type),Tuple{DateTime,Float64,OptionType}}
 

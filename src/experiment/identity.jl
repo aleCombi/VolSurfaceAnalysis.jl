@@ -56,7 +56,7 @@ to_dict(c::PCCurve) = Dict{String,Any}(
 to_dict(s::SpreadFromOHLCV) =
     Dict{String,Any}("type" => "ohlcv_spread", "lambda" => s.lambda)
 
-# --- market_data specs --------------------------------------------------
+# --- data specs --------------------------------------------------
 # One entry per kind, keyed by the loader's kind name; each spec emits
 # only what determines the records it serves. Readers never appear (they
 # are not on specs) and cache sizes are open_data kwargs, never identity.

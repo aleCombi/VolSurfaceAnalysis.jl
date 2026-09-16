@@ -1,18 +1,5 @@
-# The kinds: what a market datum IS.
-#
-# A kind is a plain immutable record type. Every kind answers two questions
-# the protocol depends on:
-#
-# - `timestamp::DateTime` is VISIBILITY time: the moment the record became
-#   knowable. The time cut filters on it and on nothing else. Any other date
-#   a record carries (expiry, ex-date, effective date) is an ordinary field.
-#   A record read off a minute bar is stamped at BAR END -- the vendor's
-#   bar-open stamp plus the bar interval -- so a decision at `t` reads the
-#   completed minute and not one still running (see docs/modules/data.md).
-# - `selector(r)` is the field that distinguishes parallel series of the
-#   same kind (`Underlying` for market data, `Currency` for rate curves), and
-#   `selector_type(R)` is its type. Together they are what `BySelector`,
-#   `Clock`, `Constant` and the config loader check.
+# The kinds: the record types, and the contract every one of them answers
+# (`selector`, `selector_type`, `snapshot`). See the `data` module doc.
 
 @enum OptionType Call Put
 
