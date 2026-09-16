@@ -136,33 +136,27 @@ three things beyond it.
 ## What the protocol assumes about a store
 
 Two of the protocol's promises are not self-enforcing. They hold only if
-the rows on disk are arranged a particular way, which makes the
-arrangement a convention on the store rather than a check inside any
-reader -- and makes a store that breaks it wrong in a way nothing
-reports.
+the rows on disk are arranged a particular way, so a store that breaks
+them is wrong in a way nothing reports.
 
-**The four questions agree with each other only if partitions are
-time-ordered.** A partition may hold rows past its own date, because the
-collector writes a US session into its local date, so every shape
-consults the date asked about and the one before it. Every row in one
-partition must precede every row in the next. `asof` takes its instant
-from the newest candidate partition while `at` and `timestamps` merge
-both, so an interleaved layout would break
-`asof == at(last(timestamps(...)))`; and a lazy `between` concatenates
-candidates without a cross-partition sort, so it would yield records out
-of order.
+**Partitions must be globally time-ordered**: every row in one precedes
+every row in the next. `asof` takes its instant from the newest
+candidate partition while `at` and `timestamps` merge candidates, so an
+interleaved layout breaks `asof == at(last(timestamps(...)))`.
 
-**A snapshot kind can only refuse two answers if duplicates are resolved
-where rows enter.** A vendor can re-deliver a minute, and consulting two
-partitions can read one row twice; either aborts a read through
-`only_or_missing`. So the reader applies one rule after its sort: *equal
-timestamp and equal value collapse silently; equal timestamp and
-different value throws `ConflictingRecords`*, naming both. Taking the
-first would be a silent choice between two answers on a number nobody
-verified. Every read inherits the rule rather than remembering it,
-because `at` and `asof` both reach their instant through `between`. Grid
-kinds are excluded deliberately: many records per instant is their
-shape, so their duplicate key is the contract, not the instant.
+**A snapshot kind's duplicates must be resolved where rows enter.** Read
+through `only_or_missing`, one instant carrying two records aborts, so
+the reader settles it at the boundary: *equal value collapses, different
+value throws `ConflictingRecords`*, naming both. Resolving it by taking
+the first would be a silent choice between two answers on a number
+nobody verified. Grid kinds are excluded: many records per instant is
+their shape, so their duplicate key is the contract, not the instant.
+
+The Massive tree meets the first by construction rather than by
+enforcement, because the collector writes a US session into its local
+date -- so a partition holds rows past its own date and every shape
+consults the date asked about and the one before it. That is this
+store's reason; the requirement is any store's.
 
 ## Decisions
 
