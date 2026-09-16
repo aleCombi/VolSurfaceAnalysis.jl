@@ -10,7 +10,7 @@
 # Render the marked curve to a scratch dir without saving:
 #   julia --project=. scripts/run_experiment.jl configs/strangle_spy_16d_1dte.toml --out-dir C:/tmp
 #
-# The [data.*] roots point at the local Polygon trees; edit them to your
+# The [data.*] roots point at the local Massive trees; edit them to your
 # data path. They are part of the run_id hash (the reserved `dataset`
 # slot), so the same experiment on a machine with the data elsewhere gets
 # a distinct id.

@@ -5,7 +5,7 @@
 # zero positions and zero PnL -- the value is in confirming that
 # loader, engine, metrics, and printer cooperate end to end.
 #
-# Running it requires a Polygon-style parquet tree: options under
+# Running it requires a Massive-style parquet tree: options under
 # `options_1min/`, spots under `spots_1min/`. Each [data.*] table names
 # the tree it reads; edit the roots to match your data. The roots are
 # part of the run_id hash (the reserved `dataset` slot), so the same

@@ -1,7 +1,7 @@
 # `backtest` module
 
 The driver that turns an [`Agent`](agents.md) (which hands out a
-[`Policy`](policies.md) per tick) plus a [`MarketData`](market_data.md)
+[`Policy`](policies.md) per tick) plus a [`MarketData`](data.md)
 map and a `Clock` into a [`Ledger`](ledger.md), and the simulated venue
 that prices what the policy decides. One principle: **the engine
 computes, the ledger records.** The engine turns a decision into
@@ -149,7 +149,7 @@ a contract is the *session-close print*: the underlying's last
 regular-hours print of the settlement session, which the rule reads as
 the last print of its reference window and which is the same thing only
 where the spot tree holds regular-session prints alone
-([`market_data`](market_data.md) records what the production tree
+([`data`](data.md) records what the production tree
 actually holds). That is a stated departure from the
 facts -- the official closing auction is not in the data -- and it is
 the only one here; the payoff itself is real, intrinsic under exercise
@@ -177,7 +177,7 @@ since 15:59 is regular-hours-shaped. The production tree does serve
 extended hours and is *measured* not to print inside that window on the
 dates that matter, which is why the six early-close sessions of a
 ten-year SPY run settle at their 13:00 prints;
-[`market_data`](market_data.md) records the requirement, the measurement
+[`data`](data.md) records the requirement, the measurement
 and the official-close data kind that would make it structural. The
 exchange calendar answers one question only, and it is a *check*: a
 printless date the calendar calls open is a data gap, named and
@@ -227,7 +227,7 @@ a lot settled at a future number.
 
 **The window is consumed as a stream.** `between` promises an iterable,
 not a container, and settlement is its only consumer outside
-`market_data`. Each window is therefore traversed exactly once, keeping
+`data`. Each window is therefore traversed exactly once, keeping
 the last record it yields -- never indexed, and never probed for
 emptiness and then read again. A provider that streams its range one
 partition at a time, as the parquet bar reader already does, serves the
@@ -443,7 +443,7 @@ before the order.
 check); `fill_legs`, `resolve_quote`; `check_join`; the bare-`Policy`
 overload.
 
-**Does NOT own:** the time cut (a `market_data` type); policy logic
+**Does NOT own:** the time cut (a `data` type); policy logic
 and policy evolution; data acquisition; opening and closing the data
 (`run_experiment`); the writer, the events, the book and the cash rules
 ([`ledger`](ledger.md)) -- `record_expiry!` included; marking, which is
@@ -480,7 +480,7 @@ test/backtest/
 ```
 
 `settlement.jl` rather than `lifecycle.jl`: the latter would collide by
-name with `src/market_data/lifecycle.jl`, which is about opening and
+name with `src/data/protocol/lifecycle.jl`, which is about opening and
 closing readers.
 
 All files are `include`d into the top-level `VolSurfaceAnalysis`

@@ -1,4 +1,4 @@
-# `market_data` module: the clock.
+# `data/protocol`: the clock.
 #
 # The engine ticks on a declared grid, not an implicit one: the timestamps
 # of one kind for one selector. `Clock` is a pure value over (kind,

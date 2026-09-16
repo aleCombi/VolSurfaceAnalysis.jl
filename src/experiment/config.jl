@@ -441,7 +441,7 @@ cost_model = "ibkr_pro_us_options"
 
 [data.option_bar]
 type = "parquet_option_bars"
-root = "C:/data/polygon/options_1min"
+root = "C:/data/massive/options_1min"
 
 [data.option_quote]
 type = "from_bars"
@@ -449,7 +449,7 @@ synthesizer = { type = "ohlcv_spread", lambda = 0.7 }
 
 [data.spot_price]
 type = "parquet_spots"
-root = "C:/data/polygon/spots_1min"
+root = "C:/data/massive/spots_1min"
 
 [data.rate_curve]
 type = "constant"

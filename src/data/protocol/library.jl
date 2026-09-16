@@ -1,4 +1,4 @@
-# `market_data` module: library. Ordinary functions over the protocol's
+# `data/protocol`: library. Ordinary functions over the protocol's
 # results, not part of the protocol.
 
 """

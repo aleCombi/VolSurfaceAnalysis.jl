@@ -1,4 +1,4 @@
-# `market_data` module: the protocol.
+# `data/protocol`: the protocol.
 #
 # Four shapes, one per question a consumer can ask about a kind `R` and a
 # selector `sel`. Two arities exist for each:

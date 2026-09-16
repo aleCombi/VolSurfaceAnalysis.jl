@@ -1,4 +1,4 @@
-# `market_data` module: lifecycle.
+# `data/protocol`: lifecycle.
 #
 # A reader is the opened form of a spec: it owns what the storage needs at
 # run time (a connection, bounded caches, a partition list). Specs that
@@ -25,10 +25,6 @@ in reverse order even if one throws; the first error is rethrown after
 the loop. Use after close is the storage's own error.
 """
 function close_data! end
-
-# Explicit opt-in, one line per resource-free spec.
-open_data(s::Union{InMemory,Constant,QuotesFromBars}) = s
-close_data!(::Union{InMemory,Constant,QuotesFromBars}) = nothing
 
 # Best-effort close during an unwind: warn and swallow, so the error that
 # caused the unwind is the one the caller sees.

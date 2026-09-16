@@ -6,7 +6,7 @@ using Dates
 using Plots
 using Plots.Measures
 
-const ROOT = get(ENV, "VSA_POLYGON_ROOT", "C:/repos/options-collector/data/massive")
+const ROOT = get(ENV, "VSA_MASSIVE_ROOT", "C:/repos/options-collector/data/massive")
 const SYMBOL = get(ENV, "VSA_DEMO_SYMBOL", "SPY")
 const DEMO_DATE = Date(get(ENV, "VSA_DEMO_DATE", "2024-06-03"))
 const N_SLICES = parse(Int, get(ENV, "VSA_DEMO_N_SLICES", "4"))

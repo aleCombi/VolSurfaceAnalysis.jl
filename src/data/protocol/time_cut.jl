@@ -1,4 +1,4 @@
-# `market_data` module: the time cut.
+# `data/protocol`: the time cut.
 #
 # `TimeCut` wraps a map and masks every shape at `cutoff`, filtering on
 # visibility time only. It passes ITSELF down as the context, so a derived

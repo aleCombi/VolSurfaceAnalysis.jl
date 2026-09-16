@@ -2,21 +2,27 @@ module VolSurfaceAnalysis
 
 using Dates
 
-include("data/quotes.jl")
-include("data/polygon.jl")
-include("data/synth.jl")
-include("market_data/kinds.jl")
-include("market_data/protocol.jl")
-include("market_data/library.jl")
-include("market_data/providers.jl")
-include("market_data/map.jl")
-include("market_data/by_selector.jl")
-include("market_data/time_cut.jl")
-include("market_data/clock.jl")
-include("market_data/lifecycle.jl")
-include("market_data/lru.jl")
-include("market_data/parquet.jl")
-include("market_data/curves.jl")
+# ── data ────────────────────────────────────────────────────────────────────
+# kinds -- what a market datum IS
+include("data/kinds/curves.jl")        # Curve payload math; before kinds.jl,
+include("data/kinds/kinds.jl")         # because RateCurve carries a Curve
+
+# protocol -- how a datum is ASKED FOR
+include("data/protocol/protocol.jl")   # the four shapes and the refusals
+include("data/protocol/library.jl")
+include("data/protocol/map.jl")
+include("data/protocol/by_selector.jl")
+include("data/protocol/time_cut.jl")
+include("data/protocol/clock.jl")
+include("data/protocol/lifecycle.jl")
+include("data/protocol/lru.jl")
+
+# providers -- where a datum COMES FROM
+include("data/providers/synth.jl")     # before providers.jl (QuotesFromBars
+include("data/providers/providers.jl") # is parameterised on a synthesizer)
+include("data/providers/massive.jl")
+include("data/providers/parquet.jl")   # needs LRU from protocol/
+
 include("surfaces/bs.jl")
 include("surfaces/surface.jl")
 include("surfaces/build.jl")
@@ -52,7 +58,7 @@ export OptionType, Call, Put,
        Underlying, ticker,
        OptionQuote, SpotPrice,
        OptionBar, QuoteSynthesizer, SpreadFromOHLCV, synthesize,
-       parse_polygon_ticker, et_to_utc,
+       parse_massive_ticker, et_to_utc,
        Currency, selector, selector_type, snapshot,
        at, between, asof, timestamps, kind,
        only_or_missing, by_timestamp,

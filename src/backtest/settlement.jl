@@ -83,7 +83,7 @@ const _SESSION_CLOSE = Time(16, 0)
 const _SESSION_WALK_DAYS = 10
 
 # Every timestamp is UTC, so the listed date of an expiry is its ET date.
-# `parse_polygon_ticker` stamps `et_to_utc(date, Time(16, 0))`, but a
+# `parse_massive_ticker` stamps `et_to_utc(date, Time(16, 0))`, but a
 # `ContractKey` takes any instant and the window bound above does not
 # assume that convention.
 _et_date(dt::DateTime)::Date = Date(DateTime(astimezone(ZonedDateTime(dt, tz"UTC"), TZ_ET)))

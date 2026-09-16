@@ -1,4 +1,4 @@
-# `market_data` module: the map.
+# `data/protocol`: the map.
 #
 # `MarketData` is an immutable tuple of providers, one per kind, looked up
 # by type. It is what an `Experiment` stores (specs) and what a run reads

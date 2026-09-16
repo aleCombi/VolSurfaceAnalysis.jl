@@ -1,52 +1,10 @@
-# This file is part of the data-sourcing adapter layer. It exists because
-# the Polygon options parquet store carries only OHLCV per minute bar; there
-# is no bid/ask feed. To let downstream code that requires a fillable quote
-# (positions, backtest) run against this store, we declare a small
-# `QuoteSynthesizer` strategy that turns an `OptionBar` -- a faithful mirror
-# of Polygon's parquet row schema -- into an `OptionQuote`. The
+# The store carries only OHLCV per minute bar; there is no bid/ask feed. To
+# let downstream code that requires a fillable quote run against it, a
+# `QuoteSynthesizer` turns an `OptionBar` into an `OptionQuote`. The
 # `QuotesFromBars` provider CARRIES a synthesizer and applies it to every
 # bar it reads; the parquet reader does not hardcode one. When a real
 # bid/ask feed lands, a different synthesizer (or a provider that serves
 # quotes directly) takes its place without touching anything downstream.
-
-"""
-    OptionBar
-
-Faithful mirror of one Polygon options OHLCV minute-bar row. Carries the
-contract identity (so it can be turned into an `OptionQuote` without an
-extra lookup) plus the raw `open`/`high`/`low`/`close`/`volume` fields.
-
-This is an adapter-layer type. Production downstream code should consume
-`OptionQuote`s produced via [`synthesize`](@ref); `OptionBar` exists so
-the synthesis policy is explicit and testable instead of buried inside
-the parquet reader.
-
-# Fields
-- `instrument_id::String`
-- `underlying::Underlying`
-- `expiry::DateTime`
-- `strike::Float64`
-- `option_type::OptionType`
-- `open::Union{Float64,Missing}`
-- `high::Union{Float64,Missing}`
-- `low::Union{Float64,Missing}`
-- `close::Union{Float64,Missing}`
-- `volume::Union{Float64,Missing}`
-- `timestamp::DateTime`
-"""
-struct OptionBar
-    instrument_id::String
-    underlying::Underlying
-    expiry::DateTime
-    strike::Float64
-    option_type::OptionType
-    open::Union{Float64,Missing}
-    high::Union{Float64,Missing}
-    low::Union{Float64,Missing}
-    close::Union{Float64,Missing}
-    volume::Union{Float64,Missing}
-    timestamp::DateTime
-end
 
 """
     QuoteSynthesizer

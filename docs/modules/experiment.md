@@ -273,7 +273,7 @@ The selector-demand check is a **fast path, not the mechanism**. A
 mistyped currency on a `vol_surface` table then fails in a second rather
 than after a backtest has been running, but the guarantee comes from
 `serves` in the four map-level shapes (see
-[`market_data`](market_data.md)). It skips providers that answer
+[`data`](data.md)). It skips providers that answer
 `missing`, which is what keeps it off the filesystem: a parquet spec
 cannot answer until it is opened, so a config is never validated by
 probing a data root. Cache sizes are

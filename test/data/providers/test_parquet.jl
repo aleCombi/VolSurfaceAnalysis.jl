@@ -564,9 +564,9 @@ end
 
 # ---------- opt-in real-data smoke ----------
 
-if haskey(ENV, "VSA_POLYGON_ROOT")
-    @testset "parquet real data (VSA_POLYGON_ROOT): smoke" begin
-        root = ENV["VSA_POLYGON_ROOT"]
+if haskey(ENV, "VSA_MASSIVE_ROOT")
+    @testset "parquet real data (VSA_MASSIVE_ROOT): smoke" begin
+        root = ENV["VSA_MASSIVE_ROOT"]
         m = MarketData(ParquetOptionBars(joinpath(root, "options_1min")), QuotesFromBars(_MD_PQ_SYNTH),
                        ParquetSpots(joinpath(root, "spots_1min")))
         day = Date(2024, 1, 16)
@@ -587,5 +587,5 @@ if haskey(ENV, "VSA_POLYGON_ROOT")
         end
     end
 else
-    @info "skipping parquet real-data smoke (set VSA_POLYGON_ROOT to enable)"
+    @info "skipping parquet real-data smoke (set VSA_MASSIVE_ROOT to enable)"
 end

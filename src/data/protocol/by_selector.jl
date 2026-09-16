@@ -1,4 +1,4 @@
-# `market_data` module: composition by selector.
+# `data/protocol`: composition by selector.
 #
 # "SPY spots from parquet, SPX spots from csv" inside the one SpotPrice
 # entry. The kind is a type parameter, the parts are a tuple of

@@ -9,11 +9,11 @@ end
 
 et_to_utc(dt::DateTime)::DateTime = DateTime(ZonedDateTime(dt, TZ_ET), UTC)
 
-const _POLYGON_TICKER_RE = r"^O:([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$"
+const _MASSIVE_TICKER_RE = r"^O:([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$"
 
-function parse_polygon_ticker(ticker::AbstractString)::Tuple{String,DateTime,OptionType,Float64}
-    m = match(_POLYGON_TICKER_RE, ticker)
-    m === nothing && throw(ArgumentError("invalid Polygon ticker: $ticker"))
+function parse_massive_ticker(ticker::AbstractString)::Tuple{String,DateTime,OptionType,Float64}
+    m = match(_MASSIVE_TICKER_RE, ticker)
+    m === nothing && throw(ArgumentError("invalid Massive ticker: $ticker"))
     underlying = m[1]
     year = 2000 + parse(Int, m[2])
     month = parse(Int, m[3])

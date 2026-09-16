@@ -3,7 +3,7 @@
 # a decision saw, and the append-only container.
 #
 # Identity vocabulary (`Underlying`, `OptionType`, `Call`, `Put`) comes
-# from `data/quotes.jl`. Nothing here refers to quotes, spots or the time
+# from `data/kinds/kinds.jl`. Nothing here refers to quotes, spots or the time
 # cut: a ledger is built and replayed from its own events, which is what
 # keeps the module testable on hand-built ledgers.
 #

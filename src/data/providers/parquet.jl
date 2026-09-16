@@ -1,4 +1,4 @@
-# `market_data` module: parquet specs and readers for the Polygon tree.
+# `data/providers`: parquet specs and readers for the Massive tree.
 #
 # Storage layout (one tree per kind, the collector's Hive layout):
 #   <root>/date=YYYY-MM-DD/symbol=<TICKER>/data.parquet
@@ -48,7 +48,7 @@
 #               exact and range predicates address the stored clock.
 #
 # Every shape above these two therefore speaks visibility time. See
-# `bar_visible_at` / `bar_row_time` in data/polygon.jl for why bar end is
+# `bar_visible_at` / `bar_row_time` in data/massive.jl for why bar end is
 # the convention rather than a setting.
 
 using DuckDB
@@ -285,7 +285,7 @@ function _query_bars(r::ParquetBarsReader, u::Underlying, d::Date, m::PartitionM
                 String(p_und[i]),
                 _contract_meta_from_parsed(p_exp[i], Float64(p_strk[i]), String(p_otype[i]))
             else
-                pu, expiry, otype, strike = parse_polygon_ticker(tk)
+                pu, expiry, otype, strike = parse_massive_ticker(tk)
                 pu, (expiry=expiry, strike=strike, option_type=otype)
             end
             u_str == expected || throw(ArgumentError(
