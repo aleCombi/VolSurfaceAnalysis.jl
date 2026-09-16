@@ -11,7 +11,7 @@ deliberate piece at a time.
 Progress toward vision:
 
 1. **Data** -- done, redesigned 2026-09-07 around *kinds*
-   (`docs/modules/market_data.md`): record types keyed by type with
+   (`docs/modules/data.md`): record types keyed by type with
    `timestamp` as visibility time and a selector per kind; four shapes
    (`at`, `between`, `asof`, `timestamps`) over a `MarketData` map of
    one provider per kind; per-storage specs (`ParquetOptionBars`,
@@ -166,7 +166,7 @@ The review of the data-kinds branch (PR #9) found six correctness
 defects that were one stance: an unanswerable question reported as an
 ordinary empty result, so every consumer downstream correctly concluded
 it had nothing to do. That stance is now design rule 7 and the
-`market_data` protocol enforces it: `serves` answers the structural
+`data` protocol enforces it: `serves` answers the structural
 question and the map-level shapes check it; two spot rows at one instant
 collapse if identical and throw `ConflictingRecords` if they disagree,
 on every spot shape including `asof`; the surface `asof` walks back under
@@ -290,7 +290,7 @@ decision named here now lives in the module docs.
   in a window running from 09:30 ET to the earlier of 16:00 ET and its
   own expiry, and its close is the last of those prints, which settles
   the early closes with no early-close table *given* the regular-session
-  `SpotPrice` input contract (stated in `market_data.md` after the PR #13
+  `SpotPrice` input contract (stated in `data.md` after the PR #13
   review; an extended-hours print inside the window would settle an early
   close instead, undetectably);
   BusinessDays.jl's `USNYSE` is consulted only to contradict the tree, so
@@ -377,7 +377,7 @@ decision named here now lives in the module docs.
   than an absent one. `RUN_SCHEMA_VERSION` is 4, so every stored run id
   moved; the version is also what finally separates the schema-3 tree
   (runs written before lifecycle booked expiries) from runs of the same
-  config made now. `market_data.md`'s `SpotPrice` paragraph now states
+  config made now. `data.md`'s `SpotPrice` paragraph now states
   what the tree actually provides rather than what the rule needs:
   Polygon's minute aggregates deliberately update on extended-hours
   trades (SPY on 2024-12-24 holds bars from 04:00 to 16:59 ET), so the
@@ -743,7 +743,7 @@ intended direction, but not currently in flight.
   API walkthroughs) dropped. Motivation: resuming the library after a
   few-week pause, the docs should be the trustworthy entry point to read
   back in from. `data.md` is the first pass / template; the other module
-  docs follow. `market_data.md` (new) follows the template from the
+  docs follow. `data.md` (new) follows the template from the
   start. Parked after PR #9 (2026-09-08); no slice in progress.
 - **Second concrete policy** -- unblocked now that settlement is
   honest. Candidate: a daily iron condor (same scheduled-gate /
@@ -814,7 +814,7 @@ intended direction, but not currently in flight.
   per-order chain fetch in `run_backtest` stays as it is. Reopen only
   with a policy on the full minute grid and a whole-run measurement that
   says otherwise.
-- **Reader and SQL duplication in `market_data/parquet.jl`.**
+- **Reader and SQL duplication in `data/providers/parquet.jl`.**
   `ParquetBarsReader` and `ParquetSpotsReader` repeat open, close,
   partition listing, the backward walk and the grid, differing only in
   how a timestamp is read from a partition; unifying them would have

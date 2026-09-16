@@ -23,12 +23,12 @@
 # close 13:00 ET) with no early-close table, and it does so on the
 # strength of its input rather than of the bounds: the window's last print
 # is the session's only where the tree holds regular-session prints alone
-# (`market_data.md`). A provider that also serves extended-hours prints
+# (the `data` module doc). A provider that also serves extended-hours prints
 # breaks it -- a 15:59 print on a 13:00 ET close sits inside the window and
 # settles the contract -- and this rule cannot detect that, because nothing
 # in a `SpotPrice` says which session it came from. The production tree
 # does not guarantee it either; what holds there is measured, not
-# promised, and `market_data.md` says so. The calendar only contradicts
+# promised, and the `data` module doc says so. The calendar only contradicts
 # the tree: a printless weekday it calls open is a named valuation failure
 # (design rule 7), never evidence that the exchange was closed.
 #
@@ -83,7 +83,7 @@ const _SESSION_CLOSE = Time(16, 0)
 const _SESSION_WALK_DAYS = 10
 
 # Every timestamp is UTC, so the listed date of an expiry is its ET date.
-# `parse_polygon_ticker` stamps `et_to_utc(date, Time(16, 0))`, but a
+# `parse_massive_ticker` stamps `et_to_utc(date, Time(16, 0))`, but a
 # `ContractKey` takes any instant and the window bound above does not
 # assume that convention.
 _et_date(dt::DateTime)::Date = Date(DateTime(astimezone(ZonedDateTime(dt, tz"UTC"), TZ_ET)))
@@ -159,7 +159,7 @@ window, not unanswerable inside it.
 Early closes and unscheduled closures need no table here for the same
 reason they need none in `:session_close`, and carry the same
 requirement of the input: the window's last print is the session's only
-where the tree holds regular-session prints alone (`market_data.md`).
+where the tree holds regular-session prints alone (the `data` module doc).
 
 **One read per session window, never one range read across the whole
 period.** The reference window is the only place that input contract is
@@ -280,7 +280,7 @@ that also serves extended-hours prints breaks this rule silently -- a
 becomes the settlement price -- and no bound here can catch it, since
 nothing in a `SpotPrice` records which session it came from. The
 production spot tree does serve extended hours and is measured not to
-print inside the exposed window; `market_data` states the requirement,
+print inside the exposed window; the `data` module states the requirement,
 what the tree actually provides, and which data kind would make the rule
 structural instead.
 

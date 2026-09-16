@@ -1,9 +1,5 @@
-# `market_data` module: the map.
-#
-# `MarketData` is an immutable tuple of providers, one per kind, looked up
-# by type. It is what an `Experiment` stores (specs) and what a run reads
-# through (readers, after `open_data`). Type lookup over a concrete tuple
-# folds at compile time, so `entry(m, R)` costs nothing on the hot path.
+# `data/protocol`: the map. Type lookup over a concrete tuple folds at
+# compile time, so `entry(m, R)` costs nothing on the hot path.
 
 """
     MarketData(providers...)

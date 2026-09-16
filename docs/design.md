@@ -47,3 +47,18 @@
    cannot tell "not yet" from "not ever" correctly concludes it has
    nothing to do, and the run completes with no positions and no
    diagnostic.
+
+8. **Comments and docstrings do not restate the module doc.** A
+   **docstring** states the contract of the thing it is attached to:
+   what it computes or returns, and what it refuses, by name. One
+   function or type, nothing wider. A **comment** explains the code it
+   sits on -- a local complexity, or a decision in *that* code that
+   would otherwise look wrong and invite a "fix". A **file header**
+   names what the file holds in a line or two; it does not narrate the
+   module's architecture, invariants or conventions, which are
+   `docs/modules/<module>.md`.
+
+   The test: if a passage would still be true and useful with the
+   surrounding code deleted, it belongs in the doc. Where a comment
+   must point at a doc, name the module rather than a path -- paths go
+   stale silently when a module is renamed.

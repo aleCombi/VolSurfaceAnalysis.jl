@@ -89,7 +89,7 @@ machinery `:session_close` settles against: a calendar-open date is a
 session when the underlying printed in the 09:30-16:00 ET window, and its
 close is the last of those prints. Early closes and unscheduled closures
 therefore need no table, under the same regular-session `SpotPrice`
-requirement stated in [market_data](market_data.md) -- and the grid reads
+requirement stated in [`data`](data.md) -- and the grid reads
 exactly those windows, one at a time, so it is exposed to the tree only
 where that requirement is claimed.
 

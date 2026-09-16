@@ -1,4 +1,4 @@
-# `market_data` module: a bounded LRU cache for readers.
+# `data/protocol`: a bounded LRU cache for readers.
 #
 # OrderedDict-backed: insertion order is recency, a hit moves the key to the
 # back, inserting past `max` pops the front. Small enough that a dependency

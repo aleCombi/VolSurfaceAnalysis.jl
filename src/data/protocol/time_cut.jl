@@ -1,12 +1,6 @@
-# `market_data` module: the time cut.
-#
-# `TimeCut` wraps a map and masks every shape at `cutoff`, filtering on
-# visibility time only. It passes ITSELF down as the context, so a derived
-# provider's input reads go through the cut too: no-lookahead through
-# derived data is structural, not a call-site convention. Because
-# `timestamp` is visibility time, the cut is the complete no-lookahead
-# rule -- nothing knowable after the cutoff is visible, whatever its
-# effective date.
+# `data/protocol`: the time cut. It passes ITSELF down as the context --
+# keep it that way: that is what puts a derived provider's own input reads
+# under the cut.
 
 """
     TimeCut(inner, cutoff)

@@ -1,8 +1,4 @@
-# `market_data` module: the clock.
-#
-# The engine ticks on a declared grid, not an implicit one: the timestamps
-# of one kind for one selector. `Clock` is a pure value over (kind,
-# selector); it is part of an experiment's core identity.
+# `data/protocol`: the tick grid, as a pure value over (kind, selector).
 
 """
     Clock{R}(sel)

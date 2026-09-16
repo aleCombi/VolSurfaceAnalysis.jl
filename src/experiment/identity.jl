@@ -56,7 +56,7 @@ to_dict(c::PCCurve) = Dict{String,Any}(
 to_dict(s::SpreadFromOHLCV) =
     Dict{String,Any}("type" => "ohlcv_spread", "lambda" => s.lambda)
 
-# --- market_data specs --------------------------------------------------
+# --- data specs --------------------------------------------------
 # One entry per kind, keyed by the loader's kind name; each spec emits
 # only what determines the records it serves. Readers never appear (they
 # are not on specs) and cache sizes are open_data kwargs, never identity.
@@ -64,7 +64,7 @@ to_dict(s::SpreadFromOHLCV) =
 # dataset id / version; today it carries the root path.
 
 # Both parquet readers map a vendor minute bar to a record visible at bar
-# END (`bar_visible_at`, data/polygon.jl). That convention determines every
+# END (`bar_visible_at`, data/massive.jl). That convention determines every
 # record they serve -- which minute a decision reads, and therefore every
 # fill and every settlement price -- so it belongs in the projection. It is
 # a fixed constant, not a field: there is no setting to vary and none may

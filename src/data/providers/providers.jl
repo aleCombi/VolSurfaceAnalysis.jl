@@ -1,9 +1,5 @@
-# `market_data` module: resource-free provider specs and the first derived
-# provider.
-#
-# A spec is an immutable value describing where records of one kind come
-# from. It holds no resources: config builds it, identity hashes it. The
-# specs here need nothing at run time, so they are their own readers.
+# `data/providers`: the specs that need nothing at run time, so they are
+# their own readers, plus the first derived provider.
 
 """
     InMemory{R}(rows)
@@ -169,3 +165,9 @@ timestamps(::QuotesFromBars, m, ::Type{OptionQuote}, u, from::DateTime, to::Date
 # that entry's own check throws naming OptionBar and the selector -- the
 # real cause, rather than "no quote".
 serves(::QuotesFromBars, ::Any, ::Type{OptionQuote}, ::Any) = missing
+
+# Lifecycle opt-in. These specs hold no resource, so opening one is the
+# identity and closing it is a no-op. It lives here, beside the types it
+# names, so `data/protocol` never refers back to a concrete provider.
+open_data(s::Union{InMemory,Constant,QuotesFromBars}) = s
+close_data!(::Union{InMemory,Constant,QuotesFromBars}) = nothing

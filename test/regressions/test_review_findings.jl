@@ -148,7 +148,7 @@ end
     @test occursin("USD", msg)
 end
 
-# src/market_data/by_selector.jl:38 throws a bare KeyError when no route matches,
+# src/data/protocol/by_selector.jl:38 throws a bare KeyError when no route matches,
 # and every other provider answers the same question with an empty vector. Per the
 # decision on findings 2 and 3, structural absence is a named error everywhere:
 # BySelector is the provider that was already right, and all four shapes must
@@ -198,7 +198,7 @@ end
     end
 end
 
-# src/market_data/parquet.jl:392 concatenates spot rows without timestamp de-duplication,
+# src/data/providers/parquet.jl:392 concatenates spot rows without timestamp de-duplication,
 # so the duplicated vendor row survives at(...) and its length is two today.
 @testset "spot reads de-duplicate timestamps" begin
     mktempdir() do root
@@ -213,7 +213,7 @@ end
     end
 end
 
-# src/market_data/providers.jl:59 ignores Constant.record.timestamp,
+# src/data/providers/providers.jl:59 ignores Constant.record.timestamp,
 # so the June curve is incorrectly visible to an asof query in January.
 @testset "constant asof respects record timestamp" begin
     visible_from = DateTime(2024, 6, 1)

@@ -1,11 +1,6 @@
-# `market_data` module: lifecycle.
-#
-# A reader is the opened form of a spec: it owns what the storage needs at
-# run time (a connection, bounded caches, a partition list). Specs that
-# need nothing are their own reader. The pair is project-owned, with NO
-# fallback on Any: a spec without an explicit `open_data` method is a
-# load-time error, never a silent no-op. The run opens and closes;
-# `Experiment` holds the spec map only.
+# `data/protocol`: the open/close pair. Project-owned, with NO fallback on
+# Any -- do not add one: a provider type without an explicit `open_data`
+# is then a load-time error rather than a silent no-op.
 
 """
     open_data(spec) -> reader
@@ -25,10 +20,6 @@ in reverse order even if one throws; the first error is rethrown after
 the loop. Use after close is the storage's own error.
 """
 function close_data! end
-
-# Explicit opt-in, one line per resource-free spec.
-open_data(s::Union{InMemory,Constant,QuotesFromBars}) = s
-close_data!(::Union{InMemory,Constant,QuotesFromBars}) = nothing
 
 # Best-effort close during an unwind: warn and swallow, so the error that
 # caused the unwind is the one the caller sees.

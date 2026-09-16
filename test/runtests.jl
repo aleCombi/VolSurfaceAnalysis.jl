@@ -3,20 +3,22 @@ using Test
 using Dates
 
 @testset "VolSurfaceAnalysis" begin
-    include("data/test_quotes.jl")
-    include("data/test_synth.jl")
-    include("data/test_polygon.jl")
-    include("market_data/fixtures.jl")
-    include("market_data/test_kinds.jl")
-    include("market_data/test_library.jl")
-    include("market_data/test_providers.jl")
-    include("market_data/test_map.jl")
-    include("market_data/test_by_selector.jl")
-    include("market_data/test_time_cut.jl")
-    include("market_data/test_clock.jl")
-    include("market_data/test_lifecycle.jl")
-    include("market_data/test_parquet.jl")
-    include("market_data/test_curves.jl")
+    include("data/protocol/fixtures.jl")
+    # kinds
+    include("data/kinds/test_curves.jl")
+    include("data/kinds/test_kinds.jl")
+    # protocol
+    include("data/protocol/test_library.jl")
+    include("data/protocol/test_map.jl")
+    include("data/protocol/test_by_selector.jl")
+    include("data/protocol/test_time_cut.jl")
+    include("data/protocol/test_clock.jl")
+    include("data/protocol/test_lifecycle.jl")
+    # providers
+    include("data/providers/test_synth.jl")
+    include("data/providers/test_providers.jl")
+    include("data/providers/test_massive.jl")
+    include("data/providers/test_parquet.jl")
     include("surfaces/test_bs.jl")
     include("surfaces/test_surface.jl")
     include("surfaces/test_surface_from.jl")
