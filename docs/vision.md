@@ -10,6 +10,10 @@ strategy, schedule, evaluation), is rerunnable at will, and writes its
 results into a knowledge base that accumulates over time -- so prior runs
 remain queryable and comparable rather than evaporating into ad-hoc
 notebooks.
+Rerunning means controlling that old inputs still result in old outputs,
+even with updated machinery.
+The goal then is to have research propositions as first-class citizens
+in the system, not just backtesting, with real strategies to avoid overfitting.
 
 ## Trading
 
