@@ -16,6 +16,14 @@ A **provider** is where an answer comes from: a parquet tree, a single
 constant record, a thing that derives one kind out of another. Nothing
 distinguishes them to a consumer -- answering is the whole interface.
 
+A provider has two forms. A **spec** is the declared one: immutable,
+resource-free, what config builds and persistence writes --
+`ParquetOptionBars(root)` is a spec. Opening it yields a **reader**,
+which owns what cannot be written down: the connection, the caches, the
+partition list. Specs needing nothing are their own reader. A spec is
+per *storage*, not per kind -- the selector is a query argument, so one
+spec serves every series in its tree.
+
 They are wired by a map holding one provider per kind, with a cut
 (`TimeCut`) wrapped around it:
 
@@ -63,13 +71,11 @@ the call arrived through:
 | is this served at all | `serves(m, R, sel)` | `serves(p, ctx, R, sel)` |
 
 Answers are sorted by `timestamp`; `asof` returns every record at the
-largest visible one `<= ts`. Ranges are always bounded. `between`
-promises an iterable, not a container, so a large provider yields
-lazily, and the result expires when that provider closes. No answer is
-ever
-`missing` -- that is reserved for absent scalar fields *inside* a
-record. There is no query language: anything beyond these four is plain
-Julia over the result.
+largest visible one `<= ts`. Ranges are always bounded. `between` promises
+an iterable, not a container, so a large provider yields lazily, and the
+result expires when that provider closes. No answer is ever `missing` --
+that is reserved for absent scalar fields *inside* a record. There is no
+query language: anything beyond these four is plain Julia over the result.
 
 Which question a kind is read with follows its shape. `only_or_missing`
 takes the single record of a singleton answer, or `missing` when there
@@ -99,9 +105,8 @@ unchecked and internal delegation does not re-trigger it.
 **`serves` is three-valued**, and `missing` -- "cannot say" -- is
 required. A provider that has not yet opened its storage cannot answer
 without walking a tree, and a derived provider does not answer at all --
-it delegates, so the
-refusal names the real cause (a surface asked for SPX reports
-`OptionBar`/SPX unserved, not "no surface"). A provider answering
+it delegates, so the refusal names the real cause (a surface asked for SPX
+reports `OptionBar`/SPX unserved, not "no surface"). A provider answering
 `false` also says what it *does* serve, which is what makes the message
 enough to fix a config.
 
@@ -116,44 +121,47 @@ would mean building every record in the range.
 
 ## What a provider owes
 
-A provider has two forms. A **spec** is the declared one: immutable,
-resource-free, what config builds and persistence writes --
-`ParquetOptionBars(root)` is a spec. Opening it yields a **reader**,
-which owns what cannot be written down: the connection, the caches, the
-partition list. Specs needing nothing are their own reader.
+Answering is the whole interface, but a provider holding a resource owes
+three things beyond it.
 
-A spec is per *storage*, not per kind -- the selector is a query argument,
-so one spec serves every series in its tree. Constructing one touches no
-storage: a missing root is refused at opening, never at construction.
-Opening and closing are the project's own generics with explicit opt-ins,
-so a spec that forgot to opt in fails a check rather than silently
-becoming a no-op. **Use after close throws** rather than being left to the
-storage, because the storage segfaults.
+- **Opt in to the lifecycle.** Opening and closing are the project's own
+  generics with explicit opt-ins, so a provider that forgot to opt in
+  fails a check rather than silently becoming a no-op.
+- **Refuse late.** Constructing a spec touches no storage; a missing
+  root is refused at opening, never at construction.
+- **Throw on use after close**, rather than leaving it to the storage,
+  because the storage segfaults.
 
-Two invariants belong to the store rather than to any reader.
+## What the protocol assumes about a store
 
-**Partitions are time-ordered, with a one-day spill.** A partition may
-hold rows past its own date, because the collector writes a US session
-into its local date, so every shape consults the date asked about and
-the one before it. Every row in one partition precedes every row in the
-next, and **the four questions agree only under that ordering**: `asof`
-takes its instant from the newest candidate partition while `at` and
-`timestamps` merge both, so an interleaved layout would break
-`asof == at(last(timestamps(...)))`, and a lazy `between` concatenates
+Two of the protocol's promises are not self-enforcing. They hold only if
+the rows on disk are arranged a particular way, which makes the
+arrangement a convention on the store rather than a check inside any
+reader -- and makes a store that breaks it wrong in a way nothing
+reports.
+
+**The four questions agree with each other only if partitions are
+time-ordered.** A partition may hold rows past its own date, because the
+collector writes a US session into its local date, so every shape
+consults the date asked about and the one before it. Every row in one
+partition must precede every row in the next. `asof` takes its instant
+from the newest candidate partition while `at` and `timestamps` merge
+both, so an interleaved layout would break
+`asof == at(last(timestamps(...)))`; and a lazy `between` concatenates
 candidates without a cross-partition sort, so it would yield records out
 of order.
 
-**A snapshot kind de-duplicates where rows enter.** A vendor can
-re-deliver a minute, and consulting two partitions can read one row
-twice; either aborts a read through `only_or_missing`. So the reader
-applies one rule after its sort: *equal timestamp and equal value
-collapse silently; equal timestamp and different value throws
-`ConflictingRecords`*, naming both. Taking the first would be a silent
-choice between two answers on a number nobody verified. Every read
-inherits it rather than remembering it, because `at` and `asof` both
-reach their instant through `between`. Grid kinds are excluded
-deliberately: many records per instant is their shape, so their
-duplicate key is the contract, not the instant.
+**A snapshot kind can only refuse two answers if duplicates are resolved
+where rows enter.** A vendor can re-deliver a minute, and consulting two
+partitions can read one row twice; either aborts a read through
+`only_or_missing`. So the reader applies one rule after its sort: *equal
+timestamp and equal value collapse silently; equal timestamp and
+different value throws `ConflictingRecords`*, naming both. Taking the
+first would be a silent choice between two answers on a number nobody
+verified. Every read inherits the rule rather than remembering it,
+because `at` and `asof` both reach their instant through `between`. Grid
+kinds are excluded deliberately: many records per instant is their
+shape, so their duplicate key is the contract, not the instant.
 
 ## Decisions
 
