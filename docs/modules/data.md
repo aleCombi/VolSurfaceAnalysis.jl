@@ -190,10 +190,7 @@ dataset id and version would go.
 
 ## Conventions consulted
 
-Checked before these names and shapes were fixed (design rule 5); the
-sources were the depot copies of Tables.jl, DBInterface.jl and DuckDB.jl,
-Julia 1.12 Base and manual, and the documented APIs of TimeSeries.jl,
-DataInterpolations.jl, Impute.jl, StructTypes.jl and JSON3.jl.
+One entry per naming decision, with the source checked (design rule 5).
 
 - **`between` as the range verb.** TimeSeries.jl uses a `from`/`to` pair
   and pandas has no range verb. `Base.between` exists, unexported and
