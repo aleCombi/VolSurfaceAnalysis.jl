@@ -1,9 +1,8 @@
 """
     Curve
 
-Math object representing a function in time. Callable with a
-`DateTime`, returns `Float64`. Concrete subtypes carry the
-representation (constant, piecewise constant, parametric, ...).
+A function of time: callable with a `DateTime`, returns `Float64`.
+Concrete subtypes carry the representation.
 """
 abstract type Curve end
 
@@ -23,16 +22,10 @@ end
 """
     PCCurve(knots, values)
 
-Piecewise-constant curve. `knots` must be sorted, non-empty,
-unique, and have the same length as `values`.
-
-Evaluation at `ts`:
-- before the first knot: returns `values[1]`
-- at or after knot `i` (and before `i+1`): returns `values[i]`
-- at or after the last knot: returns `values[end]`
-
-Out-of-range behavior is flat-extrapolation by construction
-(`searchsortedlast` returns 0 below the range; we clamp to 1).
+Piecewise-constant curve: `(c)(ts)` is the value at the last knot at or
+before `ts`, and `values[1]` before the first knot, so both ends
+flat-extrapolate. Throws `ArgumentError` unless `knots` is non-empty,
+sorted, unique, and the same length as `values`.
 """
 struct PCCurve <: Curve
     knots::Vector{DateTime}

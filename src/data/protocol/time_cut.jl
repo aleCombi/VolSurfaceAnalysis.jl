@@ -7,8 +7,7 @@
 
 The map `inner` with every shape masked at `cutoff` (inclusive): `at`
 past the cutoff is empty, `between` and `timestamps` clamp `to` to the
-cutoff, `asof` clamps `ts`. The engine builds one per tick and hands it
-to `decide`.
+cutoff, `asof` clamps `ts`. `serves` is not masked.
 """
 struct TimeCut{M}
     inner::M
@@ -19,9 +18,8 @@ entry(c::TimeCut, ::Type{R}) where {R} = entry(c.inner, R)
 
 serves(c::TimeCut, ::Type{R}, sel) where {R} = serves(entry(c, R), c, R, sel)
 
-# The structural check runs BEFORE the cutoff mask, so an unserved
-# selector throws even for a query past the cutoff: structural beats
-# temporal, and a cut cannot turn a broken configuration into silence.
+# The structural check runs BEFORE the mask, so a cut cannot turn a broken
+# configuration into silence.
 function at(c::TimeCut, ::Type{R}, sel, ts::DateTime) where {R}
     _require_served(c, R, sel)
     ts <= c.cutoff ? at(entry(c, R), c, R, sel, ts) : R[]

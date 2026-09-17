@@ -3,6 +3,12 @@
 
 @enum OptionType Call Put
 
+"""
+    Underlying(ticker)
+
+Selector for underlying-keyed kinds. The ticker is uppercase-normalized,
+so `Underlying("spy") == Underlying("SPY")`.
+"""
 struct Underlying
     ticker::String
     Underlying(s::AbstractString) = new(uppercase(String(s)))
@@ -10,18 +16,15 @@ end
 
 ticker(u::Underlying) = u.ticker
 Base.show(io::IO, u::Underlying) = print(io, u.ticker)
-# Content hash, explicitly: the default falls back to objectid, which for a
-# type in a precompiled package changes with every build, so a Dict keyed
-# on Underlying would iterate in a build-dependent order.
+# Content hash: the objectid default changes with every build.
 Base.hash(u::Underlying, h::UInt) = hash(u.ticker, hash(:Underlying, h))
 Base.:(==)(a::Underlying, b::Underlying) = a.ticker == b.ticker
 
 """
     Currency(code)
 
-Selector for currency-keyed kinds (rate curves). The code is
-uppercase-normalized, mirroring `Underlying`, so `Currency("usd") ==
-Currency("USD")`.
+Selector for currency-keyed kinds. The code is uppercase-normalized, as
+`Underlying`'s ticker is.
 """
 struct Currency
     code::String
@@ -32,6 +35,13 @@ Base.show(io::IO, c::Currency) = print(io, c.code)
 Base.hash(c::Currency, h::UInt) = hash(c.code, hash(:Currency, h))   # content hash, as Underlying
 Base.:(==)(a::Currency, b::Currency) = a.code == b.code
 
+"""
+    OptionQuote
+
+One contract's quote at `timestamp`. `bid`, `ask`, `mark`, `iv`,
+`open_interest` and `volume` are `missing` when the source did not
+carry them.
+"""
 struct OptionQuote
     instrument_id::String
     underlying::Underlying
@@ -47,6 +57,12 @@ struct OptionQuote
     timestamp::DateTime
 end
 
+"""
+    SpotPrice
+
+The underlying's price at `timestamp`. Never carries a missing price:
+a row without one is not an observation.
+"""
 struct SpotPrice
     underlying::Underlying
     price::Float64
@@ -56,27 +72,9 @@ end
 """
     OptionBar
 
-Faithful mirror of one Massive options OHLCV minute-bar row. Carries the
-contract identity (so it can be turned into an `OptionQuote` without an
-extra lookup) plus the raw `open`/`high`/`low`/`close`/`volume` fields.
-
-This is an adapter-layer type. Production downstream code should consume
-`OptionQuote`s produced via [`synthesize`](@ref); `OptionBar` exists so
-the synthesis policy is explicit and testable instead of buried inside
-the parquet reader.
-
-# Fields
-- `instrument_id::String`
-- `underlying::Underlying`
-- `expiry::DateTime`
-- `strike::Float64`
-- `option_type::OptionType`
-- `open::Union{Float64,Missing}`
-- `high::Union{Float64,Missing}`
-- `low::Union{Float64,Missing}`
-- `close::Union{Float64,Missing}`
-- `volume::Union{Float64,Missing}`
-- `timestamp::DateTime`
+One contract's OHLCV minute bar, with the contract identity so it can
+become an `OptionQuote` through [`synthesize`](@ref) without a lookup.
+Any OHLCV field the source did not carry is `missing`.
 """
 struct OptionBar
     instrument_id::String
@@ -93,16 +91,14 @@ struct OptionBar
 end
 
 # --- curve kinds ------------------------------------------------------------
-# A curve as a market-data record: the curve *as of* `timestamp` (visibility
-# time), evaluated at a maturity by calling it. Snapshot kinds: they hold
-# until superseded, so consumers read them with `only_or_missing(asof(...))`.
-# The two-argument constructors stamp the start of time, the `Constant` case.
+# A `Curve` stamped with a visibility time and a selector. The two-argument
+# constructors stamp the start of time: "always known".
 
 """
     RateCurve(currency, curve[, timestamp])
 
-The rate `Curve` for `currency` as of `timestamp` (visibility time;
-defaults to the start of time, "always known"). Selector: the currency.
+The rate `Curve` for `currency` as of `timestamp`, which defaults to the
+start of time.
 """
 struct RateCurve
     currency::Currency
@@ -114,8 +110,8 @@ RateCurve(currency::Currency, curve::Curve) = RateCurve(currency, curve, typemin
 """
     DivCurve(underlying, curve[, timestamp])
 
-The dividend-yield `Curve` for `underlying` as of `timestamp`. Selector:
-the underlying.
+The dividend-yield `Curve` for `underlying` as of `timestamp`, which
+defaults to the start of time.
 """
 struct DivCurve
     underlying::Underlying
@@ -127,33 +123,26 @@ DivCurve(underlying::Underlying, curve::Curve) = DivCurve(underlying, curve, typ
 """
     selector(r) -> selector value
 
-The value that distinguishes parallel series of `r`'s kind (the
-`Underlying` of a bar, quote or spot; the `Currency` of a rate curve).
-Every kind defines exactly one method.
+The value that distinguishes parallel series of `r`'s kind. Every kind
+defines exactly one method.
 """
 function selector end
 
 """
     selector_type(::Type{R}) -> Type
 
-The type of `selector(r)` for records of kind `R`. A trait on the kind,
-used to check selectors at construction time (`Clock`, `BySelector`) and
-in the config loader.
+The type of `selector(r)` for records of kind `R`; a trait on the kind,
+so a selector can be checked without a record in hand.
 """
 function selector_type end
 
 """
     snapshot(::Type{R}) -> Bool
 
-Whether kind `R` carries ONE record per selector per instant. A trait on
-the kind. `true` for kinds read through `only_or_missing` (a spot, a
-curve, a surface): two rows for one selector at one instant are then
-either the same row twice, which collapses, or two answers, which is a
-`ConflictingRecords`. `false` for grid kinds (bars, quotes), where many
-rows per instant is the shape. Readers that can be handed a duplicate
-apply the rule where the rows enter -- the parquet spot reader after its
-sort, `InMemory` at construction -- so a fixture cannot represent a state
-the real reader throws on.
+Whether kind `R` holds one record per selector per instant (`true`) or
+many (`false`, a grid kind). A trait on the kind. For a snapshot kind,
+two records for one selector at one instant are either the same record
+twice, which collapses where the rows enter, or a `ConflictingRecords`.
 """
 function snapshot end
 

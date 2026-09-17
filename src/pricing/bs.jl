@@ -16,8 +16,8 @@ function time_to_expiry(expiry::DateTime, now::DateTime)::Float64
     return days / _DAYS_PER_YEAR
 end
 
-# Standard normal CDF via Abramowitz & Stegun 7.1.26 (max abs err ~1.5e-7).
-# Sufficient for IV-inversion to 1e-6 tolerance in vol.
+# Standard normal CDF via Abramowitz & Stegun 7.1.26 (max abs err ~1.5e-7),
+# so no SpecialFunctions dependency.
 function _norm_cdf(x::Float64)::Float64
     a1 =  0.254829592
     a2 = -0.284496736
@@ -40,7 +40,8 @@ _cp_sign(o::OptionType)::Float64 = o == Call ? 1.0 : -1.0
     bs_price(S, K, T, sigma, option_type; r, q) -> Float64
 
 Black-Scholes price of a European option on a spot asset paying continuous
-dividend yield `q`, discounted at rate `r`.
+dividend yield `q`, discounted at rate `r`. At or past expiry the
+intrinsic value; at zero vol the discounted intrinsic.
 """
 function bs_price(S::Float64, K::Float64, T::Float64, sigma::Float64,
                   option_type::OptionType; r::Float64, q::Float64)::Float64
@@ -60,6 +61,9 @@ end
 
 """
     bs_delta(S, K, T, sigma, option_type; r, q) -> Float64
+
+dPrice/dS. At or past expiry, or at zero vol, the delta of the intrinsic
+payoff (`±1` in the money, `0` otherwise).
 """
 function bs_delta(S::Float64, K::Float64, T::Float64, sigma::Float64,
                   option_type::OptionType; r::Float64, q::Float64)::Float64
@@ -102,11 +106,11 @@ end
     implied_vol(price, S, K, T, option_type; r, q,
                 lo=1e-6, hi=5.0, tol=1e-8, maxiter=100) -> Union{Float64,Nothing}
 
-Invert Black-Scholes for sigma via bisection. Returns `nothing` if the price
-is outside the bracket `[bs_price(lo), bs_price(hi)]` (typically: price
-below intrinsic, or above the deep-vol limit).
-
-Bracket defaults handle SPY-style equity options at any plausible IV.
+Invert Black-Scholes for sigma by bisection on `[lo, hi]`, to `tol` in
+price or in vol. Returns `nothing` when nothing inverts: `T <= 0`,
+`price <= 0`, or a price outside `[bs_price(lo), bs_price(hi)]`
+(below intrinsic, or above the deep-vol limit). The bracket defaults
+cover SPY-style equity options at any plausible IV.
 """
 function implied_vol(price::Float64, S::Float64, K::Float64, T::Float64,
                      option_type::OptionType;

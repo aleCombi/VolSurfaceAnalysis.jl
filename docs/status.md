@@ -156,7 +156,7 @@ nothing in `pricing` reaches the protocol, a provider, a cut or an
 experiment. The remaining asymmetry between curve and surface is a
 modelling one, not a layout one: a curve is a payload inside a record, a
 surface *is* its kind, and giving the surface the same split is deferred
-(`docs/modules/pricing.md`, future work).
+(backlog: *A payload/record split for the vol surface*).
 
 First concrete trading policy landed alongside step 4:
 `DailyShortStrangle` (target |Δ| per leg via `invert_delta`, snap to

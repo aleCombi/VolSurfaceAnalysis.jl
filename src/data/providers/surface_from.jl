@@ -11,9 +11,7 @@ Derived provider spec for `VolatilitySurface`. `currency` selects the
 no inputs: they come from the map (`inputs` lists their kinds).
 
 `lookback_ticks` bounds `asof`: the number of input timestamps it will
-*examine*, not the number of steps it takes, so `1` tries only the newest
-quote timestamp. It changes which surface a policy sees, so it changes
-results, so it is part of identity and of the config surface. Rejected at
+*examine*, so `1` tries only the newest quote timestamp. Rejected at
 construction below `1`.
 """
 struct SurfaceFrom
@@ -59,10 +57,8 @@ end
 kind(::SurfaceReader) = VolatilitySurface
 inputs(r::SurfaceReader) = inputs(r.spec)
 
-# Derived: spec and reader both delegate rather than answering, so an
-# unserved input surfaces as that input's own error and names the real
-# cause -- a SurfaceFrom asked for SPX reports OptionBar/SPX unserved,
-# not "no surface".
+# Derived: spec and reader both delegate, so an unserved input surfaces
+# as that input's own error.
 serves(::Union{SurfaceFrom,SurfaceReader}, ::Any, ::Type{VolatilitySurface}, ::Any) = missing
 
 """
@@ -93,16 +89,10 @@ end
 between(r::SurfaceReader, m, ::Type{VolatilitySurface}, u::Underlying, from::DateTime, to::DateTime) =
     Iterators.flatten(at(r, m, VolatilitySurface, u, ts) for ts in timestamps(m, OptionQuote, u, from, to))
 
-# `asof` must return the newest instant at which a SURFACE exists, not the
-# newest at which a chain does. The two differ exactly when derivation
-# fails: a chain of same-day contracts evaluated at the expiry instant, a
-# minute of unusable marks, a missing spot. Each benign case is one tick
-# wide, so the walk is bounded by `lookback_ticks` and exhausting it
-# throws: many consecutive failures mean a truncated dataset or a broken
-# feed, and reporting that as absence is the mistake findings 2 and 3
-# exist to correct. Three outcomes, one per state: no chain at all is
-# empty (temporal), a chain that builds is the surface, and chains that
-# never build within the bound throw.
+# Walks back from the newest chain instant, because a chain can exist
+# where a surface does not (same-day contracts at the expiry instant, a
+# minute of unusable marks, a missing spot). Each benign case is one tick
+# wide, which is what makes a small bound honest.
 function asof(r::SurfaceReader, m, ::Type{VolatilitySurface}, u::Underlying, ts::DateTime)
     cursor = ts
     oldest = ts
@@ -118,10 +108,6 @@ function asof(r::SurfaceReader, m, ::Type{VolatilitySurface}, u::Underlying, ts:
     throw(DerivationExhausted(VolatilitySurface, u, ts, oldest, r.spec.lookback_ticks))
 end
 
-# An over-estimate for a derived kind, deliberately: making it exact would
-# mean building every surface in the range, so `timestamps` reports the
-# input grid and can name instants where no surface exists. `between`
-# walks that grid too but flattens `at`, so it yields only surfaces that
-# built: its output is exact, its traversal is not.
+# The input grid, an over-estimate by design (the `data` module doc).
 timestamps(::SurfaceReader, m, ::Type{VolatilitySurface}, u::Underlying, from::DateTime, to::DateTime) =
     timestamps(m, OptionQuote, u, from, to)

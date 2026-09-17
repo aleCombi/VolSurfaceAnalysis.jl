@@ -1,15 +1,14 @@
 # `data/providers`: the specs that need nothing at run time, so they are
-# their own readers, plus the first derived provider.
+# their own readers, plus `QuotesFromBars`, the derived provider for quotes.
 
 """
     InMemory{R}(rows)
 
 Fixture provider: every record of kind `R` in `rows`, kept sorted by
 `timestamp` (stable, so input order is preserved within one instant).
-Serves every selector present in `rows`. For a `snapshot` kind the rows
-obey the same rule as the parquet spot reader: two rows for one selector
-at one instant collapse when equal and throw `ConflictingRecords` when
-they differ, so a fixture cannot hold a state the real reader aborts on.
+Serves every selector present in `rows`. For a `snapshot` kind, two rows
+for one selector at one instant collapse when equal and throw
+`ConflictingRecords` when they differ.
 """
 struct InMemory{R}
     rows::Vector{R}
@@ -23,10 +22,8 @@ struct InMemory{R}
     end
 end
 
-# One record per selector per instant, on rows already sorted by
-# timestamp: an exact duplicate is dropped, a disagreement throws naming
-# both records. Mirrors `_collapse_duplicates!` in the parquet spot
-# reader, generic over the kind via `==` on the whole record.
+# On rows already sorted by timestamp; equality is `==` on the whole
+# record. The parquet spot reader applies the same rule on price.
 function _collapse_snapshot!(sorted::Vector{R}, ::Type{R}) where {R}
     length(sorted) < 2 && return sorted
     keep = trues(length(sorted))
@@ -86,13 +83,10 @@ timestamps(p::InMemory{R}, ctx, ::Type{R}, sel, from::DateTime, to::DateTime) wh
 """
     Constant{R}(record)
 
-One record, visible from its own timestamp -- which the two-argument
-curve constructors stamp at the start of time, so the flat-curve case
-reads "always known". `asof` returns it only for its own selector
-(`selector(record) == sel`) and only at or after its stamp; `between`
-and `timestamps` contain it only when the selector matches and its
-timestamp lies in the range, so over any real window they are empty.
-The natural spec for a flat rate or dividend curve.
+One record, serving only its own selector and visible from its own
+timestamp: `asof` returns it at or after its stamp, `between` and
+`timestamps` only when the stamp lies in the range. With the stamp at
+the start of time, the natural spec for a flat rate or dividend curve.
 """
 struct Constant{R}
     record::R
@@ -117,20 +111,18 @@ served_description(c::Constant) = "Constant for $(selector(c.record))"
 """
     inputs(spec) -> Tuple of kinds
 
-The kinds a derived provider reads through the map. `()` for raw
-providers. The config loader checks every input kind is present.
+The kinds a derived provider reads through the map; `()` for raw
+providers.
 """
 inputs(::Any) = ()
 
 """
     demands(spec) -> iterable of (kind, selector)
 
-The selectors a derived spec needs *statically*, known without a query.
-`()` for everything else. `build_market_data` uses it as a load-time
-fast path: a mistyped currency fails in a second rather than after a
-backtest has been running. It is only the fast path -- the mechanism is
-`serves` in the four map-level shapes -- so a spec that cannot name its
-selectors ahead of time simply demands nothing.
+The selectors a derived spec needs and can name without a query; `()`
+for everything else. A load-time fast path only: `serves` at the map
+level is the mechanism, so a spec that cannot name its selectors ahead
+of time demands nothing.
 """
 demands(::Any) = ()
 
@@ -159,15 +151,11 @@ asof(p::QuotesFromBars, m, ::Type{OptionQuote}, u, ts::DateTime) =
 timestamps(::QuotesFromBars, m, ::Type{OptionQuote}, u, from::DateTime, to::DateTime) =
     timestamps(m, OptionBar, u, from, to)
 
-# Explicit, not the default: a derived provider does not answer the
-# structural question, it delegates. The map-level check waves the quote
-# read through, the read reaches the OptionBar entry through the map, and
-# that entry's own check throws naming OptionBar and the selector -- the
-# real cause, rather than "no quote".
+# Explicit, not the default: derived, so it delegates, and the OptionBar
+# entry's own check names the real cause.
 serves(::QuotesFromBars, ::Any, ::Type{OptionQuote}, ::Any) = missing
 
-# Lifecycle opt-in. These specs hold no resource, so opening one is the
-# identity and closing it is a no-op. It lives here, beside the types it
-# names, so `data/protocol` never refers back to a concrete provider.
+# Lifecycle opt-in for the resource-free specs. Here and not in
+# `data/protocol`, which never names a concrete provider.
 open_data(s::Union{InMemory,Constant,QuotesFromBars}) = s
 close_data!(::Union{InMemory,Constant,QuotesFromBars}) = nothing

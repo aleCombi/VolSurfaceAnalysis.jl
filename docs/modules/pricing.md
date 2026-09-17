@@ -14,36 +14,43 @@ caller of `build_surface`.
 
 ## Curves
 
-A `Curve` is a function of time; subtypes carry the representation
-(constant and piecewise-constant today). Evaluation outside the knots
-flat-extrapolates by construction rather than by a branch, so a consumer
-has no "off the end of the curve" case to handle.
+A `Curve` is a function of time; subtypes carry the representation.
+Evaluation outside the knots flat-extrapolates, so a consumer has no
+"off the end of the curve" case to handle.
 
-A curve carries no timestamp and no selector of its own, which is why it
-lives here rather than beside the records that stamp it, and why a
-surface -- already one underlying at one instant -- is instead a kind in
-its own right. [`data`](data.md) owns that rule.
+The curve's math sits here and not beside the records that carry it,
+because a `Curve` is no more a data concept than Black-Scholes is: it is
+arithmetic over values, with no timestamp, selector or provenance. That
+keeps curve and surface symmetric -- math in `pricing`, record in
+`data/kinds`, provider in `data/providers` -- where before, one object
+was cut by stage and the other by object. [`data`](data.md) owns the rule
+for which of the two needs a record wrapped around it.
 
 ## Surfaces
 
-A surface is a sorted list of per-expiry slices plus the spot, rate, div
-and timestamp they were built from. **Every query is answered from those
-frozen values** -- prices, greeks and forwards come from the slice's
-cached time-to-expiry and the surface's own spot, rate and div, never
-from re-reading market data. That is what makes a surface an
-observation, complete at one instant: two queries against one surface
-cannot disagree, and no query can reach past the cut the surface was
-built under.
+A surface is frozen at one instant: it carries the spot, rate, div and
+timestamp it was built from, and **every query is answered from those
+values** -- prices, greeks and forwards come from the slice's cached
+time-to-expiry and the surface's own spot, rate and div, never from
+re-reading market data. That is what makes a surface an observation,
+complete at one instant: two queries against one surface cannot
+disagree, and no query can reach past the cut the surface was built
+under.
 
 Within a slice, strikes carry one IV each -- one, not one per option
 type, because a call IV and a put IV at the same strike would encode a
 put-call-parity inconsistency the build does not calibrate against.
+Between strikes the IV is interpolated linearly in log-moneyness, and
+outside the observed strikes it is flat; there is no cross-expiry
+interpolation, because no consumer needs one, so a query names a quoted
+expiry exactly and an unquoted one is an error rather than a smoothing
+question.
 
-The extension contract is deliberately narrow: a new representation
-implements `expiries` and `get_slice` and exposes spot, rate and div, and
-every price, greek, forward and delta inversion is derived from those
-without a consumer change. `RawSurface`, which stores the slices
-directly with no parametric form, is the only one today.
+`RawSurface`, which stores the slices directly with no parametric form,
+is the only representation: the smallest honest one. The abstract type
+is the seam a second representation would attach at, and `invert_delta`
+is the one query already written against the seam rather than the
+representation.
 
 ## Building a surface from a chain
 
@@ -54,6 +61,11 @@ so is a strike whose mark will not invert; both are data, not errors.
 and `SurfaceFrom` turns that into an empty answer -- while an empty input
 chain is a programmer error and throws. The two exits differ for that
 reason alone.
+
+Per strike, the IV is inverted from the OTM-side mark, because OTM marks
+are the more reliable (tighter spreads, more liquid in the wings); when
+the OTM side is missing the ITM side is used rather than the strike
+dropped.
 
 One quote convention is supported: the mark-price one that
 `QuotesFromBars` produces. Nothing dispatches on convention, so a feed
@@ -77,17 +89,11 @@ inversion, the chain -> surface build.
 | Decision | Why |
 |---|---|
 | **BS with continuous div yield, not Black-76** | Natural for equity options where we have `S` (spot), `r` (rate), `q` (div yield). The forward `F = S * exp((r-q)*T)` falls out, but we never need to manipulate it separately. |
-| **Self-contained normal CDF, no SpecialFunctions dep** | Keeps the dep set minimal during the rebuild. A&S 7.1.26 (~1.5e-7 absolute error) is sufficient for IV inversion to 4 decimal places. Swap for `SpecialFunctions.erf` if higher precision is later required. |
-| **Bisection for IV inversion** | Robust, no derivative needed, no failure-to-converge surprises. Brent/Newton are faster but the speed difference does not register in backtest cost; bisection is the safer default. |
-| **OTM-side picking per strike** | OTM marks are more reliable (tighter spreads, more liquid in the wings). When OTM is missing we fall back to ITM rather than dropping the strike entirely. |
-| **One IV per strike per expiry** | A slice models the strike dimension; carrying both call and put IVs would imply a put-call-parity inconsistency we are not yet calibrating against. |
-| **`RawSurface` only, no parametric form** | Smallest honest representation, and the abstraction is the extension point: another representation implements `iv` from its own parameters and no consumer changes. |
-| **Linear interp in log-moneyness within a slice** | Cheap, monotone in strike order, naturally handles uneven strike spacing. There is no cross-expiry interpolation: no consumer needs one. |
-| **Strikes/expiries out of range flat-extrapolate / error respectively** | Strike interpolation has well-defined endpoints (IV at the wings); flat-extrap is the sensible default. Expiry queries are not interpolated in v1, so an out-of-range expiry is a bug, not a smoothing question -- throw. |
-| **`time_to_expiry` uses 365.25-day year** | Matches the convention in the legacy codebase; standard in equity-options pricing. |
+| **Self-contained normal CDF, no SpecialFunctions dep** | Keeps the dep set minimal during the rebuild. The polynomial approximation is accurate well past what IV inversion needs; swap for `SpecialFunctions.erf` if higher precision is ever required. |
+| **Bisection for IV and delta inversion** | Robust, no derivative needed, no failure-to-converge surprises. Brent/Newton are faster but the speed difference does not register in backtest cost; bisection is the safer default. |
+| **A fixed day count, not a calendar** | `time_to_expiry` divides by a constant year length, the legacy codebase's and the usual equity-options convention. A calendar would change every IV and greek for no consumer that asked. |
 | **`build_surface` is a free function, not a `RawSurface` constructor** | Non-trivial work returning an abstract type, so a constructor would tie it to one concrete surface. Concrete surface types still keep plain outer constructors. |
-| **`invert_delta` brackets on observed strikes, not on `spot * [lo, hi]`** | The slice already flat-extrapolates IV outside its observed strike range, so a wider bracket would land delta inversions in the extrapolation regime where the surface stops being informative. Capping the bracket at `[strikes[1], strikes[end]]` makes "no observed strike carries this delta" a `nothing` return rather than a fabricated answer. A representation with an explicit extrapolation policy can widen the bracket without changing the contract. |
-| **Curve math sits here, not in `data/kinds` beside the records that carry it** | A `Curve` is no more a data concept than Black-Scholes is: it is arithmetic over values, with no timestamp, selector or provenance. Keeping it here makes the curve and the surface symmetric -- math in `pricing`, record in `data/kinds`, provider in `data/providers` -- where before, one object was cut by stage and the other by object (design rule 9). |
+| **`invert_delta` brackets on observed strikes, not on `spot * [lo, hi]`** | The slice flat-extrapolates IV outside its observed strikes, so a wider bracket would land inversions where the surface stops being informative. Capping the bracket at the observed range makes "no observed strike carries this delta" a `nothing` return rather than a fabricated answer. A representation with an explicit extrapolation policy can widen the bracket without changing the contract. |
 
 ## Conventions consulted
 

@@ -1,13 +1,12 @@
-# Volatility surface: per-expiry slices of (strike, IV) plus the spot, rate,
-# div, and timestamp used to build them. Queries return interpolated IVs and
-# BS-derived prices / greeks.
+# Vol surface types and their queries: IV, price, greeks, forward, delta
+# inversion.
 
 """
-    ExpirySlice
+    ExpirySlice(expiry, tau, strikes, ivs)
 
-One expiry's worth of inverted IVs. `strikes` is sorted ascending; `ivs`
-is the same length, indexed by strike. `tau` is time-to-expiry in years,
-cached at build time.
+One expiry's IVs by strike, with `tau` the time to expiry in years cached
+at build time. Throws `ArgumentError` unless `strikes` is non-empty,
+sorted, unique, and the same length as `ivs`.
 """
 struct ExpirySlice
     expiry  :: DateTime
@@ -34,19 +33,22 @@ end
 """
     VolatilitySurface
 
-Abstract type for vol surfaces. Concrete subtypes carry their own
-representation (raw grid, SVI, SABR, ...). Query methods (`iv`, `price`,
-`delta`, `gamma`, `vega`, `forward`) work against any subtype that
-implements `expiries`, `get_slice`, and exposes `spot`, `rate`, `div`.
+Abstract supertype of surface representations. A representation carries
+`underlying`, `timestamp`, `spot`, `rate` and `div`, and answers
+`expiries`, `get_slice`, `iv`, `price`, `delta`, `gamma`, `vega` and
+`forward`; `invert_delta` is derived from `get_slice` and `delta` for
+any of them.
 """
 abstract type VolatilitySurface end
 
 """
-    RawSurface <: VolatilitySurface
+    RawSurface(underlying, timestamp, spot, rate, div, slices)
 
-Raw per-expiry slices. `iv(s, expiry, strike)` interpolates linearly in
-log-moneyness within a slice; cross-expiry queries are not supported in
-v1 (calling code must hit a quoted expiry exactly).
+The slices stored directly, with no parametric form. Queries name a
+quoted expiry exactly; within a slice the IV is interpolated linearly
+in log-moneyness and held flat outside the observed strikes. Throws
+`ArgumentError` unless `slices` is non-empty, sorted by expiry, and
+unique in expiry.
 """
 struct RawSurface <: VolatilitySurface
     underlying :: Underlying
@@ -71,11 +73,15 @@ end
 
 """
     expiries(s::VolatilitySurface) -> Vector{DateTime}
+
+The quoted expiries, ascending.
 """
 expiries(s::RawSurface) = [sl.expiry for sl in s.slices]
 
 """
     get_slice(s::VolatilitySurface, expiry) -> Union{ExpirySlice, Nothing}
+
+The slice at exactly `expiry`, or `nothing` when it is not quoted.
 """
 function get_slice(s::RawSurface, expiry::DateTime)::Union{ExpirySlice,Nothing}
     for sl in s.slices
@@ -87,8 +93,9 @@ end
 """
     forward(s::VolatilitySurface, expiry) -> Float64
 
-`S * exp((r - q) * tau)` where `tau` comes from the matching slice. Errors
-if the expiry is not present.
+`S * exp((r - q) * tau)` from the surface's own spot, rate and div and
+the slice's cached `tau`. Throws `ArgumentError` if `expiry` is not
+quoted.
 """
 function forward(s::RawSurface, expiry::DateTime)::Float64
     sl = get_slice(s, expiry)
@@ -116,9 +123,8 @@ end
 """
     iv(s::VolatilitySurface, expiry, strike) -> Float64
 
-Implied vol at (`expiry`, `strike`). Errors if `expiry` is not present.
-Strike is linearly interpolated in log-moneyness; out of range flat-
-extrapolates.
+Implied vol at (`expiry`, `strike`), interpolated within the slice.
+Throws `ArgumentError` if `expiry` is not quoted.
 """
 function iv(s::RawSurface, expiry::DateTime, strike::Float64)::Float64
     sl = get_slice(s, expiry)
@@ -128,6 +134,10 @@ end
 
 """
     price(s::VolatilitySurface, expiry, strike, option_type) -> Float64
+
+Black-Scholes price at `iv(s, expiry, strike)`, from the surface's own
+spot, rate, div and the slice's `tau`. Throws `ArgumentError` if
+`expiry` is not quoted; so do `delta`, `gamma` and `vega`.
 """
 function price(s::RawSurface, expiry::DateTime, strike::Float64,
                option_type::OptionType)::Float64
@@ -140,6 +150,8 @@ end
 
 """
     delta(s::VolatilitySurface, expiry, strike, option_type) -> Float64
+
+Black-Scholes delta at the surface's IV; see [`price`](@ref).
 """
 function delta(s::RawSurface, expiry::DateTime, strike::Float64,
                option_type::OptionType)::Float64
@@ -152,6 +164,8 @@ end
 
 """
     gamma(s::VolatilitySurface, expiry, strike) -> Float64
+
+Black-Scholes gamma at the surface's IV; see [`price`](@ref).
 """
 function gamma(s::RawSurface, expiry::DateTime, strike::Float64)::Float64
     sl = get_slice(s, expiry)
@@ -162,6 +176,9 @@ end
 
 """
     vega(s::VolatilitySurface, expiry, strike) -> Float64
+
+Black-Scholes vega at the surface's IV, per 1.0 of vol; see
+[`price`](@ref).
 """
 function vega(s::RawSurface, expiry::DateTime, strike::Float64)::Float64
     sl = get_slice(s, expiry)
@@ -174,17 +191,11 @@ end
     invert_delta(s::VolatilitySurface, expiry, option_type, target_abs_delta;
                  tol=1e-6, maxiter=100) -> Union{Float64, Nothing}
 
-Strike `K` such that `abs(delta(s, expiry, K, option_type)) == target_abs_delta`.
-
-Bisects on `K` over the matching slice's observed strike range
-`[slice.strikes[1], slice.strikes[end]]`. Returns `nothing` when the target
-is outside the bracket -- no observed strike in the slice carries that
-delta. Errors if the expiry is not in the surface (matching the rest of
-the query API).
-
-The slice-range bracket means the inversion never lands in the surface's
-flat-extrapolation regime; richer surfaces with explicit extrapolation
-policies can widen the bracket without changing the contract.
+The strike `K` with `abs(delta(s, expiry, K, option_type)) ==
+target_abs_delta`, found by bisection over the slice's observed strike
+range. Returns `nothing` when no observed strike carries that delta.
+Throws `ArgumentError` if `expiry` is not quoted or the target is not
+positive.
 """
 function invert_delta(s::VolatilitySurface, expiry::DateTime,
                       option_type::OptionType, target_abs_delta::Float64;
@@ -202,11 +213,10 @@ function invert_delta(s::VolatilitySurface, expiry::DateTime,
     lo_d, hi_d = minmax(d_lo, d_hi)
     (target_abs_delta < lo_d || target_abs_delta > hi_d) && return nothing
 
-    # |delta| is monotone in K under BS at a fixed sigma: increasing for puts,
-    # decreasing for calls. Within the slice, IV is piecewise linear in
-    # log-moneyness so |delta(K)| stays monotone in practice for SPY-style
-    # smiles; pathological smiles could break it, in which case bisection
-    # returns the last midpoint after maxiter.
+    # Bisection assumes |delta| monotone in K, which holds at fixed sigma
+    # and in practice across a SPY-style smile. The direction is read off
+    # the endpoints rather than the option type so a pathological smile
+    # degrades to the last midpoint instead of a wrong-way search.
     increasing_in_K = d_hi > d_lo
     a, b = K_lo, K_hi
     for _ in 1:maxiter

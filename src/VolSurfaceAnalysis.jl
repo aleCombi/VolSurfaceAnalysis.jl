@@ -16,7 +16,7 @@ include("data/kinds/vol_surface.jl")   # the surface's kind contract
 
 # ── data ────────────────────────────────────────────────────────────────────
 # protocol -- how a datum is ASKED FOR
-include("data/protocol/protocol.jl")   # the four shapes and the refusals
+include("data/protocol/protocol.jl")   # the shapes, `serves`, the refusals
 include("data/protocol/library.jl")
 include("data/protocol/map.jl")
 include("data/protocol/by_selector.jl")

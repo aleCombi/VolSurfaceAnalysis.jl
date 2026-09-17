@@ -65,17 +65,18 @@ deferred, not rejected.
 
 ## The protocol
 
-Five questions, and no sixth: what is there at this instant (`at`), what
-is there across a range (`between`), what the latest visible record is
-(`asof`), when there is anything at all (`timestamps`), and whether a
-selector is served (`serves`).
+Four shapes of read -- what is there at this instant (`at`), what is
+there across a range (`between`), what the latest visible record is
+(`asof`), when there is anything at all (`timestamps`) -- and one
+structural question, whether a selector is served (`serves`). Five, and
+no sixth.
 
-Each question is asked at two levels: the one a consumer asks of a map or
-a cut, and the one a provider answers. What separates them is not the
-call but the context -- only a provider is handed the map or cut the call
-arrived through, which is what the re-entrancy above rests on. Keeping
-the levels apart is also what lets the structural checks sit at the map
-level, where they are asked once, instead of in every provider.
+Each is asked at two levels: the one a consumer asks of a map or a cut,
+and the one a provider answers. What separates them is not the call but
+the context -- only a provider is handed the map or cut the call arrived
+through, which is what the re-entrancy above rests on. Keeping the
+levels apart is also what lets the structural check sit at the map
+level, where it is asked once, instead of in every provider.
 
 Answers are sorted by `timestamp`; `asof` returns every record at the
 largest visible timestamp at or before the instant asked about. Ranges
@@ -184,10 +185,10 @@ store's reason; the requirement is any store's.
 |---|---|
 | **Bar end is the visibility time -- a constant, not a setting** | Every value read off a minute bar, and any spread synthesized from one, is knowable only once the minute has finished. A bar-open stamp hands each fill and settlement price up to a minute of future information *below* the cut, where nothing can see it. Offering both conventions would leave the incorrect clock reachable, so there is no config key. A feed whose bars are not one minute needs its own reader stating its own interval. |
 | **`OptionBar` is a first-class vendor kind, not a reader internal** | Keeps the synthesis policy explicit and testable instead of buried in a reader. Policies depend on `OptionQuote`, so a live feed carrying real quotes simply does not configure a synthesizer. |
-| **The synthesizer is declared, never defaulted** | Bid/ask construction is part of provenance, so its parameter is required at the type level and appears in the experiment record. The store carries OHLCV and no bid/ask, so today's quotes are *synthesized, not observed*. Missing inputs yield a missing bid/ask rather than an invented market. |
+| **The synthesizer is declared, never defaulted** | Bid/ask construction is part of provenance, so its parameter is required at the type level and appears in the experiment record. The store carries OHLCV and no bid/ask, so today's quotes are *synthesized, not observed*. A bar missing an input yields a missing bid/ask, never a zero spread: a fallback there would invent a market that did not trade. |
 | **Selector types hash by content** | The default falls back to `objectid`, which changes with every build for a type in a precompiled package, so a `Dict` keyed on a selector would iterate in build-dependent order. |
 | **A ticker that disagrees with its partition throws** | Under `symbol=` partitioning a foreign ticker is a corrupt store, not a row to skip. |
-| **A derived provider may call into `pricing`; nothing else in `data` may** | Deriving a kind means computing it, and the computation is valuation math, which design rule 9 puts in `pricing`. The crossing is one-way -- `pricing` never reads through a map -- so the dependency stays a line rather than a cycle. Today `surface_from.jl` is the only file here that crosses it. |
+| **A derived provider may call into `pricing`; nothing else in `data` may** | Deriving a kind means computing it, and the computation is valuation math, which design rule 9 puts in `pricing`. The crossing is one-way -- `pricing` never reads through a map -- so the dependency stays a line rather than a cycle. Today `SurfaceFrom` is the only provider that crosses it. |
 | **The protocol never names a concrete provider** | Generics are declared by the protocol and implemented outward, so the dependency runs one way and the concepts do not fold back on each other. |
 | **One provider per kind** | Comparing two synthesizers, or two surface conventions, is two runs -- which is what the run store is for. |
 
