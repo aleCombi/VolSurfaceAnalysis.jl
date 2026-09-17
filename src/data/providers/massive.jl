@@ -11,7 +11,9 @@ const TZ_ET = tz"America/New_York"
     et_to_utc(date, time) -> DateTime
     et_to_utc(dt::DateTime) -> DateTime
 
-The UTC instant of an Eastern-time wall clock (to the minute).
+The UTC instant of an Eastern-time wall clock. The `(date, time)` method
+reads `time` to the minute and drops any finer field; the `DateTime`
+method converts the instant as given.
 """
 function et_to_utc(date::Date, t::Time)::DateTime
     local_dt = DateTime(date) + Hour(Dates.hour(t)) + Minute(Dates.minute(t))
