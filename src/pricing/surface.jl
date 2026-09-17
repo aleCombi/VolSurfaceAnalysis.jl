@@ -213,10 +213,12 @@ function invert_delta(s::VolatilitySurface, expiry::DateTime,
     lo_d, hi_d = minmax(d_lo, d_hi)
     (target_abs_delta < lo_d || target_abs_delta > hi_d) && return nothing
 
-    # Bisection assumes |delta| monotone in K, which holds at fixed sigma
-    # and in practice across a SPY-style smile. The direction is read off
-    # the endpoints rather than the option type so a pathological smile
-    # degrades to the last midpoint instead of a wrong-way search.
+    # Bisection assumes |delta| monotone in K. That holds at fixed sigma,
+    # and across the smile because the slice interpolates linearly in
+    # log-moneyness, which is monotone in strike order -- so changing the
+    # interpolation can break this search. The direction is read off the
+    # endpoints rather than the option type, so a smile that breaks the
+    # assumption degrades to the last midpoint, not a wrong-way search.
     increasing_in_K = d_hi > d_lo
     a, b = K_lo, K_hi
     for _ in 1:maxiter

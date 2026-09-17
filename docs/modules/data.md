@@ -51,8 +51,9 @@ fetches on its own.
   contract is enforceable by dispatch; no non-kind type implements it.
 - **A shape**: whether the kind is a *snapshot*, holding one record per
   selector per instant, or a *grid*, holding many at one instant. It is
-  declared as a trait on the type, so the protocol can branch on it
-  without having a record in hand.
+  declared as a trait on the type, so it can be branched on with no
+  record in hand -- which is what lets a reader settle duplicates as the
+  rows enter, before anything has been built.
 
 A kind's payload may be a math object owned by [`pricing`](pricing.md),
 and whether it needs a record wrapped around it follows from the object
@@ -82,9 +83,10 @@ Answers are sorted by `timestamp`; `asof` returns every record at the
 largest visible timestamp at or before the instant asked about. Ranges
 are always bounded. `between` promises an iterable, not a container, so
 a large provider yields lazily, and the result expires when that
-provider closes. No answer is ever `missing` -- that is reserved for
-absent scalar fields *inside* a record. There is no query language:
-anything beyond these five is plain Julia over the result.
+provider closes. No *read* ever answers `missing` -- that is reserved
+for absent scalar fields *inside* a record, and for `serves`, which is
+three-valued on purpose below. There is no query language: anything
+beyond these five is plain Julia over the result.
 
 Which question a kind is read with follows from its shape, not from a
 convention a consumer has to remember: a grid kind is read per instant, a

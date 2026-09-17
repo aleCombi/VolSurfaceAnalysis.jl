@@ -60,8 +60,8 @@ to_dict(s::SpreadFromOHLCV) =
 # One entry per kind, keyed by the loader's kind name; each spec emits
 # only what determines the records it serves. Readers never appear (they
 # are not on specs) and cache sizes are open_data kwargs, never identity.
-# The `dataset` slot on the parquet specs is reserved for a logical
-# dataset id / version; today it carries the root path.
+# The `dataset` slot on the parquet specs carries the root path. Dataset
+# versioning was dropped rather than parked -- see the `data` module doc.
 
 # Both parquet readers map a vendor minute bar to a record visible at bar
 # END (`bar_visible_at`, data/massive.jl). That convention determines every

@@ -8,7 +8,8 @@ Fixture provider: every record of kind `R` in `rows`, kept sorted by
 `timestamp` (stable, so input order is preserved within one instant).
 Serves every selector present in `rows`. For a `snapshot` kind, two rows
 for one selector at one instant collapse when equal and throw
-`ConflictingRecords` when they differ.
+`ConflictingRecords` when they differ -- the same rule the real readers
+apply, so a fixture cannot hold a state they would refuse.
 """
 struct InMemory{R}
     rows::Vector{R}

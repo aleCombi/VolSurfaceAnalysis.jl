@@ -854,3 +854,12 @@ intended direction, but not currently in flight.
   kind* rule makes two runs instead. Parked, not rejected: nothing needs
   two conventions at one instant yet, and the asymmetry costs nothing
   while that holds.
+- **A quote convention as a dispatch seam for `build_surface`.** The
+  build inverts IV from a mark price, the one convention
+  `QuotesFromBars` produces, and nothing dispatches on convention
+  (`docs/modules/pricing.md`). The parked work is a convention trait
+  carried by the chain's source, with today's path as its mark-price
+  case, so a feed quoting pre-computed IVs or bid/ask with no mark is a
+  second method rather than a branch. Parked because one vendor is
+  configured: the seam is worth its cost when a second lands, and
+  guessing its shape from one example is how the wrong seam gets built.

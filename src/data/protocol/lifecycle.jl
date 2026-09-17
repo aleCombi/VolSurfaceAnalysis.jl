@@ -92,6 +92,7 @@ end
     has_lifecycle(spec) -> Bool
 
 Whether `spec` has an explicit `open_data` method, which is what opting
-in to the lifecycle means.
+in to the lifecycle means. Presence only: it says nothing about whether
+the reader closes, which the lifecycle test suite is what guarantees.
 """
 has_lifecycle(spec) = hasmethod(open_data, Tuple{typeof(spec)})

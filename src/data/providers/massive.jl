@@ -50,8 +50,7 @@ _coerce_dt(x::DateTime) = x
 _coerce_dt(x) = DateTime(x)
 
 # A constant, not a spec option or config key: the other setting would
-# enable lookahead (the `data` module doc). A source whose bars are not one
-# minute needs its own reader stating its own interval.
+# enable lookahead (the `data` module doc).
 const BAR_INTERVAL = Minute(1)
 
 """

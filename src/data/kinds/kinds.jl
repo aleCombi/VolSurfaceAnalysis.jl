@@ -143,6 +143,8 @@ Whether kind `R` holds one record per selector per instant (`true`) or
 many (`false`, a grid kind). A trait on the kind. For a snapshot kind,
 two records for one selector at one instant are either the same record
 twice, which collapses where the rows enter, or a `ConflictingRecords`.
+Every reader that can be handed a duplicate applies the rule, fixtures
+included, so a test cannot construct a state a real reader refuses.
 """
 function snapshot end
 

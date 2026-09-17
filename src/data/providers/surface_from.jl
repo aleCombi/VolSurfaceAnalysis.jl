@@ -49,8 +49,8 @@ demands(s::SurfaceFrom) = ((RateCurve, s.currency),
 
 struct SurfaceReader
     spec::SurfaceFrom
-    # Keyed on (selector, instant) with no cutoff in the key: every input read
-    # is at or before `ts`, so an entry is valid under any cut at or after it.
+    # No cutoff in the key -- the `data` module doc says what must stay true
+    # of the derivation for that to be safe.
     cache::LRU{Tuple{Underlying,DateTime},Vector{VolatilitySurface}}
 end
 

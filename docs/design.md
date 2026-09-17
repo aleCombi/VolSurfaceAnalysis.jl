@@ -79,14 +79,17 @@
 
 9. **Folders are stages of a run, not financial objects.** The top level
    of `src/` names what a stage *does* -- price, serve data, decide,
-   simulate, record, evaluate, orchestrate, persist, show -- with one
-   `docs/modules/<folder>.md` per folder. A market object therefore
-   appears in as many folders as it has aspects: a surface's math in
-   `pricing`, its record and kind contract in `data/kinds`, the provider
-   that serves it in `data/providers`, and the same three for a curve.
-   Collecting every aspect of one object into a folder of its own would
-   be a principle only if every object were cut that way; one such
-   folder standing beside eight stages is a special case, and the layout
+   simulate, record, evaluate, orchestrate, persist, show -- and each
+   folder carries one `docs/modules/<folder>.md`. A market object
+   therefore appears in as many folders as it has aspects: a curve's
+   math in `pricing`, the record that stamps it in `data/kinds`, the
+   provider that serves it in `data/providers`. A surface is cut the
+   same way except that its math object doubles as its own record, so
+   only its kind contract sits in `data/kinds`; that asymmetry is a
+   modelling one, and [status.md](status.md) carries the split as parked
+   work. Collecting every aspect of one object into a folder of its own
+   would be a principle only if every object were cut that way; one such
+   folder standing beside the stages is a special case, and the layout
    should not carry one.
 
    The seam that keeps this honest: `pricing` may name record types --
