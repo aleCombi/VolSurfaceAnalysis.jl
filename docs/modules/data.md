@@ -49,44 +49,48 @@ fetches on its own.
 - **A selector** distinguishes parallel series of one kind -- an
   `Underlying`, a `Currency`. A value type, not a string, so the
   contract is enforceable by dispatch; no non-kind type implements it.
-- **A shape**: `snapshot(R)` is `true` for a kind holding one record per
-  selector per instant, `false` for a grid kind holding many.
+- **A shape**: whether the kind is a *snapshot*, holding one record per
+  selector per instant, or a *grid*, holding many at one instant. It is
+  declared as a trait on the type, so the protocol can branch on it
+  without having a record in hand.
 
-A curve kind carries a payload: the `Curve` *as of* a visibility time,
-evaluated by calling it, with the curve types themselves left as pure
-math. Stamping one at the start of time is how "always known" is said.
+A kind's payload may be a math object owned by [`pricing`](pricing.md),
+and whether it needs a record wrapped around it follows from the object
+rather than from taste. A `Curve` is meaningful for any currency at any
+instant, so `RateCurve` / `DivCurve` are what stamp it and say whose it
+is -- and one stamped at the start of time is how "always known" is
+said. A surface is already one underlying at one instant, so it *is* the
+kind and carries no wrapper. Giving the surface a curve's split is
+deferred, not rejected.
 
 ## The protocol
 
-Four questions, each in two arities -- map-level for consumers,
-provider-level for the things that answer, where `ctx` is the map or cut
-the call arrived through:
+Five questions, and no sixth: what is there at this instant (`at`), what
+is there across a range (`between`), what the latest visible record is
+(`asof`), when there is anything at all (`timestamps`), and whether a
+selector is served (`serves`).
 
-| question | map-level | provider-level |
-|---|---|---|
-| what is there at this instant | `at(m, R, sel, ts)` | `at(p, ctx, R, sel, ts)` |
-| what is there across a range | `between(m, R, sel, from, to)` | `between(p, ctx, R, sel, from, to)` |
-| what is the latest visible | `asof(m, R, sel, ts)` | `asof(p, ctx, R, sel, ts)` |
-| when is there anything | `timestamps(m, R, sel, from, to)` | `timestamps(p, ctx, R, sel, from, to)` |
-| is this served at all | `serves(m, R, sel)` | `serves(p, ctx, R, sel)` |
+Each question is asked at two levels: the one a consumer asks of a map or
+a cut, and the one a provider answers. What separates them is not the
+call but the context -- only a provider is handed the map or cut the call
+arrived through, which is what the re-entrancy above rests on. Keeping
+the levels apart is also what lets the structural checks sit at the map
+level, where they are asked once, instead of in every provider.
 
 Answers are sorted by `timestamp`; `asof` returns every record at the
-largest visible one `<= ts`. Ranges are always bounded. `between` promises
-an iterable, not a container, so a large provider yields lazily, and the
-result expires when that provider closes. No answer is ever `missing` --
-that is reserved for absent scalar fields *inside* a record. There is no
-query language: anything beyond these four is plain Julia over the result.
+largest visible timestamp at or before the instant asked about. Ranges
+are always bounded. `between` promises an iterable, not a container, so
+a large provider yields lazily, and the result expires when that
+provider closes. No answer is ever `missing` -- that is reserved for
+absent scalar fields *inside* a record. There is no query language:
+anything beyond these five is plain Julia over the result.
 
-Which question a kind is read with follows its shape. `only_or_missing`
-takes the single record of a singleton answer, or `missing` when there
-is none, and throws when handed two.
-
-| kind | natural call |
-|---|---|
-| `OptionQuote`, `OptionBar` | `at` |
-| `SpotPrice`, `VolatilitySurface` | `only_or_missing(at(...))` |
-| `RateCurve`, `DivCurve` | `only_or_missing(asof(...))` |
-| event kinds (future) | `between`, then filter on the effective field |
+Which question a kind is read with follows from its shape, not from a
+convention a consumer has to remember: a grid kind is read per instant, a
+snapshot kind per instant or as-of depending on whether it is stamped at
+every instant or holds until superseded. Reading a snapshot through
+`only_or_missing` is what turns two records at one instant into a refusal
+instead of a silent pick between two answers.
 
 **An empty answer means temporal absence and nothing else** (design rule
 7). Every other unanswerable question has a name:
@@ -121,6 +125,18 @@ record exists. Making it exact would mean building every record in the
 range. `between` traverses that same grid but yields only records that
 were built, so its output is exact and its cost is not.
 
+**A derived provider's cache must not be reachable by the cut.** Caching
+is what makes a derived kind affordable, and it is also where lookahead
+could re-enter after the cut has already been applied. The key is the
+selector and the instant, and nothing else. That holds only because every
+input a derivation reads is at or before the instant asked about, which
+is what makes an entry valid under any cut at or after it -- the same
+object comes back through the bare map and through any such cut. A
+derivation that read an input past its own instant would break the
+invariant, and the breakage would surface as one cut serving another's
+record rather than as an error. Absence is cached on the same key, so a
+derivation that found nothing is not retried.
+
 ## What a provider owes
 
 Answering is the whole interface, but a provider holding a resource owes
@@ -144,7 +160,9 @@ them is wrong in a way nothing reports.
 **Partitions must be globally time-ordered**: every row in one precedes
 every row in the next. `asof` takes its instant from the newest
 candidate partition while `at` and `timestamps` merge candidates, so an
-interleaved layout breaks `asof == at(last(timestamps(...)))`.
+interleaved layout breaks the agreement between them: the latest visible
+record would stop being the one found at the last instant the kind
+reports having anything at.
 
 **A snapshot kind's duplicates must be resolved where rows enter.** Read
 through `only_or_missing`, one instant carrying two records aborts, so
@@ -169,6 +187,7 @@ store's reason; the requirement is any store's.
 | **The synthesizer is declared, never defaulted** | Bid/ask construction is part of provenance, so its parameter is required at the type level and appears in the experiment record. The store carries OHLCV and no bid/ask, so today's quotes are *synthesized, not observed*. Missing inputs yield a missing bid/ask rather than an invented market. |
 | **Selector types hash by content** | The default falls back to `objectid`, which changes with every build for a type in a precompiled package, so a `Dict` keyed on a selector would iterate in build-dependent order. |
 | **A ticker that disagrees with its partition throws** | Under `symbol=` partitioning a foreign ticker is a corrupt store, not a row to skip. |
+| **A derived provider may call into `pricing`; nothing else in `data` may** | Deriving a kind means computing it, and the computation is valuation math, which design rule 9 puts in `pricing`. The crossing is one-way -- `pricing` never reads through a map -- so the dependency stays a line rather than a cycle. Today `surface_from.jl` is the only file here that crosses it. |
 | **The protocol never names a concrete provider** | Generics are declared by the protocol and implemented outward, so the dependency runs one way and the concepts do not fold back on each other. |
 | **One provider per kind** | Comparing two synthesizers, or two surface conventions, is two runs -- which is what the run store is for. |
 
@@ -181,8 +200,10 @@ that decide which records are served. Cache bounds are arguments to
 opening that no config table reaches, so a machine knob cannot become a
 false difference between runs. The bar-stamp convention projects as a
 constant: no key can vary it, but it decides which minute every decision
-reads. A spec's root sits in a reserved `dataset` slot, where a logical
-dataset id and version would go.
+reads. A spec's root sits in a `dataset` slot. Dataset versioning is dropped
+rather than deferred ([status.md](../status.md)): the slot holds a path,
+the trees are trusted as stable, and a divergence attributes to code or
+dependencies by elimination.
 
 ## Conventions consulted
 
@@ -200,12 +221,11 @@ One entry per naming decision, with the source checked (design rule 5).
   declares its own `connect`/`close!` generics with a scoped form and
   DuckDB.jl follows it, so nothing is added to `Base.open`/`Base.close`
   and the scoped form matches the repo's `with_run_store`.
-- **Kind as a type marker after the source; providers duck-typed.**
-  `at(src, R, sel, ts)` follows `read(io, T)` and `parse(T, s)`; the kind
-  traits are StructTypes-style; there is no abstract provider supertype,
-  as Tables.jl has none for tables.
+- **Kind as a type marker after the source; providers duck-typed.** A
+  read names its source first and the kind as a type marker after it,
+  following `read(io, T)` and `parse(T, s)`; the kind traits are
+  StructTypes-style; there is no abstract provider supertype, as
+  Tables.jl has none for tables.
 - **`between` yields records, not tables.** `Tables.partitions` is an
   iterator of tables and DuckDB's is forward-only, so the lazy iterator
   mirrors that contract instead of implementing the Tables hook.
-- **Style.** No `get_` prefix on accessors, bang only on mutation, files
-  `include`d into the one module with no submodules.

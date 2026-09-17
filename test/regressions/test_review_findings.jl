@@ -165,8 +165,8 @@ end
     @test_throws UnservedSelector timestamps(data, SpotPrice, _RF_QQQ, t1, t2)
 end
 
-# src/surfaces/surface_from.jl:74 tries only the newest quote timestamp;
-# because t2's expired chain is unbuildable, asof returns empty instead of t1's surface.
+# `SurfaceFrom` once tried only the newest quote timestamp; because t2's expired
+# chain is unbuildable, asof returned empty instead of t1's surface.
 @testset "surface asof walks back past unbuildable chains" begin
     t1 = DateTime(2024, 1, 15, 15, 30)
     t2 = t1 + Minute(1)

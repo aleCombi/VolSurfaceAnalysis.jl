@@ -4,8 +4,11 @@ using Dates
 
 @testset "VolSurfaceAnalysis" begin
     include("data/protocol/fixtures.jl")
+    # pricing
+    include("pricing/test_curves.jl")
+    include("pricing/test_bs.jl")
+    include("pricing/test_surface.jl")
     # kinds
-    include("data/kinds/test_curves.jl")
     include("data/kinds/test_kinds.jl")
     # protocol
     include("data/protocol/test_library.jl")
@@ -19,9 +22,7 @@ using Dates
     include("data/providers/test_providers.jl")
     include("data/providers/test_massive.jl")
     include("data/providers/test_parquet.jl")
-    include("surfaces/test_bs.jl")
-    include("surfaces/test_surface.jl")
-    include("surfaces/test_surface_from.jl")
+    include("data/providers/test_surface_from.jl")
     include("ledger/fixtures.jl")
     include("ledger/test_contracts.jl")
     include("ledger/test_types.jl")

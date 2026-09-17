@@ -27,9 +27,15 @@ Progress toward vision:
    minute rather than one still running. That is the convention, fixed
    in code and not a setting; the readers apply it where rows become
    records and every shape above them speaks visibility time.
-2. **Modelling** (vol surface) -- done. `Curve` types, `RateCurve` /
-   `DivCurve` kinds, the `surfaces` module, and the `SurfaceFrom`
-   provider with a bounded, cut-independent surface cache.
+2. **Modelling** (vol surface) -- done, relaid out 2026-09-17 under
+   design rule 9. `Curve` types, Black-Scholes, the surface types and
+   `build_surface` are the `pricing` module
+   (`docs/modules/pricing.md`); the `RateCurve` / `DivCurve` records and
+   the `VolatilitySurface` kind contract are in `data/kinds`; the
+   `SurfaceFrom` provider, with its bounded cut-independent cache, is in
+   `data/providers`. The `surfaces` folder is gone: curve and surface are
+   now cut the same way, by stage rather than one by stage and one by
+   object.
 3. **Ledger** -- the journal of economic facts
    (`docs/modules/ledger.md`): `Order` with declared intent per leg,
    `Fill` / `Match` / `Expiry` / `Fee` events with a bitemporal header,
@@ -141,6 +147,16 @@ Progress toward vision:
 
 Visualization is added incrementally alongside each stage, not as a phase
 of its own.
+
+`src/`'s top level is a list of stages, not of financial objects (design
+rule 9, adopted 2026-09-17). Every market object is therefore split the
+same way -- math in `pricing`, record and kind contract in `data/kinds`,
+provider in `data/providers` -- and the seam that keeps it honest is that
+nothing in `pricing` reaches the protocol, a provider, a cut or an
+experiment. The remaining asymmetry between curve and surface is a
+modelling one, not a layout one: a curve is a payload inside a record, a
+surface *is* its kind, and giving the surface the same split is deferred
+(`docs/modules/pricing.md`, future work).
 
 First concrete trading policy landed alongside step 4:
 `DailyShortStrangle` (target |Δ| per leg via `invert_delta`, snap to
@@ -821,3 +837,20 @@ intended direction, but not currently in flight.
   closed the spot `asof` gap by construction. The SQL timestamp formatter
   duplicates one in the store module and the path quoter one in the
   polygon module; extraction needs a home across module boundaries.
+- **Implied-forward calibration, per snapshot.** A slice holds one IV per
+  strike inverted against `S * exp((r-q)*T)`, so the residual put-call IV
+  gap at short tenors is carried rather than calibrated away. The parked
+  work is a per-snapshot forward from put-call parity (the legacy
+  `recalibrate_iv` is the reference), a slice-level forward field, and
+  pricing off that forward instead of the spot-implied one. Parked
+  because the one-IV-per-strike slice is honest without it and nothing
+  in the repo yet measures the gap it would close -- the first consumer
+  should be a measurement, not a policy.
+- **A payload/record split for the vol surface.** Deferred deliberately
+  when `pricing` landed (2026-09-17). A curve is a payload inside a
+  stamped, selected record; a surface *is* its kind, so its math object
+  doubles as its record. Splitting it the same way is what would let one
+  instant carry two surface conventions, which today's *one provider per
+  kind* rule makes two runs instead. Parked, not rejected: nothing needs
+  two conventions at one instant yet, and the asymmetry costs nothing
+  while that holds.

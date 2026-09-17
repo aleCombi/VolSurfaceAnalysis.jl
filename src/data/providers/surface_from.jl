@@ -1,16 +1,6 @@
-# `surfaces` module: the derived provider that serves `VolatilitySurface`.
-#
-# `SurfaceFrom` reads its inputs (quotes, spot, rate and div curves) through
-# the map it is called from, builds the surface with `build_surface`, and
-# caches the result per (underlying, timestamp) in a bounded LRU. The cache
-# is cut-independent by the invariant that every input read is at or before
-# the requested `ts`, so an entry keyed on (sel, ts) is valid under any
-# cutoff >= ts: the same surface object comes back through the bare map and
-# through any cut at or after its timestamp.
-
-selector(s::VolatilitySurface) = s.underlying
-selector_type(::Type{<:VolatilitySurface}) = Underlying
-snapshot(::Type{<:VolatilitySurface}) = true
+# `SurfaceFrom`: the derived provider that serves `VolatilitySurface`, built
+# from an option chain, a spot and the rate and dividend curves, all read back
+# through the map the call arrived through.
 
 """
     SurfaceFrom(; currency, spot_for = Dict(), lookback_ticks = 3)
@@ -61,6 +51,8 @@ demands(s::SurfaceFrom) = ((RateCurve, s.currency),
 
 struct SurfaceReader
     spec::SurfaceFrom
+    # Keyed on (selector, instant) with no cutoff in the key: every input read
+    # is at or before `ts`, so an entry is valid under any cut at or after it.
     cache::LRU{Tuple{Underlying,DateTime},Vector{VolatilitySurface}}
 end
 

@@ -2,11 +2,19 @@ module VolSurfaceAnalysis
 
 using Dates
 
-# ── data ────────────────────────────────────────────────────────────────────
-# kinds -- what a market datum IS
-include("data/kinds/curves.jl")        # Curve payload math; before kinds.jl,
-include("data/kinds/kinds.jl")         # because RateCurve carries a Curve
+# ── pricing and kinds ───────────────────────────────────────────────────────
+# `pricing` owns the valuation math and may name record types; `data/kinds`
+# owns the records, and some of them carry a math object. So the two interleave
+# at load. The order below is the dependency order; nothing else about it is a
+# statement.
+include("pricing/curves.jl")           # Curve: a leaf
+include("data/kinds/kinds.jl")         # the records; RateCurve carries a Curve
+include("pricing/bs.jl")               # Black-Scholes, IV inversion
+include("pricing/surface.jl")          # RawSurface carries an Underlying
+include("pricing/build.jl")            # builds from a Vector{OptionQuote}
+include("data/kinds/vol_surface.jl")   # the surface's kind contract
 
+# ── data ────────────────────────────────────────────────────────────────────
 # protocol -- how a datum is ASKED FOR
 include("data/protocol/protocol.jl")   # the four shapes and the refusals
 include("data/protocol/library.jl")
@@ -22,11 +30,8 @@ include("data/providers/synth.jl")     # before providers.jl (QuotesFromBars
 include("data/providers/providers.jl") # is parameterised on a synthesizer)
 include("data/providers/massive.jl")
 include("data/providers/parquet.jl")   # needs LRU from protocol/
+include("data/providers/surface_from.jl")  # derived: serves VolatilitySurface
 
-include("surfaces/bs.jl")
-include("surfaces/surface.jl")
-include("surfaces/build.jl")
-include("surfaces/surface_from.jl")
 include("ledger/contracts.jl")
 include("ledger/types.jl")
 include("ledger/cash.jl")
