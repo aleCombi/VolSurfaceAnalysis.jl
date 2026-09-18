@@ -37,10 +37,10 @@ policy when state advances.
 
 ## Scheduling
 
-A scheduled policy gates inside `decide`, which is correct on any
-clock, and may narrow the engine's calls with `tick_times`. The window
-end stays a clock property, so a schedule can never move the
-settlement.
+A scheduled policy checks the time inside `decide` and returns no
+orders off-schedule. It may also hand the engine its schedule through
+`tick_times`, so that `decide` is called only then. The window end is a
+clock property, so a schedule cannot move the settlement.
 
 `declared_underlyings` exists so the loader can hold an experiment to
 one underlying: the clock selector says *when* to step, fills price per
@@ -57,4 +57,4 @@ its underlying per tick declares nothing and is not checked.
 | **Stateless `decide`** | No setup to test, deterministic replay, no question of mutate versus rebuild between ticks. |
 | **`decide` receives data already cut at `t`** | The old code enforced no-lookahead with a view handed in at runtime, which a caller could skip; a cut the type carries cannot be skipped. |
 | **`t` explicit** | A schedule asks "is this my entry time" without digging through timestamps, and the engine gets a trivial crosscheck against the cutoff. |
-| **Gate in `decide`, narrow with `tick_times`** | The gate keeps the policy correct on any clock; the schedule only saves calls. |
+| **Check the time in `decide`, narrow the calls with `tick_times`** | The check keeps the policy correct on any clock; the schedule saves calls. |

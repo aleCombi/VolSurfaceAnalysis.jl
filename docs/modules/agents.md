@@ -7,14 +7,14 @@ at least that tick. Between ticks the agent may refit, swap or advance
 a schedule; the policy it hands out is frozen
 ([`policies`](policies.md)).
 
-## The query
+## What an agent does per tick
 
-Everything an agent schedules it gates inside `current_policy`, the way
-a policy gates inside `decide`: there is no refit-schedule protocol,
-and the engine knows nothing of an agent's internals.
-`declared_underlyings` and `tick_times` exist at this layer so the
-loader and the engine ask one object; `StaticAgent` delegates both to
-its one policy.
+The engine asks the agent for a policy on every tick. An agent that
+refits on a schedule checks the date inside `current_policy` and
+returns a new policy when the date says so, and the same one otherwise.
+`declared_underlyings` and `tick_times` exist at the agent level so the
+loader and the engine have one object to ask; `StaticAgent` passes both
+through to its policy.
 
 ## Decisions
 
