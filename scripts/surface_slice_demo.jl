@@ -56,7 +56,7 @@ with_data(DATA) do d
         bottom_margin=6mm)
 
     for e in exps
-        sl = get_slice(surf, e)
+        sl = slice(surf, e)
         sl === nothing && continue
         dte = round(sl.tau * 365.25, digits=1)
         plot!(p, sl.strikes, sl.ivs;

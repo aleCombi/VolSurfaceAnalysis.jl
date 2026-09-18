@@ -62,7 +62,7 @@ with_data(DATA) do d
     colors = palette(:tab10)
 
     for (i, e) in enumerate(exps)
-        sl = get_slice(surf, e)
+        sl = slice(surf, e)
         sl === nothing && continue
         dte = round(sl.tau * 365.25, digits=1)
         label = "$(Date(e))  ($(dte)d)"

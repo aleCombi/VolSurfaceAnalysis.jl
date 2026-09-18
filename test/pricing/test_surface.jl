@@ -50,7 +50,7 @@ end
     @test s.spot == spot
     @test expiries(s) == [e1, e2]
 
-    sl1 = get_slice(s, e1)
+    sl1 = slice(s, e1)
     @test sl1 !== nothing
     @test sl1.strikes == [460.0, 470.0, 480.0, 490.0, 500.0]
     for (k, sigma_true) in zip(sl1.strikes, [0.22, 0.20, 0.18, 0.19, 0.21])
@@ -106,7 +106,7 @@ end
     zero_mark = OptionQuote("Z", _SURF_UNDERLYING, e1, 110.0, Call,
                             missing, missing, 0.0, missing, missing, missing, ts)
     s = build_surface([good, missing_mark, zero_mark], spot, r, q)
-    sl = get_slice(s, e1)
+    sl = slice(s, e1)
     @test sl.strikes == [100.0]
 end
 
@@ -129,7 +129,7 @@ end
     chain = [_synth_quote(100.0, e1, Call, ts, spot, 0.20, r, q)]
     s = build_surface(chain, spot, r, q)
     e_missing = DateTime(2025, 1, 1, 21, 0)
-    @test get_slice(s, e_missing) === nothing
+    @test slice(s, e_missing) === nothing
     @test_throws ArgumentError iv(s, e_missing, 100.0)
     @test_throws ArgumentError price(s, e_missing, 100.0, Call)
     @test_throws ArgumentError forward(s, e_missing)
@@ -142,7 +142,7 @@ end
     sigma = 0.25
     chain = [_synth_quote(100.0, e1, Call, ts, spot, sigma, r, q)]
     s = build_surface(chain, spot, r, q)
-    sl = get_slice(s, e1)
+    sl = slice(s, e1)
 
     @test price(s, e1, 100.0, Call) ≈ bs_price(spot, 100.0, sl.tau, sl.ivs[1], Call; r=r, q=q) atol = 1e-6
     @test delta(s, e1, 100.0, Call) ≈ bs_delta(spot, 100.0, sl.tau, sl.ivs[1], Call; r=r, q=q) atol = 1e-6
@@ -156,7 +156,7 @@ end
     e1 = DateTime(2024, 4, 19, 20, 0)
     chain = [_synth_quote(100.0, e1, Call, ts, spot, 0.25, r, q)]
     s = build_surface(chain, spot, r, q)
-    sl = get_slice(s, e1)
+    sl = slice(s, e1)
     @test forward(s, e1) ≈ spot * exp((r - q) * sl.tau) atol = 1e-12
 end
 

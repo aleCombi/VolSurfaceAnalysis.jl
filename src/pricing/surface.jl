@@ -35,8 +35,8 @@ end
 
 Abstract supertype of surface representations. A representation carries
 `underlying`, `timestamp`, `spot`, `rate` and `div`, and answers
-`expiries`, `get_slice`, `iv`, `price`, `delta`, `gamma`, `vega` and
-`forward`; `invert_delta` is derived from `get_slice` and `delta` for
+`expiries`, `slice`, `iv`, `price`, `delta`, `gamma`, `vega` and
+`forward`; `invert_delta` is derived from `slice` and `delta` for
 any of them.
 """
 abstract type VolatilitySurface end
@@ -79,11 +79,11 @@ The quoted expiries, ascending.
 expiries(s::RawSurface) = [sl.expiry for sl in s.slices]
 
 """
-    get_slice(s::VolatilitySurface, expiry) -> Union{ExpirySlice, Nothing}
+    slice(s::VolatilitySurface, expiry) -> Union{ExpirySlice, Nothing}
 
 The slice at exactly `expiry`, or `nothing` when it is not quoted.
 """
-function get_slice(s::RawSurface, expiry::DateTime)::Union{ExpirySlice,Nothing}
+function slice(s::RawSurface, expiry::DateTime)::Union{ExpirySlice,Nothing}
     for sl in s.slices
         sl.expiry == expiry && return sl
     end
@@ -98,7 +98,7 @@ the slice's cached `tau`. Throws `ArgumentError` if `expiry` is not
 quoted.
 """
 function forward(s::RawSurface, expiry::DateTime)::Float64
-    sl = get_slice(s, expiry)
+    sl = slice(s, expiry)
     sl === nothing && throw(ArgumentError("expiry $expiry not in surface"))
     return s.spot * exp((s.rate - s.div) * sl.tau)
 end
@@ -127,7 +127,7 @@ Implied vol at (`expiry`, `strike`), interpolated within the slice.
 Throws `ArgumentError` if `expiry` is not quoted.
 """
 function iv(s::RawSurface, expiry::DateTime, strike::Float64)::Float64
-    sl = get_slice(s, expiry)
+    sl = slice(s, expiry)
     sl === nothing && throw(ArgumentError("expiry $expiry not in surface"))
     return _interp_iv(sl, s.spot, strike)
 end
@@ -141,7 +141,7 @@ spot, rate, div and the slice's `tau`. Throws `ArgumentError` if
 """
 function price(s::RawSurface, expiry::DateTime, strike::Float64,
                option_type::OptionType)::Float64
-    sl = get_slice(s, expiry)
+    sl = slice(s, expiry)
     sl === nothing && throw(ArgumentError("expiry $expiry not in surface"))
     sigma = _interp_iv(sl, s.spot, strike)
     return bs_price(s.spot, strike, sl.tau, sigma, option_type;
@@ -155,7 +155,7 @@ Black-Scholes delta at the surface's IV; see [`price`](@ref).
 """
 function delta(s::RawSurface, expiry::DateTime, strike::Float64,
                option_type::OptionType)::Float64
-    sl = get_slice(s, expiry)
+    sl = slice(s, expiry)
     sl === nothing && throw(ArgumentError("expiry $expiry not in surface"))
     sigma = _interp_iv(sl, s.spot, strike)
     return bs_delta(s.spot, strike, sl.tau, sigma, option_type;
@@ -168,7 +168,7 @@ end
 Black-Scholes gamma at the surface's IV; see [`price`](@ref).
 """
 function gamma(s::RawSurface, expiry::DateTime, strike::Float64)::Float64
-    sl = get_slice(s, expiry)
+    sl = slice(s, expiry)
     sl === nothing && throw(ArgumentError("expiry $expiry not in surface"))
     sigma = _interp_iv(sl, s.spot, strike)
     return bs_gamma(s.spot, strike, sl.tau, sigma; r=s.rate, q=s.div)
@@ -181,7 +181,7 @@ Black-Scholes vega at the surface's IV, per 1.0 of vol; see
 [`price`](@ref).
 """
 function vega(s::RawSurface, expiry::DateTime, strike::Float64)::Float64
-    sl = get_slice(s, expiry)
+    sl = slice(s, expiry)
     sl === nothing && throw(ArgumentError("expiry $expiry not in surface"))
     sigma = _interp_iv(sl, s.spot, strike)
     return bs_vega(s.spot, strike, sl.tau, sigma; r=s.rate, q=s.div)
@@ -202,7 +202,7 @@ function invert_delta(s::VolatilitySurface, expiry::DateTime,
                       tol::Float64=1e-6, maxiter::Int=100)::Union{Float64,Nothing}
     target_abs_delta > 0.0 ||
         throw(ArgumentError("target_abs_delta must be positive, got $target_abs_delta"))
-    sl = get_slice(s, expiry)
+    sl = slice(s, expiry)
     sl === nothing && throw(ArgumentError("expiry $expiry not in surface"))
 
     K_lo = sl.strikes[1]

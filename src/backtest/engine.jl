@@ -190,27 +190,6 @@ end
 
 # ---- the cross-record contract ---------------------------------------
 
-"""
-    check_join(L::Ledger; tick_cents::Int = TICK_CENTS) -> Nothing
-
-The fill review's cross-record contract between the events and the
-order journal, used for persistence write and load. Order
-records: ids are `1, 2, ...` in order, each `first_leg_id` is the
-previous record's plus its leg count (so leg ids are contiguous and
-never shared), and there is one observation per leg. For every `Fill`:
-its order leg exists (`DanglingReference` `:order_leg_id` otherwise);
-contract, side and intent equal the leg's and group equals the
-record's; over the whole ledger the fills of that leg sum to at most the
-leg's quantity; and, unless `fill_rule == :broker_execution`, the leg's
-observation has `quote_at` and `spot_at` at or before `decided_at`, the
-side the rule needs present, and
-`price == fill_price(fill_rule, bid, ask, side, tick_cents)` (an unknown
-rule is a violation on `:fill_rule`). Under `:broker_execution` this
-slice still keeps one observation row per leg, but its values are not
-consulted. Every other disagreement is a
-[`JoinViolation`](@ref) naming its field. Execution-id uniqueness is
-`commit!`'s `DuplicateExecution` and is not repeated here.
-"""
 function _check_fill_join(e::Fill, r::OrderRecord, k::Int, tick_cents::Int;
                           cumulative_quantity::Union{Nothing,Int}=nothing)::Nothing
     leg = r.order.legs[k]
@@ -242,6 +221,27 @@ function _check_fill_join(e::Fill, r::OrderRecord, k::Int, tick_cents::Int;
     return nothing
 end
 
+"""
+    check_join(L::Ledger; tick_cents::Int = TICK_CENTS) -> Nothing
+
+The fill review's cross-record contract between the events and the
+order journal, used for persistence write and load. Order
+records: ids are `1, 2, ...` in order, each `first_leg_id` is the
+previous record's plus its leg count (so leg ids are contiguous and
+never shared), and there is one observation per leg. For every `Fill`:
+its order leg exists (`DanglingReference` `:order_leg_id` otherwise);
+contract, side and intent equal the leg's and group equals the
+record's; over the whole ledger the fills of that leg sum to at most the
+leg's quantity; and, unless `fill_rule == :broker_execution`, the leg's
+observation has `quote_at` and `spot_at` at or before `decided_at`, the
+side the rule needs present, and
+`price == fill_price(fill_rule, bid, ask, side, tick_cents)` (an unknown
+rule is a violation on `:fill_rule`). Under `:broker_execution` this
+slice still keeps one observation row per leg, but its values are not
+consulted. Every other disagreement is a
+[`JoinViolation`](@ref) naming its field. Execution-id uniqueness is
+`commit!`'s `DuplicateExecution` and is not repeated here.
+"""
 function check_join(L::Ledger; tick_cents::Int = TICK_CENTS)::Nothing
     expect_id, expect_leg = 1, 1
     for r in L.orders
