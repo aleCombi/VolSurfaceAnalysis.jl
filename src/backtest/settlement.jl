@@ -21,14 +21,9 @@
 # session when the underlying printed in the reference window, and its
 # close is the last of those prints. That reads an early close (official
 # close 13:00 ET) with no early-close table, and it does so on the
-# strength of its input rather than of the bounds: the window's last print
-# is the session's only where no extended-hours print falls inside the
-# window. That exposure is this rule's own -- a 15:59 print on a 13:00 ET
-# close sits inside the window and settles the contract, and nothing in a
-# `SpotPrice` says which session it came from. The production tree does
-# serve extended hours and is measured, not promised, to print none inside
-# an early-close window; the official-close kind in the backtest module
-# doc's backlog pointer would make this structural. The calendar only contradicts
+# strength of its input rather than of the bounds: an extended-hours print
+# inside the window would settle the contract. That exposure is stated
+# once, in `settlement_price`'s docstring. The calendar only contradicts
 # the tree: a printless weekday it calls open is a named valuation failure
 # (design rule 7), never evidence that the exchange was closed.
 #

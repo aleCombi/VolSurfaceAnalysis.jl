@@ -201,8 +201,9 @@ failed.** What the review deferred is in the backlog below.
 **The module-docs pass**, opened 2026-09-18 from an audit of every module
 against design rules 6, 8, 10 and 11. `data` and `pricing` landed in
 PR #19 and are the target shape. The prep PR made the decisions the
-rest share, so no later PR touches this file or another module's doc:
-the backlog triage (nine entries added, fourteen future-work items
+rest share, so no later PR changes a decision here or in another
+module's doc:
+the backlog triage (seven entries added, thirteen future-work items
 dropped), the ownership below, the SpotPrice exposure's home, and the
 cross-module code fixes (`get_slice` is `slice`; two docstrings were
 bound to the wrong method; `_pop_type!` mutated nothing). Four module
@@ -222,7 +223,8 @@ docstring only. The SpotPrice session exposure is `backtest.md`'s: the
 `data` module promises nothing about sessions, the record does not carry
 one, and the structural fix is the official-close entry below.
 
-Dropped future work, deleted rather than parked because no decision
+Dropped future work, which the module PRs delete rather than park
+because no decision
 stands behind it and [vision.md](vision.md) carries the direction: the
 live-trading bridge, a risk-free tenor, per-contract metric views,
 kwargs into `Experiment`, policy-local state, trainer submodules,
@@ -366,7 +368,8 @@ decision named here now lives in the module docs.
   own expiry, and its close is the last of those prints, which settles
   the early closes with no early-close table *given* the regular-session
   `SpotPrice` input contract (stated in `data.md` after the PR #13
-  review; an extended-hours print inside the window would settle an early
+  review, and since 2026-09-18 stated by backtest.md as its own
+  exposure; an extended-hours print inside the window would settle an early
   close instead, undetectably);
   BusinessDays.jl's `USNYSE` is consulted only to contradict the tree, so
   a printless date the calendar calls open is
@@ -452,8 +455,9 @@ decision named here now lives in the module docs.
   than an absent one. `RUN_SCHEMA_VERSION` is 4, so every stored run id
   moved; the version is also what finally separates the schema-3 tree
   (runs written before lifecycle booked expiries) from runs of the same
-  config made now. `data.md`'s `SpotPrice` paragraph now states
-  what the tree actually provides rather than what the rule needs:
+  config made now. `data.md`'s `SpotPrice` paragraph then stated (and
+  since 2026-09-18 backtest.md states, as its own exposure) what the
+  tree actually provides rather than what the rule needs:
   Polygon's minute aggregates deliberately update on extended-hours
   trades (SPY on 2024-12-24 holds bars from 04:00 to 16:59 ET), so the
   six early closes settle at their 13:00 ET prints on a *measured*
@@ -808,9 +812,14 @@ intended direction, but not currently in flight.
   `us_stocks_sip/day_aggs_v1` pipeline before a kind can read one; then
   the kind and its provider spec follow, already inside identity as a
   `[data.*]` entry, and `:session_close` reads it instead of walking the
-  minute tree. That changes results and ids change with them. Parked
-  2026-09-13 from the PR #13 review finding; the vendor detail recorded
-  2026-09-15 from the retired identity note.
+  minute tree. That changes results and ids change with them. The
+  exposure is confined to early-close days, the only dates on which the
+  09:30-16:00 window extends past the close, so a half-day table used
+  as a *check* (refuse a print after 13:00 ET on such a date) would name
+  it today at small cost; that is the cheaper remedy on file, the
+  official close the structural one. Parked 2026-09-13 from the PR #13
+  review finding; the vendor detail recorded 2026-09-15 from the retired
+  identity note; the check noted 2026-09-18 from the PR #20 review.
 - **Second concrete policy** -- unblocked now that settlement is
   honest. Candidate: a daily iron condor (same scheduled-gate /
   `invert_delta` shape, four legs instead of two). Once the duplication
@@ -946,13 +955,20 @@ intended direction, but not currently in flight.
   refuse unknown keys; `[policy]`, `[agent]`, `[outputs]` and the curve
   builders drop them silently, so a typo'd key takes the default and the
   run id does not move. Refuse everywhere; a stored config that carried
-  a typo becomes a refusal, which is the point. Parked 2026-09-18;
-  `config.jl` called this recorded when it was not.
+  a typo becomes a refusal, which is the point. The `type` key is
+  forwarded with the rest, so every known-key set must list it; a
+  non-mutating split of type from table would end that special case.
+  Parked 2026-09-18; `config.jl` called this recorded when it was not.
 - **Rule 7 holes found by the docs audit.** Three places where an
   ordinary empty stands for "not ever". (1) `at` on a surface reader
   returns an empty vector when the chain is present but `build_surface`
-  yields nothing, and caches it, while `asof` names the same failure
-  `DerivationExhausted`; the strangle policy reads `at`. (2) A stored
+  yields nothing, and caches it; pricing.md commits to that empty as
+  temporal absence, and `asof` walks past such empties, throwing
+  `DerivationExhausted` only when its lookback is spent. Rule 7 lists a
+  derivation that keeps failing among the named failures, so the
+  commitment and the rule disagree; the strangle policy reads `at`.
+  Open: keep the commitment, make `at` name an unbuildable chain, or
+  have the policy read `asof`. (2) A stored
   `Manifest.toml` that fails to parse yields an empty version map, so
   `reproduce` reports no recorded version changes for a corrupt
   document. (3) `run_backtest` completes with an empty ledger when the

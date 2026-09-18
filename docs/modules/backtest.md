@@ -173,9 +173,10 @@ inside the 09:30-16:00 window and becomes the settlement price, and
 nothing here can tell it apart from a regular one -- a `SpotPrice` does
 not record which session it came from, and no narrower window helps,
 since 15:59 is regular-hours-shaped. The production tree does serve
-extended hours and is *measured* not to print inside that window on the
-dates that matter, which is why the six early-close sessions of a
-ten-year SPY run settle at their 13:00 prints. The exposure is this
+extended hours (SPY prints from 04:00 to 16:59 ET) and is *measured* not
+to print inside that window on the dates that matter: none of the six
+early-close sessions of a ten-year SPY run has a bar between 13:00 and
+16:00 ET, so all six settle at their 13:00 prints. The exposure is this
 module's own: [`data`](data.md) promises nothing about sessions, and the
 official-close data kind that would make the rule structural is a
 backlog item in [status](../status.md). The
@@ -193,8 +194,8 @@ settle the contract. Under bar-end visibility it becomes visible at
 16:00 -- is the last print inside it. An early close does not move at all:
 its winning record is the 13:00-13:01 bar, which was stamped 13:00 and
 sat on the window boundary before and is visible at 13:01 and one minute
-inside it now -- the same row, the same price, and the same documented
-dependence on the tree holding nothing else in that window.
+inside it now -- the same row, the same price, and the same exposure
+to the tree holding nothing else in that window.
 
 **The session grid is that same rule, enumerated.** `session_closes`
 answers "when did each session in this window close", one instant per
@@ -209,8 +210,8 @@ temporal absence, not a failure.
 
 It reads **one session window at a time**, exactly the windows
 `:session_close` reads, and never the gaps between them. That is not an
-implementation detail: the regular-session `SpotPrice` contract is claimed
-inside those windows and nowhere else, and the production tree does hold a
+implementation detail: the session-window exposure is bounded inside
+those windows and nowhere else, and the production tree does hold a
 disagreeing pair at an overnight instant, so a single range read across ten
 years would abort on data the rule is not entitled to and does not need.
 
