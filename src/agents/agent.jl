@@ -1,4 +1,4 @@
-# Agent: the abstract type, `current_policy`, the two delegations, `StaticAgent`.
+# Agent, `current_policy`, `StaticAgent`; agent-level `declared_underlyings` and `tick_times`.
 
 """
     Agent

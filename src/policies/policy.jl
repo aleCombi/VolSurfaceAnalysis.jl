@@ -1,13 +1,12 @@
-# Policy: the abstract type, `decide`, the two traits, `NoOpPolicy`.
+# Policy, `decide`, `NoOpPolicy`; the optional `declared_underlyings` and `tick_times`.
 
 """
     Policy
 
 Abstract supertype for backtest policies. Concrete policies hold their
 immutable configuration (schedules, parameters, fitted models) and
-implement [`decide`](@ref). A Policy is the unit a [`Agent`](@ref)
-hands to the engine at each tick; it is expected to be static for the
-duration of that tick.
+implement [`decide`](@ref). An [`Agent`](@ref) hands one to the engine
+per tick, and it does not change during that tick.
 """
 abstract type Policy end
 
@@ -61,6 +60,6 @@ The candidate timestamps at which the engine calls `decide`, or `nothing`
 (the default) to walk the experiment's declared clock. The engine trusts
 the return verbatim: every timestamp in `[from, to]`, sorted, unique
 (a duplicate fires `decide` twice on one tick). Candidates need not
-exist in the data; the window end is a clock tick, never a candidate.
+exist in the data.
 """
 tick_times(::Policy, ::MarketData, ::DateTime, ::DateTime) = nothing

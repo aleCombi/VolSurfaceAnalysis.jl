@@ -78,8 +78,8 @@ function _quoted_strikes(chain::AbstractVector{OptionQuote}, expiry::DateTime,
 end
 
 # Nearest entry in `sorted_strikes` to `K`; `nothing` when empty; ties go to
-# the lower strike. Snaps to the chain's strikes of the leg's type, not the
-# slice's: a slice keeps one side per strike, and a fill matches both.
+# the lower strike. Snaps to the chain's strikes of the leg's type: a slice
+# keeps one side per strike, and a fill matches on strike and type.
 function _snap_to_sorted(sorted_strikes::Vector{Float64},
                          K::Float64)::Union{Float64,Nothing}
     isempty(sorted_strikes) && return nothing
@@ -127,7 +127,8 @@ its lots.
 function decide(p::DailyShortStrangle, t::DateTime,
                 data::TimeCut,
                 ::Book)::Vector{Order}
-    Time(t) == p.entry_time || return Order[]                     # cheap gate
+    # Correct on any clock; `tick_times` only narrows the engine's calls.
+    Time(t) == p.entry_time || return Order[]
     surface = only_or_missing(at(data, VolatilitySurface, p.underlying, t))
     ismissing(surface) && return Order[]
     expiry = _first_expiry_on_or_after(surface, t + p.expiry_interval)

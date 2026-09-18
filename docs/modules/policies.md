@@ -15,11 +15,12 @@ over time, that is the [`agents`](agents.md) layer's job.
 ## Orders and the book
 
 An order is composed of one or more legs. A leg names a contract, a
-side, a number of contracts, and its intent: `Open`, or `Close` with
-the group it closes. A close is therefore a first-class thing rather
-than a counter-trade, and closing a group that is not open is refused,
-so a policy's mistake is a named failure at fill time rather than a
-silent new lot. An order is booked whole or not at all.
+side, a number of contracts, and its intent, `Open` or `Close`; an
+order with `Close` legs names the group it closes. A close is
+therefore a first-class thing rather than a counter-trade, and closing
+a group that is not open is refused, so a policy's mistake is a named
+failure at fill time rather than a silent new lot. An order is booked
+whole or not at all.
 
 The book is the set of open lots, grouped by the order that opened
 them, per contract, plus cash, as of this tick. Expired lots are
@@ -38,14 +39,15 @@ policy when state advances.
 ## Scheduling
 
 A scheduled policy checks the time inside `decide` and returns no
-orders off-schedule. It may also hand the engine its schedule through
-`tick_times`, so that `decide` is called only then. The window end is a
-clock property, so a schedule cannot move the settlement.
+orders off-schedule. It may also hand the engine its own schedule
+through `tick_times`; the engine then walks that schedule instead of
+the clock, and the whole tick, settlement and fills included, runs at
+those times only. The window end is a clock property, so a schedule
+cannot move the final settlement.
 
-`declared_underlyings` exists so the loader can hold an experiment to
-one underlying: the clock selector says *when* to step, fills price per
-leg, and their agreement is what keeps that safe. A policy that chooses
-its underlying per tick declares nothing and is not checked.
+`declared_underlyings` lets an experiment refuse, before it runs, a
+policy whose declared underlying differs from the one its clock steps
+on. A policy that declares none is not checked.
 
 ## Decisions
 
@@ -56,5 +58,5 @@ its underlying per tick declares nothing and is not checked.
 | **The book, not the fill log** | The view by replay is what a live loop hands a policy too; no netting of a fill vector. |
 | **Stateless `decide`** | No setup to test, deterministic replay, no question of mutate versus rebuild between ticks. |
 | **`decide` receives data already cut at `t`** | The old code enforced no-lookahead with a view handed in at runtime, which a caller could skip; a cut the type carries cannot be skipped. |
-| **`t` explicit** | A schedule asks "is this my entry time" without digging through timestamps, and the engine gets a trivial crosscheck against the cutoff. |
+| **`t` explicit** | A schedule asks "is this my entry time" without digging through timestamps. |
 | **Check the time in `decide`, narrow the calls with `tick_times`** | The check keeps the policy correct on any clock; the schedule saves calls. |
