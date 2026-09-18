@@ -102,7 +102,7 @@ Progress toward vision:
    `load_experiment` (stdlib `TOML` + per-sum-type builder registries);
    `scripts/run_experiment.jl <config.toml> [--save] [--out-dir <dir>]`
    prints the result, and optionally persists it / renders artifacts.
-   Parallel sweeps are future work.
+   Parallel sweeps are in the backlog.
 7. **Persistence + identity** -- `RunStore` writes runs to a
    Hive-partitioned parquet tree at `<root>/runs/run_id=<full_hash>/`.
    **A run folder has two jobs.** It keeps the inputs needed to run the
@@ -131,7 +131,7 @@ Progress toward vision:
    dependencies by elimination. The manifest is the index over the record
    and carries **one count per output table**, all checked on load: a
    truncated table is not an empty one. The manifest `schema_version`, now
-   7, refuses every earlier schema; none of them holds a curve, a failure
+   8, refuses every earlier schema; none of them holds a curve, a failure
    table, or the counts that protect them, to migrate from.
    Every value that changes a result is either in `core_hash` -- the data
    specs, clock, agent, window, the venue's `fill_rule` / `cost_model`,
@@ -143,7 +143,7 @@ Progress toward vision:
    are trusted as stable, so a divergence attributes to code or
    dependencies by elimination. Cross-run queries are DuckDB
    SQL against the parquet glob. Compute reuse (skip the backtest on a
-   `core_hash` hit) and a curation gate are the next slices.
+   `core_hash` hit) and a curation gate are in the backlog.
 
 Visualization is added incrementally alongside each stage, not as a phase
 of its own.
@@ -198,10 +198,69 @@ failed.** What the review deferred is in the backlog below.
 
 ## In flight
 
-Nothing. The ledger rebuild finished on 2026-09-15; the next work is the
-backlog below, where **Second concrete policy** and **Official closing
-prices instead of the session-close print** are the two items that most
-directly advance [vision.md](vision.md).
+**The module-docs pass**, opened 2026-09-18 from an audit of every module
+against design rules 6, 8, 10 and 11. `data` and `pricing` landed in
+PR #19 and are the target shape. The prep PR made the decisions the
+rest share, so no later PR touches this file or another module's doc:
+the backlog triage (nine entries added, fourteen future-work items
+dropped), the ownership below, the SpotPrice exposure's home, and the
+cross-module code fixes (`get_slice` is `slice`; two docstrings were
+bound to the wrong method; `_pop_type!` mutated nothing). Four module
+PRs follow, in parallel, each touching only its own doc and sources:
+policies + agents; backtest + metrics; experiment + persistence; ledger.
+Then a `viz.md`. Commit order inside each: delete the rule 6 and rule 10
+sections; rewrite, fixing the false claims; shrink headers and
+docstrings to rule 8; local code fixes.
+
+Ownership, so two docs stop stating one thing. Run identity is
+`experiment.md`'s; persistence keeps one sentence (the id is the
+projection's hash, computed elsewhere, and provenance never enters it).
+The venue decision is `backtest.md`'s; experiment keeps one (the two
+venue values are `Experiment` fields in `core_hash`). The Sutton-Barto
+split is `agents.md`'s. The book-fold sentence lives in `decide`'s
+docstring only. The SpotPrice session exposure is `backtest.md`'s: the
+`data` module promises nothing about sessions, the record does not carry
+one, and the structural fix is the official-close entry below.
+
+Dropped future work, deleted rather than parked because no decision
+stands behind it and [vision.md](vision.md) carries the direction: the
+live-trading bridge, a risk-free tenor, per-contract metric views,
+kwargs into `Experiment`, policy-local state, trainer submodules,
+learning and champion/challenger agents, agent snapshots, net-price and
+partial fills and margin, a non-penny tick, ledger seeding, `drop_run`,
+cross-run viz recipes.
+
+Per-PR checklists; a PR deletes its own when it lands.
+
+- **policies + agents.** Future work sections out. policies.md says
+  strikes snap to the slice at one place and to the chain at another;
+  the chain is right, and the `daily_short_strangle.jl` header still
+  says slice. Owns lists omit `tick_times`. The two docs share a
+  diagram, the fold paragraph, the RL split and a future-work item;
+  keep each once, in its owner.
+- **backtest + metrics.** Future work out. `parse_polygon_ticker` in
+  backtest.md is `parse_massive_ticker`. metrics.md gives `marked_curve`
+  a return type it lacks, and it and `dispatch.jl` explain the
+  nothing-curve arm with causes that cannot happen: only `load_run`
+  produces one. The pairing rule omits `Expiry`. `_ADHOC_CLOSURES` keeps
+  the const and drops the promise. `settlement.jl`'s 55-line header.
+- **experiment + persistence.** Future work out. experiment.md says it
+  owns one struct and lists two; it and `experiment.jl` give the wrong
+  nothing-curve cause; no Conventions consulted section (rule 5).
+  persistence.md: schemas as tables, SQL how-tos, the version-by-version
+  history, seven statements of the per-stage counts, `store.jl`'s
+  51-line header; the store does not own `artifacts/`, a script builds
+  the path by hand. Identity trimmed to the sentence above. The
+  `round_trips.parquet` "revisit when" clause out.
+- **ledger.** Future work out; assignment and exercise are a backlog
+  entry now. The doc says every promise is enforced in `append.jl`
+  (four are not), that `exercise` and `delivery` are unread (identity
+  reads both), and "never stored" where it means never persisted.
+  `cash.jl` points at a retired proposal. The exported-surface inventory
+  and the invariants list that copies `commit!`'s docstring go.
+- **viz.** Needs `docs/modules/viz.md`: recipes only, Plots stays in
+  scripts; a marked curve plots its breaks as gaps, never a value; one
+  selector per recipe. Then the comment in `pnl.jl` shrinks to a line.
 
 ## The ledger rebuild, finished 2026-09-15
 
@@ -752,22 +811,15 @@ intended direction, but not currently in flight.
   minute tree. That changes results and ids change with them. Parked
   2026-09-13 from the PR #13 review finding; the vendor detail recorded
   2026-09-15 from the retired identity note.
-- **Leaning out the architectural docs.** Pass over `docs/modules/*`
-  (and the top-level docs) to bring them in line with design rule 6 --
-  invariants and boundaries kept, drift-prone implementation detail
-  (magic numbers, internal data structures, incidental library names,
-  API walkthroughs) dropped. Motivation: resuming the library after a
-  few-week pause, the docs should be the trustworthy entry point to read
-  back in from. `data.md` is the first pass / template; the other module
-  docs follow. `data.md` (new) follows the template from the
-  start. Parked after PR #9 (2026-09-08); no slice in progress.
 - **Second concrete policy** -- unblocked now that settlement is
   honest. Candidate: a daily iron condor (same scheduled-gate /
   `invert_delta` shape, four legs instead of two). Once the duplication
-  is visible, decide whether to extract a `Structure` abstraction
-  (`policies.md` Future work) or keep policies as 4-leg inline
-  `decide` bodies. Parked 2026-09-08 behind the settle item, which
-  landed with slice 3 of the ledger rebuild.
+  is visible, decide whether to extract a structure helper layer
+  (credit, max loss, wing width, breakevens, decomposing into legs) or
+  keep policies as inline `decide` bodies; deferred until the
+  duplication says what the helper surface should expose. Parked
+  2026-09-08 behind the settle item, which landed with slice 3 of the
+  ledger rebuild.
 - **Reproducibility harness for stored runs.** The comparison itself
   landed as `reproduce(store, run_id)`; what remains is the harness around
   it. Opt-in, data-gated integration tests that reproduce every stored
@@ -863,3 +915,48 @@ intended direction, but not currently in flight.
   second method rather than a branch. Parked because one vendor is
   configured: the seam is worth its cost when a second lands, and
   guessing its shape from one example is how the wrong seam gets built.
+- **AM settlement.** `:session_open` stays unwritten: no AM-settled
+  underlying is in the contract table to test it against, and an
+  untested settlement rule is worse than an absent one. The gap is named
+  at both ends, `load_experiment` refusing an `AMSettled` config and
+  `settlements` throwing `UnsupportedSettlement`. Trigger: an AM-settled
+  underlying entering the table. Parked 2026-09-18 from backtest.md's
+  future-work clause.
+- **Atomic saves.** `save_run` writes in place, so a crash mid-save
+  leaves a partial run directory; the manifest counts refuse it on load,
+  but it sits in the store until removed by hand. Write-to-temp-then-
+  rename would make a run whole or absent. Parked 2026-09-18; `store.jl`
+  and persistence.md called it queued with no record behind them.
+- **Orchestration next slices.** Compute reuse (skip the backtest on a
+  `core_hash` hit at a clean tree on the same commit), a curation gate
+  (draft / accept / retract on stored runs) and a parallel sweeps
+  runner. Named as next in the progress narrative since the persistence
+  round; parked 2026-09-18 so the module docs stop carrying them.
+- **Assignment and exercise as events.** Deferred under the lifecycle's
+  named no-early-assignment assumption. They would be new kinds with the
+  same header, due once a dividend source exists, because early
+  assignment is a real risk near expiry and around ex-dividend dates.
+  Parked 2026-09-18 from ledger.md.
+- **Capital / NAV denominator.** Capital is fixed at 1 in the optional
+  metrics: at a zero rate a constant base cancels from every ratio, so a
+  kwarg would only be a contract to maintain, and return-shaped metrics
+  are P&L-shaped. A NAV series is what would earn a denominator. Parked
+  2026-09-18 from metrics.md.
+- **Unknown config keys.** Only the `[data.*]` and `[venue]` builders
+  refuse unknown keys; `[policy]`, `[agent]`, `[outputs]` and the curve
+  builders drop them silently, so a typo'd key takes the default and the
+  run id does not move. Refuse everywhere; a stored config that carried
+  a typo becomes a refusal, which is the point. Parked 2026-09-18;
+  `config.jl` called this recorded when it was not.
+- **Rule 7 holes found by the docs audit.** Three places where an
+  ordinary empty stands for "not ever". (1) `at` on a surface reader
+  returns an empty vector when the chain is present but `build_surface`
+  yields nothing, and caches it, while `asof` names the same failure
+  `DerivationExhausted`; the strangle policy reads `at`. (2) A stored
+  `Manifest.toml` that fails to parse yields an empty version map, so
+  `reproduce` reports no recorded version changes for a corrupt
+  document. (3) `run_backtest` completes with an empty ledger when the
+  clock selector has no data in the window; `run_experiment` guards it
+  one layer up, so only a direct caller sees the empty. Each wants
+  either a named error or a doc commitment to the empty; undecided
+  which. Parked 2026-09-18.
