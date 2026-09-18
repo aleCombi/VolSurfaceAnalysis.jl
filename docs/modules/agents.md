@@ -22,13 +22,5 @@ through to its policy.
 |---|---|
 | **Per-tick query, not policy-change events** | One loop shape, mirroring the per-tick `decide`; a refit-on-schedule agent is a calendar check inside `current_policy`. |
 | **`current_policy` sees `(t, cut, book)`** | A refit needs `t`; a lookback reads through the cut, history before the window visible and nothing after `t`; sizing reads the book. |
-| **An agent is not a policy** | One evolves over time and is mutable, the other decides for one tick and is frozen. An agent that never changes is a `StaticAgent`, not a policy worn as an agent. |
+| **An agent is not a policy** | Sutton & Barto's split, adopted as stated: the policy is the decision function, the agent carries it and the machinery that changes it. One evolves over time and is mutable, the other decides for one tick and is frozen; a policy built on a fitted model is still a frozen policy, and the fitting lives on its agent. |
 | **The engine accepts both** | `run_backtest(policy)` wraps `StaticAgent(policy)`, so every backtest shares one driver path and scoring a single candidate needs no agent. |
-
-## Conventions consulted
-
-- **Policy and agent as two types.** Sutton & Barto, *Reinforcement
-  Learning*: the policy is the decision function, the agent carries it
-  and the machinery that changes it. Adopted as stated rather than
-  overloading one type with both; a policy built on a fitted model is
-  still a frozen policy, and the fitting lives on its agent.
