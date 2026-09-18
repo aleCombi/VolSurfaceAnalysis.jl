@@ -1,8 +1,9 @@
 # `policies` module
 
 The engine walks the experiment's clock and calls `decide` on every
-tick of it; `decide` returns the orders to send. Which orders depends on the strategy, through dispatch
-on the policy type, and on three inputs:
+tick of it; `decide` returns the orders to send. Which orders depends
+on the strategy, through dispatch on the policy type, and on three
+inputs:
 
 - the time,
 - the market data, cut at that time,
