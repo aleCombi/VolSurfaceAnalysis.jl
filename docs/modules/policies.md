@@ -1,10 +1,15 @@
 # `policies` module
 
-A policy is a pure decision function. The engine calls `decide` once
-per tick with `(t, cut, book)` and books what comes back; the policy
-returns orders, not a portfolio, and is frozen for the tick it was
-handed out on. Anything that changes between ticks -- a refit, a swap,
-a schedule that advances -- is the [`agents`](agents.md) layer's.
+The engine calls `decide` on every tick, and `decide` returns the
+orders to send. Which orders depends on the strategy, through dispatch
+on the policy type, and on three inputs:
+
+- the time,
+- the market data, cut at that time,
+- the current book.
+
+A policy does not change between calls; when something has to change
+over time, that is the [`agents`](agents.md) layer's job.
 
 ## The decision
 
@@ -74,6 +79,6 @@ change over time ([`agents`](agents.md)); lot lifecycle -- there is no
 | **A `Close` leg names its group** | A counter-trade left the engine to guess intent from direction, and it guessed wrong at a side flip. A position effect is what a broker ticket says. |
 | **The book, not the fill log** | The view by replay is what a live loop hands a policy too; no netting of a fill vector. |
 | **Stateless `decide`** | No setup to test, deterministic replay, no question of mutate versus rebuild between ticks. |
-| **`TimeCut` in the signature** | The legacy code enforced no-lookahead with a view passed at runtime; the type makes it unbypassable. |
+| **`decide` receives data already cut at `t`** | The old code enforced no-lookahead with a view handed in at runtime, which a caller could skip; a cut the type carries cannot be skipped. |
 | **`t` explicit** | A schedule asks "is this my entry time" without digging through timestamps, and the engine gets a trivial crosscheck against the cutoff. |
 | **Gate in `decide`, narrow with `tick_times`** | The gate keeps the policy correct on any clock; the schedule only saves calls. |
