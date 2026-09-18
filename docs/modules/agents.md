@@ -16,12 +16,6 @@ and the engine knows nothing of an agent's internals.
 loader and the engine ask one object; `StaticAgent` delegates both to
 its one policy.
 
-## Boundaries
-
-**Owns** `Agent`, `current_policy`, `StaticAgent`, the two delegations.
-**Does not own** the decision ([`policies`](policies.md)); the tick
-loop ([`backtest`](backtest.md)); P&L (downstream).
-
 ## Decisions
 
 | Decision | Why |

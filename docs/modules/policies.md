@@ -1,7 +1,7 @@
 # `policies` module
 
-The engine calls `decide` on every tick, and `decide` returns the
-orders to send. Which orders depends on the strategy, through dispatch
+The engine walks the experiment's clock and calls `decide` on every
+tick of it; `decide` returns the orders to send. Which orders depends on the strategy, through dispatch
 on the policy type, and on three inputs:
 
 - the time,
@@ -45,14 +45,6 @@ settlement.
 one underlying: the clock selector says *when* to step, fills price per
 leg, and their agreement is what keeps that safe. A policy that chooses
 its underlying per tick declares nothing and is not checked.
-
-## Boundaries
-
-**Owns** `Policy`, `decide`, `declared_underlyings`, `tick_times`,
-`NoOpPolicy`, `DailyShortStrangle`.
-**Does not own** the tick loop and fills ([`backtest`](backtest.md));
-change over time ([`agents`](agents.md)); lot lifecycle -- there is no
-`close!`, and expiries are booked by the engine; P&L (downstream).
 
 ## Decisions
 
