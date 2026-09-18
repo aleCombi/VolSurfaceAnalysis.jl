@@ -17,48 +17,10 @@ A metric's answer is only as honest as its sample unit.
   have a *period of time* as their unit. They read the marked curve, whose
   points are session closes, and annualise by sessions per year.
 
-Before this round every metric read a series of closed trades, so Sharpe
-multiplied by the square root of 252 while its observations were trades,
-not days: a strategy closing about 252 structures a year looked plausible
-by accident and a weekly strategy was overstated by roughly a factor of
-two. Holding the same trades overnight or for a month produced the same
-ratio. `max_drawdown` had the same defect in another form -- a curve of
-closed trades is flat while a position is open, so a book could move
-deeply against itself and recover with no drawdown recorded at all.
 
-## Data flow
-
-```mermaid
-flowchart LR
-    Ledger[Ledger] --> TP([trade_pnl])
-    TP --> Trades[Vector of USD per trade]
-    Ledger --> MC([marked_curve])
-    Data[(market data)] --> MC
-    MC --> Curve[MarkedCurve]
-    Trades --> CM([compute_metrics])
-    Curve --> CM
-    CM --> NT[NamedTuple of values]
-```
-
-Only the curve needs market data, and only where the book is not flat.
-Everything else is a function of the ledger. Metrics depend on the ledger,
-never the reverse.
 
 ## The marked curve
 
-```julia
-struct MarkedCurve
-    timestamps      :: Vector{DateTime}   # session closes that were marked
-    profit          :: Vector{Float64}    # marked profit in USD at each
-    unmarked_at     :: Vector{DateTime}   # session closes that could not be
-    unmarked_reason :: Vector{Symbol}     # why, one per entry
-end
-
-marked_curve(L::Ledger, data, u::Underlying, from, to) -> MarkedCurve
-```
-
-Two pairs of parallel vectors, and a session is in exactly one of them.
-Derived views: `n_marked`, `n_unmarked`, `session_changes`.
 
 ### The accounting identity
 
@@ -169,31 +131,10 @@ ratio here: Sharpe on dollar changes is Sharpe on returns for capital 1,
 maintain. `test_optional.jl` pins the cancellation by scaling a curve
 instead.
 
-Capital becomes meaningful only when the risk-free hurdle is non-zero, the
-base compounds, or results are printed as percentages. The risk-free rate
-itself belongs to market data (`RateCurve`), not to a metric parameter, and
-is zero in this round.
 
-When capital does start to matter, the denominator is a choice and not an
-obvious one: funds use NAV, option backtests commonly declare a notional
-base, and the Cboe option-writing indices use fully collateralised
-notional. Broker margin is the one candidate to refuse outright -- it is
-not a universal base, so a reported ratio would depend on whose account
-the strategy was imagined in.
-
-**One caveat survives the sampling fix.** Standard deviation treats
-frequent small gains and rare large losses symmetrically, so a correctly
-computed Sharpe still flatters a short-premium book, whose return shape is
-exactly that. Fixing the sample unit fixed the *scaling*; it did nothing
-about the statistic's blindness to skew. Reading a short strangle's Sharpe
-without that in mind is the remaining way to be misled by this number, and
-`sortino` is in the table partly because it is not blind in the same way.
 
 ## Trade-level input
 
-```julia
-trade_pnl(L::Ledger; unit = :structure) -> Vector{Float64}
-```
 
 One entry per `(group, closed_at)` by default -- a strangle closed at one
 instant is one trade -- summed in whole cents and converted once;
@@ -214,72 +155,8 @@ source and is never whole cents (the mid of 1.05/1.06 is 1.055), so the
 unrealised term of a marked profit is float arithmetic from the start. The
 realised term stays integer until the boundary.
 
-## Always-on metrics
 
-Cheap, unparameterized, universally interesting. The orchestrator computes
-these unconditionally on every call -- they are not listed in an
-experiment's `OutputSpec`, because that is for opt-in optional metrics with
-kwargs.
 
-| Function | Input | Returns | Empty-input behavior |
-|---|---|---|---|
-| `total_pnl(trades)` | trades | `Float64` | `0.0` |
-| `n_round_trips(trades)` | trades | `Int` | `0` |
-| `n_opens(L)` | ledger | `Int` | `0` |
-| `n_closes(L)` | ledger | `Int` | `0` |
-| `hit_rate(trades)` | trades | `Float64` | `NaN` |
-
-`total_pnl` is deliberately the **realised** total and not the curve's last
-level: the two differ by the unrealised profit of whatever is still open,
-and quietly widening the meaning of a reported figure is how a comparison
-between two runs stops being one.
-
-`hit_rate` returns `NaN` (not `0.0`) with no trades because hit rate is
-genuinely undefined then; `NaN` propagates honestly through downstream math
-instead of silently reading as "0% wins". It counts strictly positive PnL,
-so breakeven trades are not wins.
-
-`n_opens` and `n_closes` are plain functions of the ledger. That is the
-home they have now that the series wrapper which carried them as fields is
-gone; an expiry is not a closing fill, so a book that expired rather than
-traded out reports opens with no closes.
-
-## Optional metrics
-
-Symbol-addressable, kwarg-carrying, opt-in. The `Experiment` orchestrator
-passes its `outputs.metrics` (a `Vector{Symbol}`) straight through to
-[`compute_metrics`](@ref), so the public symbol *is* the contract.
-
-Every optional metric has the same signature, `f(trades, curve; kwargs...)`,
-and reads whichever argument is its sample unit. The *Samples* column below
-says which that is; it is a fact about the function, stated in its
-docstring and pinned by its tests, not a field of the dispatch table.
-
-| Symbol | Samples | Default kwargs | Returns | Empty-input behavior |
-|---|---|---|---|---|
-| `:sharpe`        | sessions | `(periods_per_year=252, risk_free=0.0)` | `Float64` | `NaN` (also on zero variance or <2 session changes) |
-| `:sortino`       | sessions | `(periods_per_year=252, risk_free=0.0)` | `Float64` | `NaN` (also when no downside or zero downside deviation) |
-| `:max_drawdown`  | sessions | -- | `Float64` (peak-to-trough drop in marked profit, always >= 0) | `0.0` |
-| `:volatility`    | sessions | `(periods_per_year=252,)` | `Float64` (annualized std of session changes) | `NaN` |
-| `:profit_factor` | trades   | -- | `Float64` (gross wins / gross losses, or `Inf` when no losses) | `NaN` (also on all-breakevens) |
-
-Sampling convention: one observation per pair of **adjacent marked**
-session closes. `periods_per_year` is therefore the number of trading
-sessions in a year, which is what annualising by the square root of 252 has
-always claimed to mean.
-
-## Dispatch
-
-```julia
-compute_metrics(L::Ledger, curve::Union{MarkedCurve,Nothing},
-                requested::Vector{Symbol}=Symbol[];
-                kwargs::AbstractDict{Symbol,<:NamedTuple}=Dict{Symbol,NamedTuple}())
-    -> NamedTuple
-```
-
-Returns a `NamedTuple` whose keys are the always-on core names first (in
-fixed order: `:total_pnl`, `:n_round_trips`, `:n_opens`, `:n_closes`,
-`:hit_rate`), followed by every symbol in `requested`, in the order given.
 
 **The two inputs.** The ledger is the authority for the trade side:
 `trade_pnl(L)` is derived once inside, and the two fill counts are read
@@ -346,78 +223,6 @@ public API shapes (checked 2026-09-14).
 | Same, on when to graduate away from a symbol table | [Optim.jl minimization](https://julianlsolvers.github.io/Optim.jl/stable/user/minimization/) and [StatsBase `pacf`](https://github.com/JuliaStats/StatsBase.jl/blob/master/src/signalcorr.jl) | Optim selects algorithms by singleton *instances* (`LBFGS()`), which is what a table graduates to once each algorithm needs its own dispatch-driven behaviour; StatsBase's `method::Symbol=:regression` is the low-ceremony end. Five parameterless reductions sit at the StatsBase end. |
 | `Union{MarkedCurve,Nothing}` for "this derived result could not be computed" | [Julia manual FAQ, nothingness](https://docs.julialang.org/en/v1/manual/faq/) and [Missing Values](https://docs.julialang.org/en/v1/manual/missing/) | `nothing` is "the absence of a meaningful return value", and `Union{T,Nothing}` is named as the recommended type "when a value `x` of type `T` exists only sometimes". `missing` is reserved for the statistical sense -- "no value is available for a variable in an observation, but a valid value theoretically exists". A curve that could not be built is absence of a thing, not an unobserved observation; an empty curve would be worse than both, conflating "not computed" with "computed, came out empty". |
 
-## Responsibility boundaries
 
-**Owns:** `MarkedCurve` and its derived views, the `marked_curve` builder
-and `mark_price`, `trade_pnl`, the `cents_to_usd` boundary, the always-on
-core metric functions (`total_pnl`, `n_round_trips`, `hit_rate`, `n_opens`,
-`n_closes`), the optional symbol-addressable metric set (`sharpe`,
-`sortino`, `max_drawdown`, `volatility`, `profit_factor`), and the
-`compute_metrics` dispatch entry point.
 
-**Does NOT own:**
 
-- Ledger construction, lot pairing, cash rules and round trips. That is
-  the [`ledger`](ledger.md), fed by the [backtest engine](backtest.md).
-- Settlement, and the session machinery the grid is built from. Lifecycle
-  and `session_closes` belong to the [backtest](backtest.md) module; this
-  module consumes the grid.
-- Opening market data. `marked_curve` takes an already-open reader map;
-  the [experiment](experiment.md) orchestrator and `load_run` own the
-  lifetime.
-- Persistence, plotting, reporting. Downstream layers.
-
-## Failure modes
-
-| Condition | Behavior |
-|---|---|
-| Empty ledger | `trade_pnl` is empty; `marked_curve` is a flat zero curve over the window's sessions. |
-| Window covering no whole session | The curve has no points and no unmarked entries: temporal absence. |
-| An open lot with no quote mid and no surface price | `mark_price` throws `UnpriceableLeg(:no_mark)`; `marked_curve` records the session in `unmarked_at` and warns with the count. |
-| A calendar-open date with no prints in its window | The session is `:unexpected_gap` in `unmarked_at`, stamped at the nominal 16:00 ET close. |
-| Two marked sessions with an unmarked one between them | `session_changes` yields no observation for that pair. |
-| `MarkedCurve` built from mismatched or unsorted vectors | `ArgumentError` naming which pair disagrees; nothing is constructed. |
-| `trade_pnl` called with an unknown `unit` | `ArgumentError` naming the two units. |
-| `compute_metrics` called with an unknown symbol | Errors loudly with the offending symbol and the list of known names. |
-| `compute_metrics` with `curve === nothing` | **Every** optional metric is omitted, `:profit_factor` included though it needs no curve: each metric takes both inputs, so the table cannot say which ones to keep. The always-on core is unaffected. |
-| Sharpe / Sortino on `<2` session changes or zero variance | Returns `NaN`. |
-| Volatility on `<2` session changes | Returns `NaN`; on zero variance it returns `0.0`, which is the true dispersion, not an unanswerable question. |
-| Sortino on constant *negative* changes | Defined, not `NaN`: the mean is negative and the downside deviation is non-zero. `NaN` is for no downside at all. |
-| Profit factor on all-breakeven or empty trades | Returns `NaN`. Wins with zero losses returns `Inf`. |
-
-## Future work
-
-- A non-zero risk-free rate, which must choose the short-end tenor for the
-  per-session hurdle and retain the intentional coupling to the curve
-  `SurfaceFrom` uses.
-- Capital / NAV reporting, once a policy sizes from equity or results are
-  printed as percentages.
-- Aggregating simultaneous samples for path metrics over a finer grid than
-  one session.
-- Per-contract metric views (Sharpe / win-rate broken out by underlying or
-  expiry bucket).
-- Promoting per-metric kwargs into `Experiment` itself once at least one
-  workflow needs the overrides to survive into provenance.
-
-## Layout
-
-```
-src/metrics/
-    curve.jl      # MarkedCurve, cents_to_usd, n_marked / n_unmarked, session_changes
-    marks.jl      # mark_price + marked_curve, the module's one market-data read
-    trades.jl     # trade_pnl(::Ledger), the per-trade dollar vector
-    core.jl       # total_pnl, n_round_trips, hit_rate, n_opens, n_closes
-    optional.jl   # sharpe, sortino, max_drawdown, volatility, profit_factor
-    dispatch.jl   # _METRIC_TABLE + compute_metrics
-
-test/metrics/
-    test_curve.jl
-    test_marks.jl
-    test_trades.jl
-    test_core.jl
-    test_optional.jl
-    test_dispatch.jl
-```
-
-All files are `include`d into the top-level `VolSurfaceAnalysis`
-module; no submodule wrappers.
