@@ -14,36 +14,9 @@ learning, policy swaps over time -- belongs to the [`agents`](agents.md)
 layer. A Policy itself is frozen for the duration of the tick on
 which it was handed out.
 
-## Data flow
-
-```mermaid
-flowchart LR
-    Engine[Backtest engine] --> Cut[TimeCut]
-    Engine --> Book[Book]
-    Engine --> Clock[t]
-    Cut --> D([decide])
-    Book --> D
-    Clock --> D
-    Policy[Policy config] --> D
-    D --> Orders[Vector Order]
-    Orders --> Engine
-```
-
-The engine builds the time-cut data view, asks the agent for the
-current policy, then hands `(t, cut, book)` to `decide` to produce the
-orders for this tick.
 
 ## The abstraction
 
-```julia
-abstract type Policy end
-
-decide(p::Policy, t::DateTime, data::TimeCut, book::Book) -> Vector{Order}
-
-tick_times(p::Policy, data::MarketData, from, to) -> Union{Nothing, Vector{DateTime}}
-
-declared_underlyings(p::Policy) -> Tuple of Underlying
-```
 
 One decision method, four arguments, one return value. Concrete
 policies subtype `Policy` and implement `decide`. The empty return
@@ -82,10 +55,6 @@ exist in the data.
 
 ### `NoOpPolicy`
 
-```julia
-struct NoOpPolicy <: Policy end
-decide(::NoOpPolicy, _, _, _) = Order[]
-```
 
 The trivial policy. Useful as a smoke test for the engine and as
 a base case in property tests.
@@ -133,39 +102,6 @@ OTM put + short OTM call. Strikes are picked by target absolute delta
 (via [`invert_delta`](pricing.md)) and snapped to the slice's observed
 strike grid so the engine's `resolve_quote` exact match succeeds.
 
-```julia
-struct DailyShortStrangle <: Policy
-    underlying      :: Underlying
-    entry_time      :: Time
-    expiry_interval :: Period
-    put_delta       :: Float64       # target |Δ| in (0, 1)
-    call_delta      :: Float64       # target |Δ| in (0, 1)
-    quantity        :: Int           # contracts per leg
-end
-
-function decide(p::DailyShortStrangle, t::DateTime, data::TimeCut, ::Book)
-    Time(t) == p.entry_time || return Order[]                  # cheap gate
-    surface = only_or_missing(at(data, VolatilitySurface, p.underlying, t))
-    ismissing(surface) && return Order[]
-    expiry  = _first_expiry_on_or_after(surface, t + p.expiry_interval)
-    expiry === nothing && return Order[]
-    chain   = at(data, OptionQuote, p.underlying, t); isempty(chain) && return Order[]
-
-    K_put_raw  = invert_delta(surface, expiry, Put,  p.put_delta)
-    K_call_raw = invert_delta(surface, expiry, Call, p.call_delta)
-    (K_put_raw === nothing || K_call_raw === nothing) && return Order[]
-
-    put_strikes  = _quoted_strikes(chain, expiry, p.underlying, Put)
-    call_strikes = _quoted_strikes(chain, expiry, p.underlying, Call)
-    K_put  = _snap_to_sorted(put_strikes,  K_put_raw)
-    K_call = _snap_to_sorted(call_strikes, K_call_raw)
-    (K_put === nothing || K_call === nothing) && return Order[]
-    return Order[Order(:daily_short_strangle, [
-        Leg(ContractKey(p.underlying, K_put,  expiry, Put),  Short, p.quantity, Open),
-        Leg(ContractKey(p.underlying, K_call, expiry, Call), Short, p.quantity, Open),
-    ])]
-end
-```
 
 The two legs go out as one `Order`, so the venue fills them whole or
 not at all and the ledger samples them as one structure. `quantity` is
@@ -193,38 +129,4 @@ Three properties worth noting:
   trading the surviving leg alone. A one-legged "strangle" is a
   different structure and silently degrading would corrupt backtests.
 
-## Future work
 
-- **Explicit policy-local state.** Some policies will want to thread
-  micro-state through (e.g. an intra-tick counter). Today that
-  belongs to the surrounding Agent; if a pattern emerges where the
-  state really is Policy-scoped, the signature can grow to
-  `decide(p, t, data, book, state) -> (orders, state')` with a
-  default `init_state(p, _) = nothing`.
-- **Structures (iron condor, strangle, vertical) as first-class.**
-  Today legs are constructed inline -- `DailyShortStrangle` builds two
-  `Leg`s directly in `decide`. A scheduled iron condor would follow
-  the same shape, swapping `invert_delta` for a 4-strike selector and
-  returning one four-leg `Order`. Once two or three such policies
-  exist, a `structures` module with helpers (credit, max-loss,
-  wing-width, breakevens) that decompose into legs becomes worth
-  introducing. Deferred until the duplication tells us what the helper
-  surface should expose.
-- **Live-trading bridge.** The same `decide` signature can drive a
-  live loop: replace the backtest engine with one that resolves
-  quotes from a broker feed instead of the quote chain, with the same
-  Agent handing out the same Policy.
-
-## Layout
-
-```
-src/policies/
-    policy.jl                  # abstract Policy + decide + NoOpPolicy
-    daily_short_strangle.jl    # DailyShortStrangle + helpers
-
-test/policies/
-    test_policy.jl             # both abstractions + DailyShortStrangle
-```
-
-All files are `include`d into the top-level `VolSurfaceAnalysis`
-module; no submodule wrappers.

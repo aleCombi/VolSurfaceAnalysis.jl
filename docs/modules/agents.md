@@ -13,42 +13,9 @@ changes it over time. A policy that depends on a periodically-refit
 ridge model is still a frozen Policy; the *fitting cadence and the
 fit itself* live on the Agent.
 
-## Data flow
-
-```mermaid
-flowchart LR
-    Engine[Backtest engine] --> Clock[t]
-    Engine --> Cut[TimeCut]
-    Engine --> Book[Book]
-
-    Agent[Agent] --> CP([current_policy])
-    Clock --> CP
-    Cut --> CP
-    Book --> CP
-    CP -->|Policy| D([decide])
-
-    Cut --> D
-    Book --> D
-    Clock --> D
-    D --> Orders[Vector Order]
-    Orders --> Engine
-```
-
-Per tick: the engine asks the Agent for the current Policy, then
-calls `decide` on it. The same `(t, cut, book)` triple is visible to
-both calls.
 
 ## The abstraction
 
-```julia
-abstract type Agent end
-
-current_policy(a::Agent, t::DateTime, data::TimeCut, book::Book) -> Policy
-
-tick_times(a::Agent, data::MarketData, from, to) -> Union{Nothing, Vector{DateTime}}
-
-declared_underlyings(a::Agent) -> Tuple of Underlying
-```
 
 One method, four arguments, one Policy returned; plus the optional
 `tick_times` override (default `nothing`; `StaticAgent` delegates to
@@ -68,12 +35,6 @@ clock and the strategy name one underlying.
 
 ### `StaticAgent`
 
-```julia
-struct StaticAgent{P<:Policy} <: Agent
-    policy::P
-end
-current_policy(a::StaticAgent, _, _, _) = a.policy
-```
 
 The trivial agent: holds one Policy and returns it forever. Bridges
 the fixed-policy case into the Agent-driven engine so every backtest
@@ -101,66 +62,8 @@ base case.
 - The decide function. That is the [`policies`](policies.md) module.
 - The tick loop. That is the [backtest engine](backtest.md); the
   engine drives both `current_policy` and `decide`.
-- Training algorithms. Concrete trainer Agents (ridge-refit,
-  walk-forward, online-update) will live alongside their fitting
-  code in dedicated submodules, layered on top of this abstraction.
 - Reporting / PnL aggregation. Downstream of the engine, just like
   for policies.
 
-## Adding a concrete agent
 
-A walk-forward Agent that retrains a fitted Policy at the start of
-each month looks like:
 
-```julia
-mutable struct MonthlyRefitAgent{F,P<:Policy} <: Agent
-    fit::F                       # (t, cut, book) -> Policy
-    current::P
-    last_refit_month::Tuple{Int,Int}   # (year, month)
-end
-
-function current_policy(a::MonthlyRefitAgent, t::DateTime, cut::TimeCut, book::Book)
-    ym = (year(t), month(t))
-    if ym != a.last_refit_month
-        a.current = a.fit(t, cut, book)
-        a.last_refit_month = ym
-    end
-    return a.current
-end
-```
-
-The Agent stays small: a cadence check plus a callback that produces
-the next frozen Policy. The Policy itself remains a plain `<: Policy`
-struct with the same `decide` contract as any other.
-
-## Future work
-
-- **Online-updating agents.** Today every Agent in scope hands out
-  policies that are frozen between refits. An Agent that updates a
-  parameter on every tick (online ridge, EWMA bandwidth) fits the
-  abstraction unchanged but is not exercised yet.
-- **Multi-policy agents.** An Agent that runs multiple candidate
-  policies in shadow and promotes the best is expressible today
-  (return the winner from `current_policy`), but useful enough to
-  factor out as a reusable `ChampionChallengerAgent`.
-- **Agent-side state-of-the-world snapshots.** A reporting hook to
-  log `current_policy` decisions and the data they were made on, so
-  walk-forward backtests are auditable end-to-end without
-  reconstructing the agent's internal state.
-- **Live-trading bridge.** The same `current_policy` signature can
-  drive a live loop: the live engine asks the Agent for the current
-  Policy on each market event, the Agent owns refit cadence and
-  parameter updates, and the Policy's `decide` produces orders.
-
-## Layout
-
-```
-src/agents/
-    agent.jl      # abstract Agent + current_policy + StaticAgent
-
-test/agents/
-    test_agent.jl
-```
-
-All files are `include`d into the top-level `VolSurfaceAnalysis`
-module; no submodule wrappers.
