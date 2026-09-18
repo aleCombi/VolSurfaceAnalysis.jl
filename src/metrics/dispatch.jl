@@ -1,19 +1,5 @@
-# Symbol-addressable dispatch over the optional metric set.
-#
-# `_METRIC_TABLE` maps each public symbol to (a) the metric function and
-# (b) the default kwargs that symbol carries. Every entry is self-contained: an experiment
-# that requests `:sharpe` gets the baked-in
-# `(periods_per_year=252, risk_free=0.0)` unless it passes an override
-# map. This mirrors the dispatch-by-symbol-with-defaults pattern used by
-# Optim.jl, MLJ.jl, and the rest of the Julia ecosystem for backend
-# selection.
-#
-# Every metric takes both inputs -- per-trade dollars and the marked curve
-# -- and reads whichever is its sample unit. The table therefore records
-# no per-metric input, and adding a metric is one row and one function.
-# The consequence to know: the dispatcher cannot tell a curve-reading
-# metric from a trade-reading one, so when there is no curve it omits the
-# optional set wholesale rather than part of it.
+# `_METRIC_TABLE` and `compute_metrics`: the optional metrics by symbol,
+# each carrying its own defaults.
 
 const _METRIC_TABLE = Dict{Symbol, NamedTuple{(:fn, :defaults)}}(
     :sharpe        => (fn=sharpe,        defaults=(periods_per_year=252, risk_free=0.0)),
@@ -35,25 +21,15 @@ Compute the always-on core metrics (`total_pnl`, `n_round_trips`,
 names first (in fixed order), followed by `requested` symbols in the order
 given.
 
-**The two inputs.** The ledger is the authority for everything about
-trades: `trade_pnl(L)` is derived here, once, and the two fill counts are
-read straight off it. The marked curve is passed in because it is the one
-result that is *not* a function of the ledger -- marking an open lot needs
-market data, so whoever has the data open builds it.
+`trade_pnl(L)` is derived here, once; the curve is passed in because
+building it needs market data. With `curve === nothing` every optional
+metric is omitted rather than reported as `NaN`: an absent key means
+not computed. The omission is wholesale because every metric takes both
+inputs, so `:profit_factor` goes with the rest.
 
-`curve === nothing` is that dependence made visible: the always-on core is
-computed as always, and **every** optional metric is omitted from the
-result rather than reported as `NaN`. An absent key says "not computed";
-`NaN` would say "computed, undefined", which is a different and false
-claim (design rule 7). `load_run` takes that path when a run's market data
-is not on the machine. The omission is wholesale rather than per-metric
-because every metric takes both inputs, so the table does not record which
-one a metric reads; a trade metric such as `:profit_factor` is therefore
-dropped too, even though it needs no curve.
-
-Optional metrics carry their own default kwargs in the `_METRIC_TABLE`. The `kwargs` argument is a per-metric override map:
-`Dict(:sharpe => (periods_per_year=12,))` swaps just the keys you provide
-and leaves the rest of that metric's defaults untouched.
+`kwargs` is a per-metric override map: `Dict(:sharpe =>
+(periods_per_year=12,))` replaces just the keys given and keeps the rest
+of that metric's defaults.
 
 Errors loudly if any requested symbol is not in the dispatch table.
 """

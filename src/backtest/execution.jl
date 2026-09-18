@@ -1,40 +1,17 @@
-# The simulated venue, shaped like Interactive Brokers: how a resolved
-# quote becomes a leg price (the fill rule) and what an order costs (the
-# cost model). Two symbol-to-function tables in the `_METRIC_TABLE` style
-# plus the tick, an integer number of cents. `Fill.fill_rule` is literally
-# the table key.
-#
-# The rule and the model are choices -- nothing about SPY says whether you
-# cross the spread or whose commissions you pay -- so they are the
-# experiment's (`Experiment.fill_rule` / `cost_model`) and enter
-# `core_hash`. The tick is not a choice: `TICK_CENTS` below.
-#
-# The structure rule, that a combo order fills in whole units or not at
-# all, is not a value here: it is `record_order!` plus the engine pricing
-# every leg before anything is written (see `engine.jl`).
-#
-# `:broker_execution` is not a rule of ours and is not in the table: it
-# names a price the broker reported, which no observation reproduces.
-# `check_join` recognises it and does not consult the observation.
+# The simulated venue: the fill rule (a quote to a leg price), the cost
+# model (an order's commission) and the tick.
 
 # ---- price rules ------------------------------------------------------
 
-# Rule addition R5: fill prices are on the venue's tick, rounded away
-# from the trader. Exchanges only trade on the tick, the ledger refuses
-# cash that is not whole cents, and neither synthesized nor modelled
-# quotes are on the tick. The tolerance absorbs the binary noise of
-# `price * 100` (1.07 * 100 is 107.00000000000001), so a quote already on
-# the tick is unchanged; it is the tolerance `contract_cents` uses.
+# Fill prices land on the tick, rounded away from the trader. The
+# tolerance absorbs the binary noise of `price * 100` (1.07 * 100 is
+# 107.00000000000001), so a quote already on the tick is unchanged.
 const _TICK_NOISE = 1e-6
 
-# The tick every underlying the contract table lists trades on: one cent
-# at every premium, under the industry-wide penny interval program
-# (`backtest.md` cites it). Fixed at the experiment boundary and in no
-# config, because a value that cannot vary is not a choice to record --
-# `commit_sha` covers the code version. It stays a parameter below, and on
-# `fill_legs` and `check_join`, because the join check recomputes a fill
-# from an observation and must be able to state the tick it is checking
-# against; a price-dependent tick per class is the model this skips.
+# One cent at every premium for every underlying the contract table lists
+# (the backtest module doc cites the penny program). A parameter of
+# `fill_price`, `fill_legs` and `check_join` so the join check can state
+# the tick it recomputes against.
 const TICK_CENTS = 1
 
 function _cross_spread(bid, ask, side::Side, tick_cents::Int)

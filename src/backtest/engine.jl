@@ -1,19 +1,5 @@
-# Backtest engine.
-#
-# Drives an `Agent` (or a bare `Policy`, wrapped in a `StaticAgent`) over
-# the ticks of a declared `Clock` in `[from, to]`. Per tick: builds a
-# `TimeCut` of the data at `t`, asks the agent for the current `Policy`,
-# asks that policy for orders given the book, prices every leg of each
-# order through the venue (`execution.jl`) and hands the order to the
-# ledger's structure-level writer, which books it whole or not at all.
-# The engine computes, the ledger records: every id, the group, the order
-# record and the events are minted inside `record_order!`, so the engine
-# holds no state beyond the ledger and the book it folds.
-#
-# Tick order: lifecycle, decide, fill, then lifecycle once more at the
-# evaluation endpoint. The lifecycle step has the venue's shape: a
-# function of the cut (`settlement.jl`) computes what settles and at what
-# price, and the loop calls the ledger's own `record_expiry!`.
+# The tick loop, the venue applied to an order, and the cross-record
+# check between the fills and the order journal.
 
 using Dates
 
@@ -22,26 +8,15 @@ using Dates
 """
     UnpriceableLeg
 
-Design rule 7's "a leg that cannot honestly be priced": `contract` at
-`t`, for `reason` `:expired_contract` (`t` is at or after the contract's
-expiry: trading in it has stopped), `:no_quote` (an empty chain, or the
-contract absent from it), `:no_executable_side` (the side the fill rule
-needs is `missing`) or `:no_spot` (the underlying is served but has no
-spot at `t`). Nothing serving the selector stays `UnservedSelector`,
-thrown by `at`. Thrown before anything is written, so no partial
-structure reaches the ledger.
-
-Settling is pricing a leg too -- at intrinsic, against a reference print
--- so [`settlement_price`](@ref) throws the same failure, for `reason`
-`:unexpected_gap` (a date with no prints that the exchange calendar
-calls open: a data gap, never evidence of a closure), `:no_session`
-(the bounded walk back found no session), `:no_session_close` (the cut
-does not reach the contract's expiry, so the settlement session's close
-is not visible: the rule's domain, unreachable from the tick loop) or
-`:pre_open_expiry` (the contract expires before its own listed session
-opens, so a close-settled rule has no close to offer it: the AM-settled
-contract, named rather than blamed on the data). The four are the only
-failures [`settlements`](@ref) catches; a lot they name stays open.
+A leg that cannot honestly be priced (design rule 7): `contract` at `t`
+for `reason`. From the venue: `:expired_contract` (`t` is at or after
+the expiry), `:no_quote` (an empty chain, or the contract absent from
+it), `:no_executable_side` (the side the fill rule needs is `missing`),
+`:no_spot` (the underlying is served but has no spot at `t`). From
+settlement, which is pricing a leg at intrinsic: `:unexpected_gap`,
+`:no_session`, `:no_session_close` and `:pre_open_expiry`, as
+[`settlement_price`](@ref) defines them. Nothing serving the selector
+stays `UnservedSelector`, thrown by `at`.
 """
 struct UnpriceableLeg <: Exception
     contract::ContractKey
@@ -79,17 +54,9 @@ instant it was asked, `stage` which pass asked it (`:settlement` for the
 lifecycle, `:mark` for the marked curve), `subject` names what could not
 be answered, and `reason` is the [`UnpriceableLeg`](@ref) name.
 
-Design rule 7 carried out of the run instead of dying in a log line. A
-lot left open because no honest settlement price existed, and a session
-close the curve could not mark, are both facts about the run, and neither
-is a ledger event: nothing happened, so no replay of the journal can
-recover them. The run that observed them is the only thing that can carry
-them, which is why they ride on the result rather than being re-derived.
-
-`subject` carries enough lineage to tell two questions apart: a lot names
-its contract and its opening fill, a session that never printed names the
-underlying whose session it was. It is a label, never a value -- a
-failure never becomes a number anywhere.
+`subject` tells two questions apart: a lot names its contract and its
+opening fill, a session that never printed names its underlying. A
+label, never a value.
 """
 struct RunFailure
     at      :: DateTime
@@ -155,15 +122,6 @@ Throws [`UnpriceableLeg`](@ref) (`:expired_contract`, `:no_quote`,
 `:no_executable_side`, `:no_spot`) for a leg that cannot honestly be
 priced, and `UnservedSelector` when nothing serves an underlying. Reads
 through the cut and writes nothing.
-
-The venue is stricter than the ledger about expiry, deliberately. The
-ledger accepts a fill effective at the expiry instant itself
-(`FillAfterExpiry` is strictly later), but trading has stopped by then,
-so a chain still quoting the contract at that instant must not produce a
-fill. It is also what keeps the lifecycle interval honest: lifecycle
-runs before the fill, so a lot opened at or after its own expiry would
-fall outside `(prev, t]` for every later interval and never be examined
-again.
 """
 function fill_legs(cut::TimeCut, order::Order, t::DateTime;
                    fill_rule::Symbol, cost_model::Symbol, tick_cents::Int = TICK_CENTS)
@@ -296,48 +254,21 @@ end
                  clock::Clock; fill_rule = :cross_spread,
                  cost_model = :ibkr_pro_us_options) -> (ledger, failures)
 
-Walk the ticks of `clock` in `[from, to]` (or the agent's `tick_times`
-override when it returns one). Per tick, in order: settle the lots that
-fell due since the previous tick ([`settlements`](@ref), then the
-ledger's [`record_expiry!`](@ref)), so a lot that settled is gone from
-the book the policy is handed -- one with no honest settlement price
-stays open and stays visible, and `settlements` warns; build the cut,
-ask the agent for the current policy, ask that
-policy for orders given the book; and for each order price every leg
-through the venue ([`fill_legs`](@ref)) and book it as one transaction
-([`record_order!`](@ref)), then immediately run the per-record
-[`check_join`](@ref). Because lifecycle runs first, a leg on a contract
-already at or past its expiry is refused by `fill_legs`
-(`:expired_contract`), so no lot opened through this loop can escape its
-own settlement interval. Writing through `record_order!` directly
-bypasses the venue and forfeits that. Every order of a tick is recorded as having seen
-the ledger as it stood before the tick's first order (`known_to`), which
-is captured after that tick's expiries. The book handed to `decide` is
-the engine's own fold, equal to `book_as_known(L, known_to)`; a policy
-must not mutate it. `data` is the opened reader map (see `with_data`).
+Walk the ticks of `clock` in `[from, to]`, or the agent's `tick_times`
+schedule when it returns one. Per tick: settle the lots that fell due
+since the previous tick ([`settlements`](@ref), then the ledger's
+[`record_expiry!`](@ref)), build the cut, ask the agent for its policy
+and the policy for orders on the ledger's own book, price every leg of
+each order ([`fill_legs`](@ref)), book it as one transaction
+([`record_order!`](@ref)) with `known_to` captured after the tick's
+expiries, and run the per-record [`check_join`](@ref). After the last
+tick, settle once more at `to`. `data` is the opened reader map.
 
-After the last tick the lifecycle runs once more at `to`, the evaluation
-endpoint, which may be later than the last policy tick. An expiry is
-effective at its contract's expiry and recorded at the tick that booked
-it, so the two replays differ only by that lag. Lots still open after
-the window-end pass stay open, and nothing is force-settled; a lot with
-no honest settlement price stays open too and `settlements` warns.
-Returns the ledger after every append has passed the per-record join
-check, paired with the [`RunFailure`](@ref)s the run retained -- one per
-lot either pass left open for want of an honest settlement price. Both
-passes contribute, the window-end one included. They are returned rather
-than warned about and dropped because nothing else can recover them:
-no event was written, so a replay of the journal cannot find them, and
-inventing one for a settlement that did not happen would put a fiction in
-the journal of facts. The two results together are the shape `settlements`
-and `fill_legs` already use -- a named pair, not a new type.
-
-The two venue choices are keywords here, with the same defaults
-`Experiment` takes, so a direct caller can drive the loop without
-building one; `run_experiment` passes the experiment's, which are in its
-`core_hash`. The tick is [`TICK_CENTS`](@ref) and the settlement rule is
-a contract fact per lot ([`settlements`](@ref)), so neither is a keyword:
-a value that changes results is either in the run id or a constant.
+Returns the ledger paired with the [`RunFailure`](@ref)s the run
+retained, one per lot either settlement pass left open. The venue
+choices are keywords with the same defaults `Experiment` takes; the tick
+is [`TICK_CENTS`](@ref) and the settlement rule is a contract fact per
+lot.
 """
 function run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTime,
                       clock::Clock; fill_rule::Symbol = :cross_spread,
@@ -353,10 +284,7 @@ function run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTi
     prev = from                                    # lower bound of the lifecycle interval
     for t in ticks
         cut = TimeCut(data, t)
-        # 1. Lifecycle, before the decision: a lot that settled is gone from
-        #    the book the policy is handed, and one that could not be priced
-        #    stays open and visible. `settlements` warns about those; a lot
-        #    falling due in (prev, t] is examined exactly once, ever.
+        # 1. Settle what fell due in (prev, t], before the decision.
         due = settlements(cut, L.book, prev, t)
         foreach(due.settled) do (lot, p)
             record_expiry!(L, lot; settlement_price = p,
@@ -375,8 +303,7 @@ function run_backtest(agent::Agent, data::MarketData, from::DateTime, to::DateTi
             check_join(L, rec)
         end
     end
-    # 4. Window end: lifecycle once more at the evaluation endpoint, which
-    #    may be later than the last policy tick. Lots still open stay open.
+    # 4. Window end: settle once more at the evaluation endpoint.
     final = settlements(TimeCut(data, to), L.book, prev, to)
     foreach(final.settled) do (lot, p)
         record_expiry!(L, lot; settlement_price = p,
