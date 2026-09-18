@@ -1,24 +1,5 @@
-# Daily short strangle policy.
-#
-# Smallest honest concrete policy: once a day at a fixed wall-clock time,
-# open a short strangle on `underlying` whose two legs are picked by target
-# |delta| (one put OTM, one call OTM), expiring at the first available
-# slice on or after `t + expiry_interval`. Fixed quantity per leg.
-#
-# Engineering notes:
-# - The cheap gate `Time(t) == entry_time` runs before any surface lookup;
-#   `tick_times` limits the engine to one candidate per day, but the gate
-#   keeps `decide` correct on any clock.
-# - Continuous `invert_delta` returns a target strike inside the slice's
-#   observed strike bracket; we then snap to the nearest strike actually
-#   in the slice, because `resolve_quote` in the engine requires an exact
-#   match against the chain (and `slice.strikes` is a subset of chain
-#   strikes by construction in `build_surface`).
-# - If either leg's `invert_delta` returns `nothing` (target outside the
-#   observed-delta bracket on that wing), we return `Order[]` rather than
-#   trading the other wing alone -- a one-legged strangle is a different
-#   structure. The two legs go out as one `Order`, so the venue fills
-#   them whole or not at all.
+# DailyShortStrangle: once a day at a fixed time, a short strangle picked by
+# target |delta|, expiring at the first slice on or after t + interval.
 
 using Dates
 
@@ -96,13 +77,9 @@ function _quoted_strikes(chain::AbstractVector{OptionQuote}, expiry::DateTime,
     return unique!(out)
 end
 
-# Nearest entry in `sorted_strikes` to `K`. Empty vector returns `nothing`.
-# Sorted ascending; ties to the lower strike (deterministic; symmetric grids
-# don't care). Used to snap a continuous `invert_delta` target to a strike
-# that actually carries a quote of the required option_type -- the chain is
-# authoritative because `slice.strikes` mixes Put-origin and Call-origin
-# strikes (whichever side `build_surface._pick_otm` retained) and the engine's
-# `resolve_quote` matches on both strike and option_type.
+# Nearest entry in `sorted_strikes` to `K`; `nothing` when empty; ties go to
+# the lower strike. Snaps to the chain's strikes of the leg's type, not the
+# slice's: a slice keeps one side per strike, and a fill matches both.
 function _snap_to_sorted(sorted_strikes::Vector{Float64},
                          K::Float64)::Union{Float64,Nothing}
     isempty(sorted_strikes) && return nothing

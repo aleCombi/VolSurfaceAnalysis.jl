@@ -1,14 +1,4 @@
-# Agent abstraction.
-#
-# An Agent is the higher-level object that owns how a [`Policy`](@ref)
-# evolves across backtest (or live) time. The engine queries the Agent
-# at every tick for the Policy that should make the decision at that
-# moment; between ticks the Agent is free to refit, swap, schedule, or
-# otherwise update what it returns next.
-#
-# This is the Sutton-&-Barto split: Policy = the decide function;
-# Agent = the thing that carries the Policy and the machinery that
-# changes it over time.
+# Agent: the abstract type, `current_policy`, the two delegations, `StaticAgent`.
 
 """
     Agent
@@ -29,11 +19,8 @@ The returned Policy must be valid for at least this tick. An agent
 that refits periodically returns the same Policy on every tick between
 refits, and a fresh one on the tick where the refit fires.
 
-`data` and `book` are passed in case the refit logic needs to inspect
-the current data view or the book (e.g. "refit only on the first tick
-of a new month, using the lookback window in `data`"; "size by current
-exposure"). `book` is the engine's own fold and must not be mutated.
-Stateless, schedule-free agents simply ignore them.
+`data` and `book` are there for a refit to read; a schedule-free agent
+ignores them.
 """
 function current_policy(::Agent, ::DateTime, ::TimeCut, ::Book)::Policy
     error("current_policy not implemented for this Agent")
@@ -56,9 +43,7 @@ current_policy(a::StaticAgent, ::DateTime, ::TimeCut, ::Book) = a.policy
     declared_underlyings(agent::Agent) -> Tuple of Underlying
 
 Agent-level view of [`declared_underlyings(::Policy)`](@ref). Default
-empty; `StaticAgent` delegates to its one policy. A learning agent that
-swaps policies over time reports the union of what those policies
-declare, or nothing when it cannot say ahead of time.
+empty; `StaticAgent` delegates to its policy.
 """
 declared_underlyings(::Agent) = ()
 
@@ -68,11 +53,9 @@ declared_underlyings(a::StaticAgent) = declared_underlyings(a.policy)
     tick_times(agent::Agent, data::MarketData,
                from::DateTime, to::DateTime) -> Union{Nothing, Vector{DateTime}}
 
-Optional agent-level override of the engine's tick cadence. Mirrors
-[`tick_times(::Policy, ...)`](@ref) but at the Agent layer, where
-multi-policy / learning agents that swap policies over time can compute
-the union of their underlying policies' tick times. Default returns
-`nothing`. `StaticAgent` delegates to its single inner policy.
+Agent-level override of the engine's tick cadence, with the contract of
+[`tick_times(::Policy, ...)`](@ref). Default `nothing`; `StaticAgent`
+delegates to its policy.
 """
 tick_times(::Agent, ::MarketData, ::DateTime, ::DateTime) = nothing
 
