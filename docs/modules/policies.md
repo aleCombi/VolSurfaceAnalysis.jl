@@ -11,27 +11,26 @@ on the policy type, and on three inputs:
 A policy does not change between calls; when something has to change
 over time, that is the [`agents`](agents.md) layer's job.
 
-## The decision
+## Orders and the book
 
-Intent is declared per leg. A close is a `Close` leg in an order naming
-the group it closes, never a counter-trade, and it is refused when there
-is nothing to close, so a policy's mistake is a named failure at fill
-time rather than a silent new lot. The engine books an order whole or
-not at all.
+An order is composed of one or more legs. A leg names a contract, a
+side, a number of contracts, and its intent: `Open`, or `Close` with
+the group it closes. A close is therefore a first-class thing rather
+than a counter-trade, and closing a group that is not open is refused,
+so a policy's mistake is a named failure at fill time rather than a
+silent new lot. An order is booked whole or not at all.
 
-The book is what a policy sees, not the fill log: open lots per group
-and contract, plus cash, as known at this tick. Lifecycle is booked
-before the decision, so a settled lot is already gone; a lot whose
-settlement could not be resolved stays open and visible, and
-`lot.contract.expiry <= t` is how a policy tells it is holding one,
-inclusive at `t` because the settlement interval is.
+The book is the set of open lots, grouped by the order that opened
+them, per contract, plus cash, as of this tick. Expired lots are
+settled before `decide` runs, so an expired lot is gone from the book.
+A lot whose settlement price could not be found stays open and
+visible, and a policy recognises it by `lot.contract.expiry <= t`.
 
-No-lookahead is a type, not a convention: `decide` takes a
-[`TimeCut`](data.md), so every read, including those a derived
-provider makes on the policy's behalf, is cut at `t`.
+`decide` receives market data already cut at `t`, so nothing it reads,
+directly or through a derived provider, can be later than `t`.
 
 `decide` is stateless. The struct holds configuration; anything the
-recurrence might want is either derivable from `(t, data, book)` plus
+recurrence might want is either derivable from the three inputs plus
 that configuration, or it belongs to an agent that hands out a fresh
 policy when state advances.
 
