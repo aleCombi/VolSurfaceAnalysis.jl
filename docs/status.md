@@ -234,12 +234,6 @@ cross-run viz recipes.
 
 Per-PR checklists; a PR deletes its own when it lands.
 
-- **policies + agents.** Future work sections out. policies.md says
-  strikes snap to the slice at one place and to the chain at another;
-  the chain is right, and the `daily_short_strangle.jl` header still
-  says slice. Owns lists omit `tick_times`. The two docs share a
-  diagram, the fold paragraph, the RL split and a future-work item;
-  keep each once, in its owner.
 - **backtest + metrics.** Future work out. `parse_polygon_ticker` in
   backtest.md is `parse_massive_ticker`. metrics.md gives `marked_curve`
   a return type it lacks, and it and `dispatch.jl` explain the
