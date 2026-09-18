@@ -46,22 +46,6 @@ one underlying: the clock selector says *when* to step, fills price per
 leg, and their agreement is what keeps that safe. A policy that chooses
 its underlying per tick declares nothing and is not checked.
 
-## `DailyShortStrangle`
-
-Once a day at `entry_time`, a short OTM put and a short OTM call picked
-by target |delta| through [`invert_delta`](pricing.md), as one order.
-It only opens; lifecycle settles its lots.
-
-- **Two legs, one order.** Filled whole or not at all, sampled as one
-  structure.
-- **One wing failing skips the entry.** A one-legged strangle is a
-  different structure, and trading the surviving leg would corrupt the
-  backtest silently.
-- **Snap to the chain, not the slice.** `invert_delta` returns a
-  continuous strike; a fill needs an exact match on strike *and* type,
-  and a slice keeps one side per strike, so the strikes quoted for the
-  leg's type are the only honest targets.
-
 ## Boundaries
 
 **Owns** `Policy`, `decide`, `declared_underlyings`, `tick_times`,

@@ -137,6 +137,7 @@ function decide(p::DailyShortStrangle, t::DateTime,
 
     K_put_raw  = invert_delta(surface, expiry, Put,  p.put_delta)
     K_call_raw = invert_delta(surface, expiry, Call, p.call_delta)
+    # One wing failing skips the entry: a one-legged strangle is another structure.
     (K_put_raw === nothing || K_call_raw === nothing) && return Order[]
 
     put_strikes  = _quoted_strikes(chain, expiry, p.underlying, Put)
