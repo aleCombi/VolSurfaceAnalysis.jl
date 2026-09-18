@@ -1,69 +1,40 @@
 # `agents` module
 
-Agent abstraction: the higher-level object that owns how a
-[`Policy`](policies.md) evolves across backtest (or live) time. The
-backtest engine queries the Agent at every tick for the Policy that
-should make the decision at that moment; between ticks the Agent is
-free to refit parameters, swap policies, advance a schedule, or
-otherwise update what it returns next.
+An agent owns how a policy changes over time. Per tick the engine asks
+`current_policy` and then calls `decide` on what it gets, the same
+`(t, cut, book)` visible to both; the returned policy must be valid for
+at least that tick. Between ticks the agent may refit, swap or advance
+a schedule; the policy it hands out is frozen
+([`policies`](policies.md)).
 
-This is the Sutton-&-Barto split: **Policy** = the `decide` function;
-**Agent** = the thing that carries the Policy and the machinery that
-changes it over time. A policy that depends on a periodically-refit
-ridge model is still a frozen Policy; the *fitting cadence and the
-fit itself* live on the Agent.
+## The query
 
+Everything an agent schedules it gates inside `current_policy`, the way
+a policy gates inside `decide`: there is no refit-schedule protocol,
+and the engine knows nothing of an agent's internals.
+`declared_underlyings` and `tick_times` exist at this layer so the
+loader and the engine ask one object; `StaticAgent` delegates both to
+its one policy.
 
-## The abstraction
+## Boundaries
 
+**Owns** `Agent`, `current_policy`, `StaticAgent`, the two delegations.
+**Does not own** the decision ([`policies`](policies.md)); the tick
+loop ([`backtest`](backtest.md)); P&L (downstream).
 
-One method, four arguments, one Policy returned; plus the optional
-`tick_times` override (default `nothing`; `StaticAgent` delegates to
-its policy's), where a multi-policy agent unions its policies'
-schedules. Concrete agents
-subtype `Agent` and implement `current_policy`. The returned Policy
-must be valid for at least the current tick. `book` is the engine's own
-fold of the ledger as known at this tick (open lots per group and
-contract, plus cash); like the policy, an agent reads it and must not
-mutate it.
-
-`declared_underlyings` mirrors the [policy-level trait](policies.md) at
-this layer: default empty, `StaticAgent` delegates to its one policy, and
-an agent that swaps policies over time reports their union or nothing
-when it cannot say ahead of time. `load_experiment` reads it to check the
-clock and the strategy name one underlying.
-
-### `StaticAgent`
-
-
-The trivial agent: holds one Policy and returns it forever. Bridges
-the fixed-policy case into the Agent-driven engine so every backtest
-shares one driver path, and lets `run_backtest(policy, ...)` be a
-one-line wrapper around the Agent overload.
-
-## Key decisions
+## Decisions
 
 | Decision | Why |
 |---|---|
-| **Per-tick query, not per-event callback** | The engine calls `current_policy` on every tick rather than asking the Agent to push policy-change events. This keeps the engine loop one-shape (mirrors the per-tick `decide` call) and means a "refit on schedule" Agent is a trivial calendar check inside `current_policy`. Cost on minute-data over a year for a no-op `current_policy`: dwarfed by data IO. |
-| **`current_policy` sees `(t, cut, book)`** | Same arguments as `decide`. A refit-on-month-boundary Agent needs `t`; an Agent that retrains on a lookback window reads it through `cut` (history before `from` is visible, anything after `t` is not, derived data included); an Agent that adapts position sizing to current exposure reads the `book`. |
-| **Agent is not itself a Policy** | The two have different responsibilities (evolve over time vs. decide for one tick) and different invariants (mutable cadence/state vs. frozen for the tick). Conflating them collapses the split that motivates the abstraction in the first place. An Agent that *never* changes its Policy is a `StaticAgent`, not a Policy worn as an Agent. |
-| **Engine accepts both `Agent` and `Policy`** | `run_backtest(policy, ...)` is a one-line wrapper around `run_backtest(StaticAgent(policy), ...)`. The bare-policy form is the natural primitive for training/evaluation code that wants to score a single candidate Policy over a window without constructing an Agent. |
-| **No refit-schedule protocol** | The engine does not have a separate `refit_times(agent, source)` hook. Anything an Agent wants to schedule it gates inside `current_policy`, the same way policies gate inside `decide`. One uniform query model, no engine-side knowledge of how an Agent is structured internally. |
+| **Per-tick query, not policy-change events** | One loop shape, mirroring the per-tick `decide`; a refit-on-schedule agent is a calendar check inside `current_policy`. |
+| **`current_policy` sees `(t, cut, book)`** | A refit needs `t`; a lookback reads through the cut, history before the window visible and nothing after `t`; sizing reads the book. |
+| **An agent is not a policy** | One evolves over time and is mutable, the other decides for one tick and is frozen. An agent that never changes is a `StaticAgent`, not a policy worn as an agent. |
+| **The engine accepts both** | `run_backtest(policy)` wraps `StaticAgent(policy)`, so every backtest shares one driver path and scoring a single candidate needs no agent. |
 
-## Responsibility boundaries
+## Conventions consulted
 
-**Owns:** the `Agent` abstract type, the `current_policy` contract,
-the agent-level `declared_underlyings` delegation, the `StaticAgent`
-base case.
-
-**Does NOT own:**
-
-- The decide function. That is the [`policies`](policies.md) module.
-- The tick loop. That is the [backtest engine](backtest.md); the
-  engine drives both `current_policy` and `decide`.
-- Reporting / PnL aggregation. Downstream of the engine, just like
-  for policies.
-
-
-
+- **Policy and agent as two types.** Sutton & Barto, *Reinforcement
+  Learning*: the policy is the decision function, the agent carries it
+  and the machinery that changes it. Adopted as stated rather than
+  overloading one type with both; a policy built on a fitted model is
+  still a frozen policy, and the fitting lives on its agent.
