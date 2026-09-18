@@ -174,7 +174,7 @@ end
     # Snap invariant: both strikes exist in the observed slice so
     # resolve_quote in the engine will match them.
     surf = _pl_surface(f)
-    sl = get_slice(surf, f.e1)
+    sl = slice(surf, f.e1)
     @test put_K  in sl.strikes
     @test call_K in sl.strikes
 

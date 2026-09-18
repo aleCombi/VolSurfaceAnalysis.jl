@@ -56,7 +56,7 @@ end
 
 # One contract off a surface already known to be stamped at the mark instant.
 function _price_at(s::VolatilitySurface, c::ContractKey)::Union{Nothing,Float64}
-    get_slice(s, c.expiry) === nothing && return nothing      # no slice at this expiry
+    slice(s, c.expiry) === nothing && return nothing      # no slice at this expiry
     p = price(s, c.expiry, c.strike, c.option_type)
     return (isfinite(p) && p >= 0) ? p : nothing
 end

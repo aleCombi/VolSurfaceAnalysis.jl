@@ -139,10 +139,10 @@ end
 
 @testset "settlement_price: an early close settles at the 13:00 ET print" begin
     # 2024-12-24 is a scheduled 13:00 ET close. No early-close table is
-    # needed because the spots here honour the `SpotPrice` input contract
-    # -- regular-session prints only -- so the last print of the window is
-    # the session's last print. The testset below feeds the same rule data
-    # that breaks that contract, and shows what it costs.
+    # needed because no print here falls between the close and 16:00 ET,
+    # so the last print of the window is the session's last print. The
+    # testset below feeds the same rule data that breaks that assumption,
+    # and shows what it costs.
     d, prev = Date(2024, 12, 24), Date(2024, 12, 23)
     spots = vcat(_st_session(prev, 600.0),
                  [_st_spot(d, 9, 30, 604.0), _st_spot(d, 12, 0, 605.0),
@@ -162,10 +162,11 @@ end
 
 @testset "settlement_price: an extended-hours print defeats the early close" begin
     # THIS TEST DOES NOT BLESS THE NUMBER IT ASSERTS. It pins what a
-    # *violated input contract* produces, which is the whole reason the
-    # contract is written down (`market_data.md`, the `SpotPrice` kind;
-    # `settlement_price`'s docstring). `SpotPrice` providers must serve
-    # regular-session prints only. Nothing enforces it -- the parquet spot
+    # *violated assumption* produces, which is the whole reason the
+    # exposure is written down (the `backtest` module doc and
+    # `settlement_price`'s docstring; the `SpotPrice` docstring says the
+    # record carries no session). The rule assumes no extended-hours print
+    # inside the window. Nothing enforces it -- the parquet spot
     # reader selects every row its partitions hold -- and nothing in a
     # `SpotPrice` records which session a print came from, so the rule
     # cannot detect the violation and no narrower window rescues it: on a
@@ -173,19 +174,18 @@ end
     # 09:30-16:00 window and is regular-hours-shaped.
     #
     # If a later change makes this assert 606.0 instead, that is the
-    # defect being fixed and not a regression; delete the broken-contract
+    # defect being fixed and not a regression; delete the broken-assumption
     # half rather than preserving 610.0.
     d, prev = Date(2024, 12, 24), Date(2024, 12, 23)
     session = [_st_spot(d, 9, 30, 604.0), _st_spot(d, 13, 0, 606.0)]
     c = _st_call(d, 600.0)
     t = _st_et(d, 16, 0)
-    # Contract honoured: the 13:00 close settles the contract.
+    # Assumption holds: the 13:00 close settles the contract.
     kept = MarketData(InMemory(vcat(_st_session(prev, 600.0), session)))
     @test settlement_price(:session_close, TimeCut(kept, t), c, t) == 606.0
-    # Contract violated: one post-close print wins instead. Four dollars a
+    # Assumption broken: one post-close print wins instead. Four dollars a
     # share of intrinsic, 40_000 cents per contract, with no warning --
-    # which is what makes the requirement a contract rather than a
-    # preference.
+    # which is why the exposure is written down.
     broken = MarketData(InMemory(vcat(_st_session(prev, 600.0), session,
                                       [_st_spot(d, 15, 59, 610.0)])))
     @test settlement_price(:session_close, TimeCut(broken, t), c, t) == 610.0
@@ -969,8 +969,8 @@ end
 end
 
 # The production tree really holds a disagreeing pair at an overnight instant
-# (2026-02-07T00:12 UTC, 690.21 vs 690.22), and the regular-session
-# `SpotPrice` contract is claimed inside the session windows and nowhere else.
+# (2026-02-07T00:12 UTC, 690.21 vs 690.22), and the session-window
+# exposure is bounded inside the session windows and nowhere else.
 # So this fixture carries an actual conflict where the tree does: two rows,
 # one instant, two prices, between one close and the next open.
 #

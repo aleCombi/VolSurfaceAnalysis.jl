@@ -15,7 +15,7 @@ _require(d::AbstractDict, key::AbstractString, where_::AbstractString) =
     haskey(d, key) ? d[key] :
         error("load_experiment: missing required key \"$key\" in $where_")
 
-function _pop_type!(d::AbstractDict, where_::AbstractString)::String
+function _type_of(d::AbstractDict, where_::AbstractString)::String
     haskey(d, "type") || error(
         "load_experiment: $where_ table must have a \"type\" key " *
         "(got keys: $(sort(collect(keys(d)))))")
@@ -54,7 +54,7 @@ const _CURVE_BUILDERS = Dict{String, Function}(
 )
 
 function build_curve(d::AbstractDict)::Curve
-    t = _pop_type!(d, "curve")
+    t = _type_of(d, "curve")
     return _dispatch(_CURVE_BUILDERS, t, "curve")(d)
 end
 
@@ -70,7 +70,7 @@ const _SYNTHESIZER_BUILDERS = Dict{String, Function}(
 )
 
 function build_synthesizer(d::AbstractDict)::QuoteSynthesizer
-    t = _pop_type!(d, "synthesizer")
+    t = _type_of(d, "synthesizer")
     return _dispatch(_SYNTHESIZER_BUILDERS, t, "synthesizer")(d)
 end
 
@@ -144,10 +144,9 @@ function _build_constant(d::AbstractDict, ::Type{R}) where {R}
 end
 
 # The only `[data.*]` builder that rejects unknown keys (`[venue]` does
-# too). The other tables drop them silently (a recorded cleanup item),
-# which is tolerable until a key changes identity: a typo'd
-# `lookback_ticks` would take the default and silently change
-# identity-vs-intent.
+# too). The other tables drop them silently, which is tolerable until a
+# key changes identity: a typo'd `lookback_ticks` would take the default
+# and silently change identity-vs-intent. Backlog: "Unknown config keys".
 const _SURFACE_FROM_KEYS = Set(["type", "currency", "spot_for", "lookback_ticks"])
 
 function _build_surface_from(d::AbstractDict, ::Type)
@@ -195,7 +194,7 @@ const _PROVIDER_BUILDERS = Dict{String, Function}(
 )
 
 function _build_provider(d::AbstractDict, ::Type{R}, where_::AbstractString) where {R}
-    t = _pop_type!(d, where_)
+    t = _type_of(d, where_)
     spec = _dispatch(_PROVIDER_BUILDERS, t, "data provider")(d, R)
     kind(spec) === R || error(
         "load_experiment: $where_ has type \"$t\", which serves " *
@@ -309,7 +308,7 @@ const _POLICY_BUILDERS = Dict{String, Function}(
 )
 
 function build_policy(d::AbstractDict)::Policy
-    t = _pop_type!(d, "policy")
+    t = _type_of(d, "policy")
     return _dispatch(_POLICY_BUILDERS, t, "policy")(d)
 end
 
@@ -325,7 +324,7 @@ const _AGENT_BUILDERS = Dict{String, Function}(
 )
 
 function build_agent(d::AbstractDict)::Agent
-    t = _pop_type!(d, "agent")
+    t = _type_of(d, "agent")
     return _dispatch(_AGENT_BUILDERS, t, "agent")(d)
 end
 
