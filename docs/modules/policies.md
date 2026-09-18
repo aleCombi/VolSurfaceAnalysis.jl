@@ -130,7 +130,7 @@ a base case in property tests.
 
 The first real trading policy: once a day at `entry_time`, open a short
 OTM put + short OTM call. Strikes are picked by target absolute delta
-(via [`invert_delta`](surfaces.md)) and snapped to the slice's observed
+(via [`invert_delta`](pricing.md)) and snapped to the slice's observed
 strike grid so the engine's `resolve_quote` exact match succeeds.
 
 ```julia

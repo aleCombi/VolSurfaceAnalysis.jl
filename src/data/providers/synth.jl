@@ -3,44 +3,31 @@
 """
     QuoteSynthesizer
 
-Abstract strategy type: turns an [`OptionBar`](@ref) into an
-[`OptionQuote`](@ref). Concrete subtypes implement
-`synthesize(s, bar)::OptionQuote`.
+Abstract policy type: how an [`OptionBar`](@ref) becomes an
+[`OptionQuote`](@ref). Concrete subtypes implement `synthesize`.
 """
 abstract type QuoteSynthesizer end
 
 """
     synthesize(s::QuoteSynthesizer, bar::OptionBar) -> OptionQuote
 
-Project a bar through the synthesizer policy into a quote. Implementations
-must return an `OptionQuote` carrying `bar`'s contract identity, timestamp,
-and `volume` unchanged.
+The quote `s` reads off `bar`. Carries `bar`'s contract identity,
+timestamp and `volume` unchanged.
 """
 function synthesize end
 
 """
     SpreadFromOHLCV(λ)
 
-Synthesize bid/ask from an OHLCV bar by interpolating between the bar's
-extreme range and its close:
+Bid/ask interpolated between the bar's range and its close, with `mark =
+close`:
 
-    bid  = low  + λ · (close − low)
-    ask  = high − λ · (high − close)
-    mark = close
+    bid = low  + λ · (close − low)
+    ask = high − λ · (high − close)
 
-`λ` tightens the synthesized spread around `close`:
-
-- `λ = 0.0` → `bid = low`, `ask = high` (widest, most conservative fill).
-- `λ = 0.7` → the value this project's configs use.
-- `λ = 1.0` → `bid = ask = close` (midpoint, zero spread).
-
-`λ` is required at the type level; there is no default.
-
-If `high`, `low` or `close` is `missing` the synthesized `bid` and `ask`
-are `missing` too, and `mark = close` if present. Not zero spread: a
-fallback there would invent a market that did not trade.
-
-Throws `ArgumentError` when `λ` is outside `[0, 1]`.
+`λ = 0` is the full range, `λ = 1` a zero spread at the close. When
+`high`, `low` or `close` is `missing`, so are `bid` and `ask`. Throws
+`ArgumentError` when `λ` is outside `[0, 1]`.
 """
 struct SpreadFromOHLCV <: QuoteSynthesizer
     lambda::Float64

@@ -29,14 +29,28 @@
    the source checked. That section is the durable record; a design
    discussion may point to it but is not where the citation lives.
 
-6. **Keep module docs lean and architectural.** Module docs should
-   explain boundaries, invariants, data flow, and consequential design
-   decisions. Include usage notes only when they are crucial to using
-   the module correctly; expect routine examples and API walkthroughs
-   to move later into dedicated API docs or examples. Favor invariants
-   and boundaries over implementation specifics (magic numbers, internal
-   data structures, incidental library names) that drift as code
-   changes.
+6. **Module docs hold commitments, not lookups.** A module doc explains
+   boundaries, invariants, data flow, and the decisions this project
+   committed to -- which of several defensible arrangements it picked,
+   what it would break to change, and what must stay true across
+   changes. The code already says what it does; only a doc can say what
+   we agreed to.
+
+   The test: **would someone with the code in front of them answer this
+   correctly on their own?** A signature, a parameter list, a return
+   type, the steps of an algorithm, an enumerated API, "how do I read a
+   surface" -- all yes, so all lookups. They regenerate on demand, they
+   go stale the moment the code moves, and they are what makes one
+   module doc restate its neighbour. Delete them; a docstring carries
+   what survives (rule 8). A reason, an alternative rejected, an
+   invariant that holds across the module -- all no, so all commitments,
+   and they belong here.
+
+   Where a concrete detail is load-bearing, state the rule and let the
+   instance be an example inside it, never a section of its own: an
+   invariant about *any* derived provider, not a tour of one. Prefer
+   invariants and boundaries over specifics that drift -- magic numbers,
+   defaults, internal data structures, incidental library names.
 
 7. **Empty means temporal absence only.** An empty result from any read
    means "served, and nothing at this instant". Every other unanswerable
@@ -62,3 +76,50 @@
    surrounding code deleted, it belongs in the doc. Where a comment
    must point at a doc, name the module rather than a path -- paths go
    stale silently when a module is renamed.
+
+9. **Folders are stages of a run, not financial objects.** The top level
+   of `src/` names what a stage *does* -- price, serve data, decide,
+   simulate, record, evaluate, orchestrate, persist, show -- and each
+   folder carries one `docs/modules/<folder>.md`. A market object
+   therefore appears in as many folders as it has aspects: a curve's
+   math in `pricing`, the record that stamps it in `data/kinds`, the
+   provider that serves it in `data/providers`. A surface is cut the
+   same way except that its math object doubles as its own record, so
+   only its kind contract sits in `data/kinds`; that asymmetry is a
+   modelling one, and [status.md](status.md) carries the split as parked
+   work. Collecting every aspect of one object into a folder of its own
+   would be a principle only if every object were cut that way; one such
+   folder standing beside the stages is a special case, and the layout
+   should not carry one.
+
+   The seam that keeps this honest: `pricing` may name record types --
+   `build_surface` consumes a chain -- but nothing in it may reach the
+   protocol, a provider, a cut or an experiment. A dependency that wants
+   to run the other way says a stage boundary is in the wrong place, not
+   that the rule needs an exception.
+
+10. **Never write future work into a module doc.** Forward-looking work
+    lives in one place, [status.md](status.md)'s backlog, where an item
+    is concrete parked work with a decision behind it. A module doc says
+    what the module *is* and what it committed to; a roadmap inside one
+    ages into a promise nobody made -- a reader cannot tell parked work
+    from abandoned work, and two docs drift into contradicting each
+    other, and the backlog, about what is coming.
+
+    A doc may name a deferral only when the backlog carries it, and then
+    in a clause rather than a section: enough to say the gap is
+    deliberate and not an oversight, with the plan left in the backlog.
+    Reversibility is not future work -- what it would take to change a
+    decision is part of stating it (rule 6) and stays.
+
+11. **Repo-wide style, recorded once.** No `get_` prefix on accessors; a
+    bang only on mutation; files `include`d into the one top-level
+    module with no submodules. Pkg.jl's package guide fixes only
+    `src/<Pkg>.jl` and leaves the rest to logical grouping, so the
+    layout is the project's own choice and rule 9 is where it is made.
+
+    A module doc's *Conventions consulted* is for that module's own
+    naming decisions (rule 5) and never for these: a convention that
+    holds everywhere belongs here, where it is stated once, rather than
+    in whichever module doc was written first.
+

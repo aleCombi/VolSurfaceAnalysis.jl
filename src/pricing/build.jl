@@ -1,12 +1,8 @@
-# Build a VolatilitySurface from a raw option chain.
-#
-# v1 handles the mark-price convention only (the only one QuotesFromBars
-# produces). Per-strike IV is inverted from the OTM-side mark (call if
-# K >= spot, put otherwise), falling back to the ITM side if the OTM side
-# is missing.
+# `build_surface`: a RawSurface from an option chain quoted by mark price.
 
-# Pick the OTM-side quote for a (call_quote, put_quote, strike, spot) group.
-# Returns (mark, option_type) or nothing if neither side has a usable mark.
+# The OTM side (call at or above spot, put below) first; the ITM side is a
+# fallback rather than the strike being dropped. Returns (mark, option_type)
+# or nothing when neither side has a positive mark.
 function _pick_otm(call_q::Union{OptionQuote,Nothing},
                    put_q::Union{OptionQuote,Nothing},
                    strike::Float64, spot::Float64)
@@ -54,21 +50,17 @@ function _build_slice(expiry::DateTime, tau::Float64,
 end
 
 """
-    build_surface(chain, spot, rate, div) -> RawSurface
+    build_surface(chain, spot, rate, div) -> Union{RawSurface, Nothing}
 
-Build a `RawSurface` from a chain (vector of `OptionQuote`s) at a single
-timestamp. All quotes in `chain` are expected to share a `timestamp` and
-`underlying`; the surface inherits both from `chain[1]`.
+A `RawSurface` from a chain of `OptionQuote`s at one instant, with one
+slice per expiry and one IV per strike inverted from the OTM-side mark.
+Every quote is expected to share a `timestamp` and `underlying`; the
+surface takes both from `chain[1]`.
 
-For each expiry, builds an `ExpirySlice` by inverting per-strike IV from
-the OTM-side mark. Strikes where neither side has a usable mark, or where
-IV inversion fails (price outside `[intrinsic, deep-vol limit]`), are
-dropped. Expiries with no usable strikes are dropped.
-
-Throws on an empty chain. Returns `nothing` if every expiry is dropped
-(e.g. all already expired, or no usable marks anywhere) -- callers
-(notably `SurfaceFrom`) treat this as "no surface at
-this timestamp" and cache it.
+Dropped, silently: a strike with no positive mark on either side or
+whose mark does not invert, and an expiry at or before the chain's
+timestamp or with no surviving strike. Returns `nothing` when no expiry
+survives. Throws `ArgumentError` on an empty chain.
 """
 function build_surface(chain::Vector{OptionQuote}, spot::Float64,
                        rate::Float64, div::Float64)::Union{RawSurface,Nothing}

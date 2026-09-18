@@ -1,4 +1,5 @@
-# `data/protocol`: the four shapes, their generics, and the named failures.
+# `data/protocol`: the four read shapes, the structural question `serves`,
+# and the named failures.
 
 """
     at(m, ::Type{R}, sel, ts) -> Vector{R}
@@ -28,8 +29,9 @@ function between end
 
 Every record at the largest visible timestamp `<= ts`, empty when
 nothing is visible. No default: each provider implements it with what
-its storage does well. A derived provider walks back past an instant it
-cannot build, and throws [`DerivationExhausted`](@ref) at its bound.
+its storage does well. A derived provider whose input is present but
+never builds throws [`DerivationExhausted`](@ref) at its bound; absent
+input is an ordinary empty answer.
 """
 function asof end
 

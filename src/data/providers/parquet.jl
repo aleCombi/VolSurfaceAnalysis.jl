@@ -1,22 +1,12 @@
-# `data/providers`: parquet specs and readers for the Massive tree.
-#
-# Storage layout, one tree per kind, in the collector's Hive layout:
+# `data/providers`: parquet specs and readers for the Massive tree, one
+# tree per kind in the collector's Hive layout:
 #   <root>/date=YYYY-MM-DD/symbol=<TICKER>/data.parquet
-# The selector is a query argument, so one spec serves every symbol=
-# partition under its root. The partitions are time-ordered with a
-# one-day spill, which the four shapes rely on -- see the `data` module
-# doc for what that buys and what breaks without it.
+# Partitions are time-ordered with a one-day spill (the `data` module doc).
 #
-# Bar-end visibility is translated here and nowhere else, at the two
-# points where this file meets the stored clock:
-#
-#   reading  -- `_visible(row)` on every timestamp leaving DuckDB, so
-#               records, cached timestamp lists and spot blocks are all
-#               in visibility time;
-#   querying -- `_row_ts_sql(ts)` on every SQL bound, the inverse.
-#
-# A new query path here must go through both, or it addresses the wrong
-# clock.
+# Bar-end visibility is translated at exactly two points, where this file
+# meets the stored clock: `_visible` on every timestamp leaving DuckDB,
+# and `_row_ts_sql` on every SQL bound. A new query path must go through
+# both, or it addresses the wrong clock.
 
 using DuckDB
 using DuckDB: DBInterface
@@ -26,8 +16,7 @@ using Tables
     ParquetOptionBars(root)
 
 Spec for `OptionBar` records under an options tree (`.../options_1min`).
-Construction is pure: no directory check, so a saved run rehydrates
-silently off-machine; `open_data` throws if the root is missing.
+Construction touches no storage; `open_data` refuses a missing root.
 """
 struct ParquetOptionBars
     root::String
@@ -48,9 +37,8 @@ end
 kind(::ParquetOptionBars) = OptionBar
 kind(::ParquetSpots) = SpotPrice
 
-# A spec cannot answer the structural question: the partition list is a
-# readdir walk over a tree that is not open yet, and `build_market_data`
-# holds specs. The readers can, and do.
+# A spec cannot answer: the partition list is a readdir walk over a tree
+# that is not open yet. The readers can, and do.
 serves(::ParquetOptionBars, ::Any, ::Type{OptionBar}, ::Any) = missing
 serves(::ParquetSpots, ::Any, ::Type{SpotPrice}, ::Any) = missing
 
@@ -91,14 +79,10 @@ end
 # line ever holds a bar-open stamp.
 _visible(x)::DateTime = bar_visible_at(_coerce_dt(x))
 
-# The inverse, as a SQL literal: a bound in visibility time addressing the
-# stored clock. Millisecond precision, not whole seconds: `between` is
-# public and its bounds are passed through untouched (a TOML datetime with
-# a fractional second, a TimeCut cutoff), and truncating the lower bound
-# would admit the row at its floor while `at` and `timestamps` compare at
-# full precision. The whole-minute shift preserves that precision and both
-# inclusive endpoints. DuckDB parses the fractional part; `at`'s exact
-# `timestamp = ...` predicate stays exact.
+# The inverse, as a SQL literal. Millisecond precision, not whole seconds:
+# `between`'s bounds arrive untouched (a TOML datetime with a fractional
+# second, a cut's cutoff), and truncating the lower bound would admit the
+# row at its floor while `at` and `timestamps` compare at full precision.
 _row_ts_sql(ts::DateTime) =
     "TIMESTAMP '" * Dates.format(bar_row_time(ts), "yyyy-mm-dd HH:MM:SS.sss") * "'"
 
@@ -206,11 +190,11 @@ function _load_cols!(r::ParquetBarsReader, m::PartitionMeta, path::AbstractStrin
     m
 end
 
-# Rows of one partition matching `where_sql`, as OptionBar. Columnar
-# materialization via Tables.columntable, then a typed index loop. The
-# contract-meta dict is shared across partitions (a few thousand entries
-# per symbol). A ticker whose underlying is not `u` throws: under symbol=
-# partitioning that is a corrupt store, not a row to skip.
+# Rows of one partition matching `where_sql`, as OptionBar: columnar
+# materialization, then a typed index loop. The contract-meta dict is
+# shared across partitions. A ticker whose underlying is not `u` throws
+# rather than being skipped: under symbol= partitioning it is a corrupt
+# store.
 function _query_bars(r::ParquetBarsReader, u::Underlying, d::Date, m::PartitionMeta,
                      where_sql::AbstractString)::Vector{OptionBar}
     path = _partition_path(r.spec.root, u, d)
@@ -425,14 +409,11 @@ function _append_spots!(out::Vector{SpotPrice}, u::Underlying, b::SpotBlock, fro
     out
 end
 
-# Spots are a snapshot kind, read through `only_or_missing`, so two rows
-# at one instant abort the read. A vendor re-delivering a minute into one
-# partition gets there without anyone writing bad code; so does the same
-# row written into a partition's spill and the next partition's body,
-# which the time-ordered convention above forbids but nothing enforces --
-# the store is a directory tree, not a validated schema. Equal price
-# collapses -- there is no information to lose; a disagreement throws,
-# because taking the first is a silent choice between two answers.
+# The snapshot rule on `out`, already sorted: equal price collapses, a
+# disagreement throws. Duplicates reach here from a vendor re-delivering a
+# minute, or from one row written into a partition's spill and the next
+# partition's body; the store is a directory tree, so nothing upstream
+# rejects either.
 function _collapse_duplicates!(out::Vector{SpotPrice}, u::Underlying)
     isempty(out) && return out
     w = 1
@@ -460,12 +441,9 @@ function between(r::ParquetSpotsReader, ::Any, ::Type{SpotPrice}, u::Underlying,
     _collapse_duplicates!(out, u)
 end
 
-# The backward walk finds the winning instant; `between` reads it, so
-# every spot read obeys the de-duplication rule by construction rather
-# than by three call sites remembering to apply it. Reading the block in
-# hand directly would be cheaper by two searchsorted pairs on vectors
-# already in memory, and would miss a duplicate of `win` living in the
-# other candidate partition.
+# The walk finds the winning instant and `between` reads it: reading the
+# block in hand would be cheaper and would miss a duplicate of that
+# instant in the other candidate partition.
 function asof(r::ParquetSpotsReader, ctx, ::Type{SpotPrice}, u::Underlying, ts::DateTime)
     _assert_open(r)
     parts = _partitions(r, u)

@@ -34,13 +34,9 @@ _entry(::Type{R}) where {R} = error("MarketData has no provider for $R")
 
 serves(m::MarketData, ::Type{R}, sel) where {R} = serves(entry(m, R), m, R, sel)
 
-# Structural absence throws, and the check lives here rather than inside
-# each provider's four shapes: that would be sixteen call sites, and it
-# would also fire on the provider-level delegation `BySelector` and
-# `QuotesFromBars` already do. Two consequences, both deliberate:
-# provider-level calls (`at(p, ctx, R, sel, ts)`) are unchecked, which is
-# the arity tests and internal delegation use; and a provider with no
-# `serves` method (`missing`) opts out.
+# Here and not in each provider's shapes: there it would fire again on the
+# delegation `BySelector` and `QuotesFromBars` do. So provider-level calls
+# are unchecked, and `missing` from `serves` opts a provider out.
 @inline function _require_served(m, ::Type{R}, sel) where {R}
     serves(m, R, sel) === false &&
         throw(UnservedSelector(R, sel, served_description(entry(m, R))))
