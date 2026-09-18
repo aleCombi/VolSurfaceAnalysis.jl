@@ -22,13 +22,13 @@
 # close is the last of those prints. That reads an early close (official
 # close 13:00 ET) with no early-close table, and it does so on the
 # strength of its input rather than of the bounds: the window's last print
-# is the session's only where the tree holds regular-session prints alone
-# (the `data` module doc). A provider that also serves extended-hours prints
-# breaks it -- a 15:59 print on a 13:00 ET close sits inside the window and
-# settles the contract -- and this rule cannot detect that, because nothing
-# in a `SpotPrice` says which session it came from. The production tree
-# does not guarantee it either; what holds there is measured, not
-# promised, and the `data` module doc says so. The calendar only contradicts
+# is the session's only where no extended-hours print falls inside the
+# window. That exposure is this rule's own -- a 15:59 print on a 13:00 ET
+# close sits inside the window and settles the contract, and nothing in a
+# `SpotPrice` says which session it came from. The production tree does
+# serve extended hours and is measured, not promised, to print none inside
+# an early-close window; the official-close kind in the backtest module
+# doc's backlog pointer would make this structural. The calendar only contradicts
 # the tree: a printless weekday it calls open is a named valuation failure
 # (design rule 7), never evidence that the exchange was closed.
 #
@@ -158,13 +158,13 @@ window, not unanswerable inside it.
 
 Early closes and unscheduled closures need no table here for the same
 reason they need none in `:session_close`, and carry the same
-requirement of the input: the window's last print is the session's only
-where the tree holds regular-session prints alone (the `data` module doc).
+exposure: the window's last print is the session's only where no
+extended-hours print falls inside the window (`settlement_price`).
 
 **One read per session window, never one range read across the whole
-period.** The reference window is the only place that input contract is
-claimed to hold; a range read spanning the gaps between sessions also
-reads the extended-hours prints the contract says nothing about, and on
+period.** The reference window is the only place that exposure is
+bounded; a range read spanning the gaps between sessions also reads the
+extended-hours prints outside any window, and on
 the production SPY tree those include an instant carrying two
 disagreeing rows -- a `ConflictingRecords` that aborts a read no session
 needed. Reading exactly the windows `:session_close` reads gives this
@@ -272,17 +272,15 @@ a print from after it expired. A printless date the exchange calendar
 calls open is `:unexpected_gap`, a data gap and not a closure;
 exhausting the walk is `:no_session`.
 
-**What this rule needs of its input.** Early closes need no table, but
-only where the data is regular-session prints alone: under that the last
-print in the window of a 13:00 ET close is the 13:00 one. A provider
-that also serves extended-hours prints breaks this rule silently -- a
-15:59 print on an early-close day is inside the 09:30-16:00 window and
-becomes the settlement price -- and no bound here can catch it, since
-nothing in a `SpotPrice` records which session it came from. The
-production spot tree does serve extended hours and is measured not to
-print inside the exposed window; the `data` module states the requirement,
-what the tree actually provides, and which data kind would make the rule
-structural instead.
+**Exposure.** Early closes need no table, but only where no
+extended-hours print falls inside the window: then the last print in
+the window of a 13:00 ET close is the 13:00 one. A 15:59 print on an
+early-close day would become the settlement price, and no bound here can
+catch it, since nothing in a `SpotPrice` records which session it came
+from. The production spot tree does serve extended hours and is measured
+not to print inside an early-close window; the `data` module promises
+nothing about sessions. The official-close kind parked in status.md
+would make the rule structural.
 
 **Domain.** `cut` must reach the contract's expiry; a cut before it is
 `:no_session_close`. The question this answers is what the contract

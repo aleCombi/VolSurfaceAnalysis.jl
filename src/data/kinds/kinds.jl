@@ -61,7 +61,8 @@ end
     SpotPrice
 
 The underlying's price at `timestamp`. Never carries a missing price:
-a row without one is not an observation.
+a row without one is not an observation. Does not record its session:
+a source may print outside regular hours, and nothing here says so.
 """
 struct SpotPrice
     underlying::Underlying

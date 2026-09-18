@@ -162,10 +162,11 @@ end
 
 @testset "settlement_price: an extended-hours print defeats the early close" begin
     # THIS TEST DOES NOT BLESS THE NUMBER IT ASSERTS. It pins what a
-    # *violated input contract* produces, which is the whole reason the
-    # contract is written down (`market_data.md`, the `SpotPrice` kind;
-    # `settlement_price`'s docstring). `SpotPrice` providers must serve
-    # regular-session prints only. Nothing enforces it -- the parquet spot
+    # *violated assumption* produces, which is the whole reason the
+    # exposure is written down (the `backtest` module doc and
+    # `settlement_price`'s docstring; the `SpotPrice` docstring says the
+    # record carries no session). The rule assumes no extended-hours print
+    # inside the window. Nothing enforces it -- the parquet spot
     # reader selects every row its partitions hold -- and nothing in a
     # `SpotPrice` records which session a print came from, so the rule
     # cannot detect the violation and no narrower window rescues it: on a
