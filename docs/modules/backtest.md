@@ -9,32 +9,28 @@ ledger, which owns the book it folds.
 
 ## What the engine does per tick
 
-At each tick the lots that fell due since the previous tick are settled
-first, one `record_expiry!` per lot, so a settled lot is gone before the
-policy looks. A lot with no honest settlement price stays open and
-visible, and `lot.contract.expiry <= t` is how a policy tells it is
-holding one. The agent is then asked for its policy and the policy for
-its orders, on the ledger's own book.
+1. **Settle** the lots that fell due since the previous tick, one
+   `record_expiry!` per lot, so the policy cannot see them. A lot with
+   no honest settlement price stays open and visible.
+2. **Ask** the agent for its policy, and the policy for its orders, on
+   the ledger's own book.
+3. **Price** every leg of each order before anything is written: the
+   contract must still trade, then its quote, its fill price, its
+   underlying's spot, and last the commission of the whole order. A leg
+   that cannot be priced is a named failure, so no partial structure
+   reaches the ledger.
+4. **Book** each order as one transaction, recording the ledger
+   sequence its decision saw, captured after this tick's expiries, so
+   the second order of a tick did not see the first's fills.
+5. **Check** that the fills just written agree with the order record on
+   leg, contract, side, intent, group and quantity, and that the price
+   is the fill rule applied to an observation taken before the
+   decision. The same check runs when a run is saved and loaded.
 
-Every leg of an order is priced before anything is written: the
-contract must still trade at `t`, then its quote, its fill price, the
-spot of its own underlying, and last the commission of the whole order.
-A leg that cannot be priced is a named failure, so no partial structure
-reaches the ledger. Each order is booked as one transaction and records
-the ledger sequence its decision saw, captured after the tick's
-expiries, so the second order of a tick did not see the first's fills.
-After each order is booked, the engine checks that the fills it wrote
-agree with the order record: each fill names a real leg, matches it on
-contract, side, intent and group, stays within its quantity, and carries
-the price the fill rule gives on an observation taken before the
-decision. The same check runs over the whole ledger when a run is saved
-and when it is loaded.
-
-After the last tick, settlement runs once more at the window end, which
-may be later than the last tick. Lots still open after it stay open.
-Every lot a settlement pass could not price leaves the run as a
-`RunFailure` on the result: no event was written, so no replay of the
-journal can recover it.
+After the last tick, settlement runs once more at the window end. Lots
+still open after it stay open, and every lot a settlement pass could
+not price leaves the run as a `RunFailure`, since no event was written
+for it.
 
 ## The venue
 
