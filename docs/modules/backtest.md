@@ -10,18 +10,22 @@ ledger, which owns the book it folds.
 ## What the engine does per tick
 
 1. **Settle** the lots that fell due since the previous tick, one
-   `record_expiry!` per lot, so the policy cannot see them. A lot with
-   no honest settlement price stays open and visible.
-2. **Ask** the agent for its policy, and the policy for its orders, on
-   the ledger's own book.
-3. **Price** every leg of each order before anything is written: the
-   contract must still trade, then its quote, its fill price, its
-   underlying's spot, and last the commission of the whole order. A leg
-   that cannot be priced is a named failure, so no partial structure
-   reaches the ledger.
-4. **Book** each order as one transaction, recording the ledger
-   sequence its decision saw, captured after this tick's expiries, so
-   the second order of a tick did not see the first's fills.
+   `record_expiry!` per lot, so the policy cannot see them. A lot whose
+   settlement price is not in the data stays open and visible.
+2. **Ask** the agent for its policy, and the policy for its orders,
+   handing both the book: the open lots and the cash as the ledger has
+   them at this tick.
+3. **Price** every leg of each order before anything is written. For
+   each leg the engine checks that the contract still trades, finds its
+   quote, computes its fill price, and finds its underlying's spot; then
+   it computes the commission of the whole order. A leg that fails any
+   of these is a named failure, so no partial structure reaches the
+   ledger.
+4. **Book** each order as one transaction. Its record stores which
+   events existed when the decision was made, the sequence number taken
+   after this tick's settlements and before its first order, so a
+   replay shows what the decision saw and the second order of a tick
+   did not see the first's fills.
 5. **Check** that the fills just written agree with the order record on
    leg, contract, side, intent, group and quantity, and that the price
    is the fill rule applied to an observation taken before the
@@ -111,8 +115,8 @@ contract's expiry, so every lot opened through the engine is in the book
 strictly before its expiry. A caller writing through `record_order!`
 directly forfeits that.
 
-**An unsettleable lot stays open, loudly.** `settlement_price` throws a
-named failure; `settlements` is the one place that catches it, warns
+**A lot that cannot be settled stays open, loudly.** `settlement_price`
+throws a named failure; `settlements` is the one place that catches it, warns
 once with the contract, its expiry and the reason, and returns the lot
 paired with the failure. A bad day must not kill a ten-year run, and it
 must never pass silently. `settlement_price` also refuses a cut that
@@ -151,6 +155,7 @@ partition at a time serves the rule as well as a vector does.
 | **The warning lives in `settlements`** | A caller could forget to report, and the window-end pass is such a caller. |
 | **The loop returns `(ledger, failures)`, not a new type** | A named pair is the shape `settlements`, `session_closes` and `fill_legs` already return. |
 | **`known_to` captured once per tick** | Sequence, not recorded time, bounds what a decision saw. |
+| **The join is checked, never assumed** | The writer is public and a stored run is two tables; a check on every append and on load is what makes the observations evidence rather than decoration. |
 | **Driven by `Agent`** | One loop serves a fixed policy and a learning agent alike; the bare-policy overload is a convenience. |
 | **A declared clock** | The tick grid is part of the experiment; two experiments on the same data with different clocks are different experiments. |
 | **`resolve_quote` reads quotes** | A surface retains only inverted IVs; the raw bid and ask a fill needs live on the chain quote. |
