@@ -1,13 +1,13 @@
 # `backtest` module
 
 The engine runs an agent over the ticks of a clock, with a market-data
-map open, and produces a ledger. The engine computes and the ledger
-records: the engine turns a decision into per-leg prices, fees and
+map open, and produces a [`ledger`](ledger.md). The engine computes and
+the ledger records: the engine turns a decision into per-leg prices, fees and
 observations and makes one call, and every id, group, order record and
 event is minted inside that call. The engine holds no state beyond the
 ledger, which owns the book it folds.
 
-## The tick
+## What the engine does per tick
 
 At each tick the lots that fell due since the previous tick are settled
 first, one `record_expiry!` per lot, so a settled lot is gone before the
@@ -23,8 +23,12 @@ A leg that cannot be priced is a named failure, so no partial structure
 reaches the ledger. Each order is booked as one transaction and records
 the ledger sequence its decision saw, captured after the tick's
 expiries, so the second order of a tick did not see the first's fills.
-The cross-record check between the events and the order journal runs
-after each append.
+After each order is booked, the engine checks that the fills it wrote
+agree with the order record: each fill names a real leg, matches it on
+contract, side, intent and group, stays within its quantity, and carries
+the price the fill rule gives on an observation taken before the
+decision. The same check runs over the whole ledger when a run is saved
+and when it is loaded.
 
 After the last tick, settlement runs once more at the window end, which
 may be later than the last tick. Lots still open after it stay open.
