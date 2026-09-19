@@ -135,18 +135,16 @@ overnight instant.
 
 | Decision | Why |
 |---|---|
-| **The engine computes, the ledger records, for fills and expiries alike** | The engine keeps no parallel journal, no expiry queue, no cached calendar and no `try`/`catch` in the loop; a live loop replaces `fill_legs` with the broker's reports without touching the writer. |
+| **The engine computes, the ledger records, for fills and expiries alike** | A live loop replaces `fill_legs` with the broker's reports without touching the writer. |
 | **Venue as two symbols and a constant, no `VenueSpec`** | Two plain symbols are what config and identity carry; a struct would name the same things twice. |
 | **Fill prices on the increment, rounded against the trader** | The ledger refuses cash that is not whole cents, synthesized quotes are not on the increment, and exchanges only trade on it. The observation keeps the raw quote; the fill carries the rounded price. |
 | **Sessions from the tree, calendar as the check** | A calendar as the source would have to carry every half-day and every ad-hoc closure correctly forever; as the check it only answers whether a printless date was closed, and a wrong answer is loud. |
 | **One `record_expiry!` per lot, never a batched commit** | Two lots expiring at one instant are independent facts; batching would claim an atomicity that does not exist, and one unpriceable lot would reject the others. |
-| **Settlement as a symbol through a table** | The same shape as the fill rules and cost models, for the same reason. |
 | **The venue is stricter than the ledger about expiry** | The ledger accepts a fill effective at the expiry instant; trading has stopped by then. It is also what makes the settlement interval complete. |
 | **The warning lives in `settlements`** | A caller could forget to report, and the window-end pass is such a caller. |
 | **The loop returns `(ledger, failures)`, not a new type** | A named pair is the shape `settlements`, `session_closes` and `fill_legs` already return. |
 | **`known_to` captured once per tick** | Sequence, not recorded time, bounds what a decision saw. |
 | **The join is checked, never assumed** | The writer is public and a stored run is two tables; a check on every append and on load is what makes the observations evidence rather than decoration. |
-| **Driven by `Agent`** | One loop serves a fixed policy and a learning agent alike; the bare-policy overload is a convenience. |
 | **A declared clock** | The tick grid is part of the experiment; two experiments on the same data with different clocks are different experiments. |
 | **`resolve_quote` reads quotes** | A surface retains only inverted IVs; the raw bid and ask a fill needs live on the chain quote. |
 
