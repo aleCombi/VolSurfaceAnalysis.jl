@@ -50,17 +50,18 @@ every underlying the contract table lists trades in penny increments at
 every premium, so there is nothing to choose. A combo order fills whole
 or not at all, as a guaranteed combo does at IBKR.
 
-`:cross_spread` takes the ask on a buy and the bid on a sale, rounded
-onto the increment against the trader. It is conservative on purpose: IBKR
-fills an all-option combo at one net price, often inside the legs' own
-spreads, so crossing every leg pays more than the real venue would.
-Margin is not modelled, because there is no capital base for a margin
-rule to bind against.
+The one fill rule today is `:cross_spread`: a buy takes the ask and a
+sale the bid, rounded onto the increment against the trader. It is
+conservative on purpose: IBKR fills an all-option combo at one net
+price, often inside the legs' own spreads, so crossing every leg pays
+more than the real venue would. The cost models are `:none` and
+`:ibkr_pro_us_options`, IBKR Pro's fixed-rate schedule with its
+per-order minimum. Margin is not modelled, because there is no capital
+base for a margin rule to bind against.
 
-One observation per leg is recorded, the quote and the spot the fill
-saw, so the join between a fill and its order is checked rather than
-assumed. `:broker_execution` names a price the broker reported; its
-observation is kept and never consulted.
+Beside each fill the venue records what it priced from: the quote's bid
+and ask and the underlying's spot, with their timestamps. That
+observation is what the join check recomputes the fill price from.
 
 ## Settlement
 
