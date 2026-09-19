@@ -38,15 +38,20 @@ for it.
 
 ## The venue
 
-Shaped like Interactive Brokers, as a fill rule and a cost model, both
-`Experiment` fields in `core_hash` because they are choices, and a tick
-that is a constant because every underlying the contract table lists
-trades in one-cent increments at every premium. Settlement style is a
-contract fact, read per lot from `contract_spec`. A combo order fills
-whole or not at all, as a guaranteed combo does at IBKR.
+The venue is the simulated execution, shaped like Interactive Brokers:
+
+- the rule that turns a leg's quote into its fill price,
+- the model that turns an order into its commission,
+- the price increment fills are rounded to.
+
+The rule and the model are choices, so they are `Experiment` fields in
+`core_hash`. The price increment is fixed in code at one cent, because
+every underlying the contract table lists trades in penny increments at
+every premium, so there is nothing to choose. A combo order fills whole
+or not at all, as a guaranteed combo does at IBKR.
 
 `:cross_spread` takes the ask on a buy and the bid on a sale, rounded
-onto the tick against the trader. It is conservative on purpose: IBKR
+onto the increment against the trader. It is conservative on purpose: IBKR
 fills an all-option combo at one net price, often inside the legs' own
 spreads, so crossing every leg pays more than the real venue would.
 Margin is not modelled, because there is no capital base for a margin
@@ -146,8 +151,8 @@ partition at a time serves the rule as well as a vector does.
 | Decision | Why |
 |---|---|
 | **The engine computes, the ledger records, for fills and expiries alike** | The engine keeps no parallel journal, no expiry queue, no cached calendar and no `try`/`catch` in the loop; a live loop replaces `fill_legs` with the broker's reports without touching the writer. |
-| **Venue as two symbols and a tick, no `VenueSpec`** | Two plain symbols are what config and identity carry; a struct would name the same things twice. |
-| **Fill prices on the tick, rounded against the trader** | The ledger refuses cash that is not whole cents, synthesized quotes are off the tick, and exchanges only trade on it. The observation keeps the raw quote; the fill carries the tick price. |
+| **Venue as two symbols and a constant, no `VenueSpec`** | Two plain symbols are what config and identity carry; a struct would name the same things twice. |
+| **Fill prices on the increment, rounded against the trader** | The ledger refuses cash that is not whole cents, synthesized quotes are not on the increment, and exchanges only trade on it. The observation keeps the raw quote; the fill carries the rounded price. |
 | **Sessions from the tree, calendar as the check** | A calendar as the source would have to carry every half-day and every ad-hoc closure correctly forever; as the check it only answers whether a printless date was closed, and a wrong answer is loud. |
 | **One `record_expiry!` per lot, never a batched commit** | Two lots expiring at one instant are independent facts; batching would claim an atomicity that does not exist, and one unpriceable lot would reject the others. |
 | **Settlement as a symbol through a table** | The same shape as the fill rules and cost models, for the same reason. |
