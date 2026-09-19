@@ -65,20 +65,17 @@ observation is what the join check recomputes the fill price from.
 
 ## Settlement
 
-A contract settles at intrinsic against the session-close print of its
-underlying: the last print inside the settlement session's window,
-standing in for the official closing auction, which is not in the data.
-That is the one stated departure from the facts here; the payoff itself
-is real, intrinsic under exercise by exception. Early assignment and
-physical delivery are not modelled: SPY cash-settles here.
-
-**Sessions come from the spot tree; the calendar is a check.** A date is
-a session when the underlying printed in the 09:30-16:00 ET window on
-it, and its close is the last of those prints, so an early close needs
-no table. A printless date the calendar calls open is a named failure,
-`:unexpected_gap`, never evidence that the exchange was closed; the walk
-back from the listed expiry date is bounded, and exhausting it is
-`:no_session`.
+A contract settles at intrinsic against the last print inside its
+settlement session's window, 09:30 to 16:00 ET. That print stands in
+for the official closing auction, which is not in the data, and it is
+the one stated departure from the facts here; the payoff itself is
+real, intrinsic under exercise by exception. Early assignment and
+physical delivery are not modelled. Sessions come from the spot tree: a
+date is a session when the underlying printed in the window, so an
+early close needs no table. The exchange calendar answers one question
+only, whether a printless date was closed; a printless date it calls
+open is a named failure, `:unexpected_gap`. The walk back from the
+listed expiry date is bounded, and exhausting it is `:no_session`.
 
 **The exposure.** The last print in the window of a 13:00 ET close is
 the 13:00 one only where no extended-hours print falls inside the
@@ -91,61 +88,48 @@ did. [`data`](data.md) promises nothing about sessions; the
 official-close data kind that would make the rule structural is a
 backlog item in [status](../status.md).
 
-**The window's last print is a completed minute.** A vendor row stamped
-16:00 ET is the 16:00-16:01 minute, after the close; under bar-end
-visibility it becomes visible at 16:01, outside the window, and the
-15:59-16:00 bar, visible at exactly 16:00, is the last print inside it.
+**The bounds of the rule**, each with its reason:
 
-**The window ends at the earlier of 16:00 ET and the contract's own
-expiry.** For the 16:00 ET convention the ticker parser stamps that is
-the session close; for an intraday expiry it is the expiry, so a
-contract never settles at a print from after it stopped existing, which
-would show a lot settled at a future number in the effective-time
-replay. A contract expiring before 09:30 ET on a date the calendar calls
-open has an empty window by construction: that is the AM-settled case,
-named `:pre_open_expiry` rather than blamed on the data. AM settlement
-itself is parked in [status](../status.md).
+- The window ends at the earlier of 16:00 ET and the contract's own
+  expiry, so an intraday expiry never settles at a print from after it
+  stopped existing, which the effective-time replay would show as a lot
+  settled at a future number.
+- A print is a completed minute. Under bar-end visibility the 16:00 row
+  is visible at 16:01, outside the window, and the 15:59 bar is the last
+  print inside it.
+- A contract expiring before 09:30 ET on a date the calendar calls open
+  has an empty window by construction. That is the AM-settled case,
+  named `:pre_open_expiry` rather than blamed on the data; AM settlement
+  itself is parked in [status](../status.md).
+- The settlement instant is the contract's expiry, whichever session
+  the print came from. An expiry is effective at the expiry and recorded
+  at the tick that booked it, the one source of the two replays
+  disagreeing.
+- A lot is examined for settlement once, over the interval since the
+  previous tick. A lot that could not be settled has an answer fixed by
+  its expiry, so re-examining it at every later tick would repeat the
+  same failure. The interval misses nothing because the venue refuses to
+  fill a leg at or after its expiry.
 
-**The settlement instant is the contract's expiry.** When the reference
-print comes from an earlier session, only which print stands in for the
-close moves; the obligation ceased when the contract expired. So an
-expiry is effective at the expiry and recorded at the tick that booked
-it, which is the one source of the two replays disagreeing.
-
-**A lot is examined for settlement exactly once.** `settlements` takes
-the lots falling due in `(prev, t]`. An unsettleable lot stays open, and
-its answer is fixed by its expiry, so a threshold of `expiry <= t` would
-re-derive the same failure at every later tick. The interval misses
-nothing because the venue refuses to fill a leg at or after its
-contract's expiry, so every lot opened through the engine is in the book
-strictly before its expiry. A caller writing through `record_order!`
-directly forfeits that.
-
-**A lot that cannot be settled stays open, loudly.** `settlement_price`
-throws a named failure; `settlements` is the one place that catches it, warns
-once with the contract, its expiry and the reason, and returns the lot
-paired with the failure. A bad day must not kill a ten-year run, and it
+**When the rule cannot answer**, the lot stays open, loudly.
+`settlements` is the one place that catches the failure: it warns once
+with the contract, its expiry and the reason, and the lot leaves the
+run as a `RunFailure`. A bad day must not kill a ten-year run, and it
 must never pass silently. `settlement_price` also refuses a cut that
 does not reach the expiry, `:no_session_close`, so a direct caller gets
-a name rather than a provisional intraday print; the tick loop never
-reaches it.
-
-**An unserved settlement style stops the run.** `UnsupportedSettlement`
-names a contract class nothing here can settle, which every later tick
-would answer the same way, so it is not caught like an unpriceable lot.
-`load_experiment` throws the same type when it reads such a config.
+a name rather than a provisional print. A settlement style no rule
+serves, `UnsupportedSettlement`, stops the run instead, since every
+later tick would answer the same way; `load_experiment` refuses the
+same config up front.
 
 **The session grid is the same rule, enumerated.** `session_closes`
 answers when each session in a window closed, one instant per session,
-and the [`metrics`](metrics.md) module samples its marked curve on it:
-one rule, so the grid a ratio is annualised over and the price a
-contract settles at cannot drift apart. A session counts only when its
-whole window lies inside the bounds; a clipped one is temporal absence.
-It reads one session window at a time, never the gaps between them,
-because the exposure above is bounded inside the windows and the
-production tree holds a disagreeing pair at an overnight instant. Each
-window is consumed once as a stream, so a provider that streams one
-partition at a time serves the rule as well as a vector does.
+and the [`metrics`](metrics.md) module samples its marked curve on it,
+so the grid a ratio is annualised over and the price a contract settles
+at cannot drift apart. A session counts only when its whole window lies
+inside the bounds. It reads one session window at a time, never the
+gaps between them, where the tree holds a disagreeing pair at an
+overnight instant.
 
 ## Decisions
 
