@@ -3,11 +3,12 @@
 Metrics are ordinary functions over two inputs: a marked curve, for
 questions about time, and a vector of dollars per closed trade, for
 questions about trades. A metric's answer is only as honest as its
-sample unit: Sharpe, Sortino, volatility and drawdown observe periods
-of time and annualise by sessions per year; total profit, hit rate and
-profit factor observe trades. Only the curve needs market data, and
-only where the book is not flat; everything else is a function of the
-ledger.
+sample unit: Sharpe, Sortino and volatility observe periods of time
+and annualise by sessions per year, drawdown observes the path in
+dollars, and total profit, hit rate and profit factor observe trades.
+Only the curve needs market data, the spot tree for its session grid
+and quotes or surfaces to mark an open book; everything else is a
+function of the ledger.
 
 ## The marked curve
 
@@ -67,9 +68,9 @@ the symbol is the whole contract. Every metric takes both inputs and
 reads whichever is its sample unit, so when there is no curve the whole
 optional set is omitted, `profit_factor` included though it needs no
 curve. An absent key means not computed; `NaN` means computed and
-undefined, as Sharpe is on one session change. The only source of an
-absent curve is `load_run` reading a run stored without one, and
-`load_run` computes no metrics, so that arm exists for a direct caller.
+undefined, as Sharpe is on one session change. No runner produces an
+absent curve today, `marked_curve` always builds one and `load_run`
+computes no metrics, so that arm serves a direct caller.
 
 `trade_pnl` gives one dollar figure per closed structure by default, or
 per leg on request. The pairing is the ledger's own, `Match` and
@@ -104,7 +105,7 @@ vector is reconstructible.
   entries are named tuples selected by name; Optim.jl's singleton
   instances are what a table graduates to when each entry needs its own
   dispatch, which five reductions do not.
-- **`Union{MarkedCurve,Nothing}` for a result that could not be
-  computed.** Julia manual FAQ: `nothing` is the absence of a value,
+- **`Union{MarkedCurve,Nothing}` for an absent curve.** Julia manual
+  FAQ: `nothing` is the absence of a value,
   `missing` an unobserved observation. An empty curve would conflate
   not computed with computed and empty.

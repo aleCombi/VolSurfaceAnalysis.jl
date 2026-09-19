@@ -15,8 +15,9 @@ it), `:no_executable_side` (the side the fill rule needs is `missing`),
 `:no_spot` (the underlying is served but has no spot at `t`). From
 settlement, which is pricing a leg at intrinsic: `:unexpected_gap`,
 `:no_session`, `:no_session_close` and `:pre_open_expiry`, as
-[`settlement_price`](@ref) defines them. Nothing serving the selector
-stays `UnservedSelector`, thrown by `at`.
+[`settlement_price`](@ref) defines them. From marking: `:no_mark`, as
+`mark_price` defines it. Nothing serving the selector stays
+`UnservedSelector`, thrown by `at`.
 """
 struct UnpriceableLeg <: Exception
     contract::ContractKey
@@ -163,6 +164,8 @@ function _check_fill_join(e::Fill, r::OrderRecord, k::Int, tick_cents::Int;
     quantity = something(cumulative_quantity, e.quantity)
     quantity <= leg.quantity || throw(JoinViolation(:quantity, id,
         "fills of order leg $(e.order_leg_id) sum to $quantity of $(leg.quantity) ordered"))
+    # A price the broker reported: no observation reproduces it, so it is
+    # not recomputed, and it is deliberately not a rule in `_FILL_RULES`.
     e.fill_rule == :broker_execution && return nothing
     obs = r.observations[k]
     obs.quote_at <= r.decided_at || throw(JoinViolation(:quote_at, id,
@@ -255,9 +258,9 @@ end
                  cost_model = :ibkr_pro_us_options) -> (ledger, failures)
 
 Walk the ticks of `clock` in `[from, to]`, or the agent's `tick_times`
-schedule when it returns one. Per tick: settle the lots that fell due
-since the previous tick ([`settlements`](@ref), then the ledger's
-[`record_expiry!`](@ref)), build the cut, ask the agent for its policy
+schedule when it returns one. Per tick: build the cut, settle the lots
+that fell due since the previous tick through it ([`settlements`](@ref),
+then the ledger's [`record_expiry!`](@ref)), ask the agent for its policy
 and the policy for orders on the ledger's own book, price every leg of
 each order ([`fill_legs`](@ref)), book it as one transaction
 ([`record_order!`](@ref)) with `known_to` captured after the tick's

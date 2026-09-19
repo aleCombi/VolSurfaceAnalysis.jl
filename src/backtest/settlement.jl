@@ -107,6 +107,9 @@ function session_closes(m, u::Underlying, from::DateTime, to::DateTime)
     # named gap, and would read instants no session covers.
     d, last_d = _et_date(from), _et_date(to)
     while d <= last_d
+        # The calendar is asked first here, unlike `_session_close`, which
+        # reads the tree first: a date the calendar calls closed is not a
+        # session even if the tree printed on it (pinned by a test).
         if !_closed_on(d)
             window_start = et_to_utc(d, _SESSION_OPEN)
             window_end   = et_to_utc(d, _SESSION_CLOSE)
@@ -199,9 +202,9 @@ would make the rule structural.
 **Domain.** `cut` must reach the contract's expiry; a cut before it is
 `:no_session_close`. An expiry earlier than 09:30 ET on a listed date
 the calendar calls open is `:pre_open_expiry`, the AM-settled case no
-rule here serves; at exactly 09:30 ET the window is one instant and
-settles at the opening print. When the listed date is closed the walk
-back proceeds as for any closed date.
+rule here serves; at exactly 09:30 ET the window is one instant, and a
+print visible at it settles the contract. When the listed date is closed
+the walk back proceeds as for any closed date.
 """
 function settlement_price(rule::Symbol, cut::TimeCut, contract::ContractKey, t::DateTime)::Float64
     f = get(_SETTLEMENT_RULES, rule) do
@@ -226,8 +229,12 @@ walks `open_lots` in opening-fill order so a replay reproduces.
 
 The rule is per lot: `contract_spec(underlying).settlement` picks it,
 and a style no rule serves throws [`UnsupportedSettlement`](@ref). The
-one place [`UnpriceableLeg`](@ref) is caught: a `@warn` per unsettled
-lot, with the contract, its expiry and the reason.
+one place a settlement failure is caught: a `@warn` per unsettled lot,
+with the contract, its expiry and the reason. The interval is open
+below, so a lot whose expiry is at or before `prev` is never examined;
+through the engine none can be, since the venue refuses a fill at or
+after expiry, but a lot written through `record_order!` directly at its
+expiry instant is legal to the ledger and escapes every interval.
 """
 function settlements(cut::TimeCut, book::Book, prev::DateTime, t::DateTime)
     settled   = Tuple{Lot,Float64}[]

@@ -109,7 +109,8 @@ backlog item in [status](../status.md).
   previous tick. A lot that could not be settled has an answer fixed by
   its expiry, so re-examining it at every later tick would repeat the
   same failure. The interval misses nothing because the venue refuses to
-  fill a leg at or after its expiry.
+  fill a leg at or after its expiry; a lot written through
+  `record_order!` directly at its expiry instant escapes it.
 
 **When the rule cannot answer**, the lot stays open, loudly.
 `settlements` is the one place that catches the failure: it warns once
@@ -126,10 +127,13 @@ same config up front.
 answers when each session in a window closed, one instant per session,
 and the [`metrics`](metrics.md) module samples its marked curve on it,
 so the grid a ratio is annualised over and the price a contract settles
-at cannot drift apart. A session counts only when its whole window lies
-inside the bounds. It reads one session window at a time, never the
-gaps between them, where the tree holds a disagreeing pair at an
-overnight instant.
+at cannot drift apart on any date the exchange was open. The one
+asymmetry: the grid skips a date the calendar calls closed even if the
+tree printed on it, while settlement would read such a print; on the
+real tree a closed exchange prints nothing, so the two agree there. A
+session counts only when its whole window lies inside the bounds. It
+reads one session window at a time, never the gaps between them, where
+the tree holds a disagreeing pair at an overnight instant.
 
 ## Decisions
 
