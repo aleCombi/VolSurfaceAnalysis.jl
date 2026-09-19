@@ -234,12 +234,6 @@ cross-run viz recipes.
 
 Per-PR checklists; a PR deletes its own when it lands.
 
-- **backtest + metrics.** Future work out. `parse_polygon_ticker` in
-  backtest.md is `parse_massive_ticker`. metrics.md gives `marked_curve`
-  a return type it lacks, and it and `dispatch.jl` explain the
-  nothing-curve arm with causes that cannot happen: only `load_run`
-  produces one. The pairing rule omits `Expiry`. `_ADHOC_CLOSURES` keeps
-  the const and drops the promise. `settlement.jl`'s 55-line header.
 - **experiment + persistence.** Future work out. experiment.md says it
   owns one struct and lists two; it and `experiment.jl` give the wrong
   nothing-curve cause; no Conventions consulted section (rule 5).

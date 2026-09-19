@@ -1,12 +1,4 @@
-# MarkedCurve: portfolio profit through time, sampled at session closes.
-# The path metrics read it; the trade metrics read per-trade dollars
-# instead (`trades.jl`). Built by `marked_curve` in `marks.jl`, which is
-# the only place market data enters this module.
-#
-# Two pairs of parallel vectors and nothing else: the sessions that were
-# marked, and the sessions that could not be. There is no hierarchy, no
-# per-point wrapper and no sentinel -- a session is in exactly one of the
-# two pairs, so an unanswerable mark cannot be mistaken for a value.
+# MarkedCurve: marked profit at session closes, and its derived views.
 
 """
     cents_to_usd(cents::Integer) -> Float64
@@ -27,17 +19,8 @@ cents_to_usd(cents::Integer)::Float64 = cents / 100
     MarkedCurve
 
 Marked portfolio profit at each session close of an evaluation window,
-in USD, measured from zero. The record of profit *through time*, as round
-trips are the record of realised trade outcomes.
-
-At every point,
-
-> marked profit = realised profit + unallocated fees + unrealised profit
-
-which is the ledger's cash at that instant plus the value of the open
-book marked to market (see [`marked_curve`](@ref) for why those are the
-same number). It is zero-based, not an account value: the codebase has no
-deposited capital and none is invented here.
+in USD, measured from zero: the ledger's cash at that instant plus the
+open book marked to market ([`marked_curve`](@ref)).
 
 # Fields
 - `timestamps::Vector{DateTime}` -- the session closes that were marked, ascending.

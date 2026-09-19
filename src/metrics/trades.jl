@@ -1,7 +1,4 @@
-# The trade side of the metrics: the ledger's round trips grouped into one
-# dollar figure per closed structure. A plain `Vector{Float64}`, not a
-# wrapper: the questions it answers (how many, how often positive, gross
-# wins over gross losses, the realised total) need nothing but the numbers.
+# trade_pnl: the ledger's round trips as one dollar figure per closed trade.
 
 """
     trade_pnl(L::Ledger; unit::Symbol = :structure) -> Vector{Float64}

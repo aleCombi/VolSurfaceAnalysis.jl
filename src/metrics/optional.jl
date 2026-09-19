@@ -1,29 +1,5 @@
-# Optional symbol-addressable metrics. Every one takes the same two
-# arguments -- per-trade dollars and the marked curve -- and reads
-# whichever is its sample unit, ignoring the other. The dispatch table in
-# `dispatch.jl` carries only the defaults, so every symbol has a complete,
-# callable contract on its own.
-#
-# Uniform arity is the deliberate choice: the dispatcher hands both inputs
-# to every metric rather than recording per-metric which one it consumes.
-# The cost is an ignored argument in each body; the benefit is that adding
-# a metric is one table row and one function, with nothing to keep in
-# sync. What a metric's sample unit is, is stated in its docstring and
-# pinned by its tests.
-#
-# Sampling convention. The four path metrics read a `MarkedCurve`: one
-# observation per pair of adjacent marked session closes, so the unit is a
-# trading session and `periods_per_year = 252` is the number of sessions
-# in a year -- which is what annualising by the square root of 252 has
-# always claimed. `profit_factor` reads per-trade dollars, where the unit
-# is a trade and no annualisation happens at all.
-#
-# Capital is fixed at 1 and is not an argument. At a zero risk-free rate a
-# constant capital base scales every period's profit and its standard
-# deviation equally, so it cancels from every ratio here: Sharpe on dollar
-# changes is Sharpe on returns for any positive constant capital. A kwarg
-# that cannot change a result would only be a contract to maintain;
-# `test_optional.jl` pins the cancellation instead.
+# The optional metrics, requested by symbol. Each takes both inputs and
+# reads whichever is its sample unit; capital is 1 and cancels.
 
 using Statistics: mean, std
 

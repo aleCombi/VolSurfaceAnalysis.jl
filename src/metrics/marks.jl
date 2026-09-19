@@ -1,25 +1,4 @@
-# Building the marked curve: the one place in `metrics` that reads market
-# data. Everything else in the module is a pure function over a
-# `MarkedCurve` or over per-trade dollars.
-#
-# The identity the builder rests on. At an instant `t`,
-#
-#   marked profit = realised profit + unallocated fees + unrealised profit
-#
-# and the first two terms are exactly the ledger's cash plus the cost
-# basis of whatever is still open:
-#
-#   cash(t) = realised + unallocated - SUM side_sign * unit_price * mult * qty
-#   unrealised = SUM side_sign * (mark - unit_price) * mult * qty
-#
-# so the cost basis cancels and
-#
-#   marked profit = cash(t) + SUM side_sign * mark * mult * qty
-#
-# That is why cash alone overstates a short book -- the opening premium is
-# a receipt against a liability, and the second term is that liability --
-# and why a flat book needs no market data at all: the sum is empty and
-# the marked profit is the realised total.
+# The marked curve: the one place in metrics that reads market data.
 
 # Whether the map has a provider for a kind at all. `entry` errors when it
 # does not, and an experiment configuring no surface is an ordinary
@@ -37,10 +16,10 @@ _has_provider(c::TimeCut, ::Type{R}) where {R} = _has_provider(c.inner, R)
 # carries its own `spot` and its slices their own cached `tau`, so pricing
 # off a stale one values the contract at *that* instant, not at `t`. Marking
 # successive sessions from one stale surface is carrying a price forward,
-# which is the thing the curve refuses to do (see `metrics.md`, "What an
-# unmarkable point does"): it would leave `n_unmarked` at zero while the
-# profit never moved. A surface that could not be built at `t` is a fallback
-# that did not fire, and the session breaks instead.
+# which the curve refuses to do (the metrics module doc): it would leave
+# `n_unmarked` at zero while the profit never moved. A surface that could
+# not be built at `t` is a fallback that did not fire, and the session
+# breaks instead.
 function _surface_mark(cut::TimeCut, c::ContractKey, t::DateTime)::Union{Nothing,Float64}
     _has_provider(cut, VolatilitySurface) || return nothing
     s = try
@@ -175,6 +154,10 @@ function marked_curve(L::Ledger, data, u::Underlying,
             continue
         end
         cut = TimeCut(data, t)
+        # marked profit = cash + SUM side_sign * mark * mult * qty. Cash
+        # already carries each open lot's cost basis with the opposite
+        # sign, so the unrealised term needs only the marks, and a flat
+        # book needs no market data at all.
         open_value = 0.0
         reason = nothing
         for lot in open_lots(book)
